@@ -211,6 +211,8 @@ def main(args):
                                                         model,
                                                         args.store_en_hiddens,
                                                         args.en_hidden_path)
+    else:
+        all_train_cands_embeds = None
     train_cands_indices = compute_cands_indices(train_loaders, model,
                                                 train_entity_loaders,
                                                 args.num_cands,
@@ -222,6 +224,8 @@ def main(args):
                                                     model,
                                                     args.store_en_hiddens,
                                                     args.en_hidden_path)
+    else:
+        all_val_cands_embeds = None
     val_cands_indices = compute_cands_indices(val_loaders, model,
                                               val_entity_loaders,
                                               args.num_cands,
@@ -233,6 +237,8 @@ def main(args):
                                                    model,
                                                    args.store_en_hiddens,
                                                    args.en_hidden_path)
+    else:
+        all_test_cands_embeds = None
     test_cands_indices = compute_cands_indices(test_loaders, model,
                                                test_entity_loaders,
                                                args.num_cands,
@@ -301,21 +307,37 @@ def load_domain_data(data_dir):
     train_doc = []
     val_doc = []
     test_doc = []
-    for train_domain in train_domains:
-        domain_mentions = load_domain_mentions(train_domain, 'train')
-        domain_entities = load_domain_entities(data_dir, train_domain)
-        train_mentions.append(domain_mentions)
-        train_doc.append(domain_entities)
-    for val_domain in val_domains:
-        domain_mentions = load_domain_mentions(val_domain, 'val')
-        domain_entities = load_domain_entities(data_dir, val_domain)
-        val_mentions.append(domain_mentions)
-        val_doc.append(domain_entities)
-    for test_domain in test_domains:
-        domain_mentions = load_domain_mentions(test_domain, 'test')
-        domain_entities = load_domain_entities(data_dir, test_domain)
-        test_mentions.append(domain_mentions)
-        test_doc.append(domain_entities)
+    cached_path = "./data/save_cands"
+    try:
+        train_mentions = torch.load(os.path.join(cached_path, "train_mentions.pt"))
+        train_doc = torch.load(os.path.join(cached_path, "train_mentions.pt"))
+        val_mentions = torch.load(os.path.join(cached_path, "val_mentions.pt"))
+        val_doc = torch.load(os.path.join(cached_path, "val_mentions.pt"))
+        test_mentions = torch.load(os.path.join(cached_path, "test_mentions.pt"))
+        test_doc = torch.load(os.path.join(cached_path, "test_mentions.pt"))
+
+    except:
+        for train_domain in train_domains:
+            domain_mentions = load_domain_mentions(train_domain, 'train')
+            domain_entities = load_domain_entities(data_dir, train_domain)
+            train_mentions.append(domain_mentions)
+            train_doc.append(domain_entities)
+        for val_domain in val_domains:
+            domain_mentions = load_domain_mentions(val_domain, 'val')
+            domain_entities = load_domain_entities(data_dir, val_domain)
+            val_mentions.append(domain_mentions)
+            val_doc.append(domain_entities)
+        for test_domain in test_domains:
+            domain_mentions = load_domain_mentions(test_domain, 'test')
+            domain_entities = load_domain_entities(data_dir, test_domain)
+            test_mentions.append(domain_mentions)
+            test_doc.append(domain_entities)
+        torch.save(train_mentions, os.path.join(cached_path, "train_mentions.pt"))
+        torch.save(train_doc, os.path.join(cached_path, "train_doc.pt"))
+        torch.save(val_mentions, os.path.join(cached_path, "val_mentions.pt"))
+        torch.save(val_doc, os.path.join(cached_path, "val_doc.pt"))
+        torch.save(test_mentions, os.path.join(cached_path, "test_mentions.pt"))
+        torch.save(test_doc, os.path.join(cached_path, "test_doc.pt"))
 
     return train_mentions, val_mentions, test_mentions, train_doc, val_doc, \
            test_doc

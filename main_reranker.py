@@ -157,6 +157,10 @@ def main(args):
     # writer = SummaryWriter()
     logger = Logger(args.model + '.log', True)
     logger.log(str(args))
+    if args.resume_training:
+        run = wandb.init(project = "hard-nce-el", resume = "must", id = args.run_id, config = args)
+    else:
+        run = wandb.init(project="hard-nce-el", config = args)
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     if args.type_bert == 'base':
@@ -284,6 +288,8 @@ def main(args):
                                'Average Loss {:8.4f}'.format(
                         step_num, num_train_steps, epoch,
                         batch_idx + 1, len(loader_train), avg_loss))
+                    wandb.log({"average loss": avg_loss, "epoch": epoch})
+
                     logging_loss = tr_loss
 
                 #  eval_result = micro_eval(args, model, loader_val)
@@ -304,6 +310,8 @@ def main(args):
             val_result['num_correct'],
             val_result['num_total_norm'],
             newline=False))
+        wandb.log({"unnormalized acc": val_result['acc_unorm'], "normalized acc": ['acc_norm']})
+        
         if val_result['acc_unorm'] > best_val_perf:
             logger.log('      <----------New best val perf: %g -> %g' %
                        (best_val_perf, val_result['acc_unorm']))
