@@ -8,12 +8,11 @@
 #SBATCH --cpus-per-task=1
 #SBATCH --partition=P1
 
-iterations=1 # 총 몇 번이나 연속으로 돌릴 것인지
-# jobid=$(sbatch --parsable train_biencoder_sweep.sh)
-jobid=321937
+iterations=2 # 총 몇 번이나 연속으로 돌릴 것인지
+# jobid=$(sbatch --parsable reranker_restart.sh)
+jobid=323420
 for((i=0; i<$iterations; i++)); do           
     dependency="afterany:${jobid}"
     echo "dependency: $dependency"
-    jobid=$(sbatch --dependency=$dependency run.sh)
-    dependency=",${dependency}afterany:${jobid}"
+    jobid=$(sbatch --parsable --dependency=$dependency reranker_restart.sh)
 done

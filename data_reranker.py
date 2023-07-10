@@ -5,11 +5,11 @@ import statistics as stat
 import sys
 import torch
 import util
-
+import numpy as np
 from collections import Counter
 from torch.utils.data import Dataset, DataLoader
 from util import Logger as BasicLogger
-
+from data_retriever import distribution_sample
 
 class BasicDataset(Dataset):
 
@@ -35,20 +35,52 @@ class BasicDataset(Dataset):
     def __getitem__(self, index):
         raise NotImplementedError
 
-    def prepare_candidates(self, mention, candidates):
-        xs = candidates['candidates'][:self.max_num_candidates]
+    def prepare_candidates(self, mention, candidates, args):
+        # xs = candidates['candidates'][:self.max_num_candidates]
+        xs = candidates['candidates']
         y = mention['label_document_id']
 
         if self.is_training:
             # At training time we can include target if not already included.
             if not y in xs:
                 xs.append(y)
+            if args.type_cands == 'fixed_negative':
+                xs = [y] + [x for x in xs if x != y]  # Target index always 0
+            elif args.type_cands == 'hard_negative':
+                device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+                num_hards = len(xs)
+                scores = torch.tensor(candidates['scores'], dtype = float)
+                probs = scores.softmax(dim=0).unsqueeze(0)
+                hard_cands = distribution_sample(probs, args.num_cands,
+                                                    device)
+                xs = np.array(xs)
+                xs = xs[hard_cands.squeeze(0)]
+                
+                xs = [y] + [x for x in xs if x != y]  # Target index always 0
+            elif args.type_cands == 'mixed_negative':
+                device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+                num_fixed = int(args.num_cands * args.cands_ratio)
+                num_hards = args.num_cands - num_fixed
+                xs = [y] + [x for x in xs if x != y]  # Target index always 0
+                xs = np.array(xs)
+                fixed_xs = xs[:num_fixed]
+                scores = torch.tensor(candidates['scores'], dtype = float)[num_fixed:]
+                probs = scores.softmax(dim=0)
+                probs = probs.unsqueeze(0)
+                a = distribution_sample(probs, num_hards, device).squeeze(0)
+                hard_cands = torch.tensor([num_fixed]) + distribution_sample(probs, num_hards, device).squeeze(0)
+                
+                hard_xs = xs[hard_cands.squeeze(0)]
+                xs = np.concatenate((fixed_xs, hard_xs))
+
+            return xs[:args.num_cands]
         else:
             # At test time we assume candidates already include target.
             assert y in xs
+            xs = [y] + [x for x in xs if x != y]  # Target index always 0
+            return xs[:self.max_num_candidates]
 
-        xs = [y] + [x for x in xs if x != y]  # Target index always 0
-        return xs[:self.max_num_candidates]
+            
 
     def cull_samples(self, samples):
         self.num_samples_original = len(samples[0])
@@ -97,7 +129,7 @@ class BasicDataset(Dataset):
 class UnifiedDataset(BasicDataset):
     def __init__(self, documents, samples, tokenizer, max_len,
                  max_num_candidates,
-                 is_training, indicate_mention_boundaries=False):
+                 is_training, indicate_mention_boundaries=False, args=None):
         super(UnifiedDataset, self).__init__(documents, samples, tokenizer,
                                              max_len, max_num_candidates,
                                              is_training,
@@ -105,6 +137,7 @@ class UnifiedDataset(BasicDataset):
         self.max_len = max_len // 2
         self.max_len_mention = self.max_len - 2  # cls and sep
         self.max_len_candidate = self.max_len - 2  # cls and sep
+        self.args = args
 
     def __getitem__(self, index):
         mention = self.samples[0][index]
@@ -122,7 +155,7 @@ class UnifiedDataset(BasicDataset):
         candidates_masks = torch.zeros((self.max_num_candidates,
                                         self.max_len))
 
-        candidate_document_ids = self.prepare_candidates(mention, candidates)
+        candidate_document_ids = self.prepare_candidates(mention, candidates, self.args)
 
         for i, candidate_document_id in enumerate(candidate_document_ids):
             candidate_window = self.get_candidate_prefix(candidate_document_id)
@@ -175,7 +208,7 @@ class FullDataset(BasicDataset):
 def get_loaders(data, tokenizer, max_len, max_num_candidates, batch_size,
                 num_workers, indicate_mention_boundaries,
                 max_num_cands_val,
-                use_full_dataset=True, macro_eval=True):
+                use_full_dataset=True, macro_eval=True, args = None):
     (documents, samples_train,
      samples_val, samples_test) = data
     print('get train loaders')
@@ -186,7 +219,7 @@ def get_loaders(data, tokenizer, max_len, max_num_candidates, batch_size,
     else:
         dataset_train = UnifiedDataset(documents, samples_train, tokenizer,
                                        max_len, max_num_candidates, True,
-                                       indicate_mention_boundaries)
+                                       indicate_mention_boundaries, args)
 
     loader_train = DataLoader(dataset_train, batch_size=batch_size,
                               shuffle=True, num_workers=num_workers)

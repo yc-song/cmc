@@ -361,8 +361,12 @@ class UnifiedRetriever(nn.Module):
                                             candidate_token_ids,
                                             candidate_masks)
             # print(candidates_embeds.shape) # (1, 65, 128, 768)
-            if self.attention_type == 'extend_multi':
-                scores = self.extend_multi(mention_embeds, candidates_embeds)
+            if self.attention_type == 'extend_multi' or self.attention_type == 'extend_multi_dot':
+                if self.attention_type == 'extend_multi_dot':
+                    dot = True
+                else: 
+                    dot = False
+                scores = self.extend_multi(mention_embeds, candidates_embeds, dot)
             else:
                 if self.attention_type == 'soft_attention':
                     scores = self.attention(candidates_embeds, mention_embeds,
@@ -388,11 +392,20 @@ class extend_multi(nn.Module):
         self.transformerencoderlayer = torch.nn.TransformerEncoderLayer(self.embed_dim, self.num_heads, batch_first = True).to(self.device)
         self.transformerencoder = torch.nn.TransformerEncoder(self.transformerencoderlayer, self.num_layers).to(self.device)
         self.linearhead = torch.nn.Linear(self.embed_dim, 1).to(self.device)
-    def forward(self, xs, ys):
+        self.token_type_embeddings = nn.Embedding(2, self.embed_dim).to(self.device)
+    def forward(self, xs, ys, dot = False):
         xs = xs.to(self.device) # (batch size, 1, embed_dim)
-        ys = ys.squeeze(dim = -2).to(self.device) #(batch_size, cands, 1, embed_dim)
-        input = torch.cat([xs, ys], dim = 1)
+        ys = ys.squeeze(dim = -2).to(self.device) #(batch_size, cands, embed_dim)
+        token_type_xs = torch.zeros(xs.size(0), xs.size(1)).int().to(self.device)
+        token_embedding_xs = self.token_type_embeddings(token_type_xs)
+        token_type_ys = torch.ones(ys.size(0), ys.size(1)).int().to(self.device)
+        token_embedding_ys = self.token_type_embeddings(token_type_ys)
+        input = torch.cat([xs + token_embedding_xs, ys + token_embedding_ys], dim = 1)
         attention_result = self.transformerencoder(input)
-        scores = self.linearhead(attention_result[:,1:,:])
-        scores = scores.squeeze(-1)
+        if dot:
+            scores = torch.bmm(attention_result[:,0,:].unsqueeze(1), attention_result[:,1:,:].transpose(2,1))
+            scores = scores.squeeze(-2)
+        else:
+            scores = self.linearhead(attention_result[:,1:,:])
+            scores = scores.squeeze(-1)
         return scores

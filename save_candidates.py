@@ -14,7 +14,7 @@ import torch.nn as nn
 
 def get_all_entity_hiddens(en_loaders, model,
                            store_en_hiddens=False,
-                           en_hidden_path=None, load = False):
+                           en_hidden_path=None):
     """
     get  all the entity embeddings
     :return:
@@ -66,7 +66,7 @@ def compute_cands_indices(men_loaders, model, en_loaders,
         len_entity_loader = len(en_loaders[i])
         cands_indices = []
         with torch.no_grad():
-            for t, batch in tqdm(enumerate(mention_loader), total = len(mention_loader)):
+            for t, batch in tqdm(enumerate(mention_loader)):
                 if not too_large:
                     scores = model(batch[0], batch[1], None,
                                    None).detach()
@@ -114,8 +114,6 @@ def save_candidates(all_cands_indices, cands_dir, doc, all_mentions, part):
             candidate['mention_id'] = mentions[j]['mention_id']
             candidate['candidates'] = all_entities[cands_indices[j]].tolist()
             cands.append(candidate)
-    if not os.path.exists(os.path.join(cands_dir, 'candidates_%s.json' % part)):
-        os.makedirs(os.path.join(cands_dir, 'candidates_%s.json' % part))
     with open(os.path.join(cands_dir, 'candidates_%s.json' % part), 'w') as f:
         for item in cands:
             f.write('%s\n' % json.dumps(item))
@@ -194,7 +192,7 @@ def main(args):
                                    shuffle=False)
         val_entity_loaders.append(entity_loader)
     for i in range(len(test_mentions)):
-        mentions = test_mentions[i] 
+        mentions = test_mentions[i]
         doc = test_doc[i]
         entity_token_ids, entity_masks = transform_entities(doc, args.max_len,
                                                             tokenizer)
@@ -206,39 +204,30 @@ def main(args):
                                    shuffle=False)
         test_entity_loaders.append(entity_loader)
     print('begin computing candidates indices')
-    if not args.load:
-        all_train_cands_embeds = get_all_entity_hiddens(train_entity_loaders,
-                                                        model,
-                                                        args.store_en_hiddens,
-                                                        args.en_hidden_path)
-    else:
-        all_train_cands_embeds = None
+    all_train_cands_embeds = get_all_entity_hiddens(train_entity_loaders,
+                                                    model,
+                                                    args.store_en_hiddens,
+                                                    args.en_hidden_path)
     train_cands_indices = compute_cands_indices(train_loaders, model,
                                                 train_entity_loaders,
                                                 args.num_cands,
                                                 args.store_en_hiddens,
                                                 args.en_hidden_path,
                                                 all_train_cands_embeds)
-    if not args.load:
-        all_val_cands_embeds = get_all_entity_hiddens(val_entity_loaders,
-                                                    model,
-                                                    args.store_en_hiddens,
-                                                    args.en_hidden_path)
-    else:
-        all_val_cands_embeds = None
+    all_val_cands_embeds = get_all_entity_hiddens(val_entity_loaders,
+                                                  model,
+                                                  args.store_en_hiddens,
+                                                  args.en_hidden_path)
     val_cands_indices = compute_cands_indices(val_loaders, model,
                                               val_entity_loaders,
                                               args.num_cands,
                                               args.store_en_hiddens,
                                               args.en_hidden_path,
                                               all_val_cands_embeds)
-    if not args.load:
-        all_test_cands_embeds = get_all_entity_hiddens(test_entity_loaders,
+    all_test_cands_embeds = get_all_entity_hiddens(test_entity_loaders,
                                                    model,
                                                    args.store_en_hiddens,
                                                    args.en_hidden_path)
-    else:
-        all_test_cands_embeds = None
     test_cands_indices = compute_cands_indices(test_loaders, model,
                                                test_entity_loaders,
                                                args.num_cands,
@@ -307,37 +296,21 @@ def load_domain_data(data_dir):
     train_doc = []
     val_doc = []
     test_doc = []
-    cached_path = "./data/save_cands"
-    try:
-        train_mentions = torch.load(os.path.join(cached_path, "train_mentions.pt"))
-        train_doc = torch.load(os.path.join(cached_path, "train_mentions.pt"))
-        val_mentions = torch.load(os.path.join(cached_path, "val_mentions.pt"))
-        val_doc = torch.load(os.path.join(cached_path, "val_mentions.pt"))
-        test_mentions = torch.load(os.path.join(cached_path, "test_mentions.pt"))
-        test_doc = torch.load(os.path.join(cached_path, "test_mentions.pt"))
-
-    except:
-        for train_domain in train_domains:
-            domain_mentions = load_domain_mentions(train_domain, 'train')
-            domain_entities = load_domain_entities(data_dir, train_domain)
-            train_mentions.append(domain_mentions)
-            train_doc.append(domain_entities)
-        for val_domain in val_domains:
-            domain_mentions = load_domain_mentions(val_domain, 'val')
-            domain_entities = load_domain_entities(data_dir, val_domain)
-            val_mentions.append(domain_mentions)
-            val_doc.append(domain_entities)
-        for test_domain in test_domains:
-            domain_mentions = load_domain_mentions(test_domain, 'test')
-            domain_entities = load_domain_entities(data_dir, test_domain)
-            test_mentions.append(domain_mentions)
-            test_doc.append(domain_entities)
-        torch.save(train_mentions, os.path.join(cached_path, "train_mentions.pt"))
-        torch.save(train_doc, os.path.join(cached_path, "train_doc.pt"))
-        torch.save(val_mentions, os.path.join(cached_path, "val_mentions.pt"))
-        torch.save(val_doc, os.path.join(cached_path, "val_doc.pt"))
-        torch.save(test_mentions, os.path.join(cached_path, "test_mentions.pt"))
-        torch.save(test_doc, os.path.join(cached_path, "test_doc.pt"))
+    for train_domain in train_domains:
+        domain_mentions = load_domain_mentions(train_domain, 'train')
+        domain_entities = load_domain_entities(data_dir, train_domain)
+        train_mentions.append(domain_mentions)
+        train_doc.append(domain_entities)
+    for val_domain in val_domains:
+        domain_mentions = load_domain_mentions(val_domain, 'val')
+        domain_entities = load_domain_entities(data_dir, val_domain)
+        val_mentions.append(domain_mentions)
+        val_doc.append(domain_entities)
+    for test_domain in test_domains:
+        domain_mentions = load_domain_mentions(test_domain, 'test')
+        domain_entities = load_domain_entities(data_dir, test_domain)
+        test_mentions.append(domain_mentions)
+        test_doc.append(domain_entities)
 
     return train_mentions, val_mentions, test_mentions, train_doc, val_doc, \
            test_doc
@@ -365,8 +338,6 @@ if __name__ == '__main__':
     parser.add_argument('--cands_dir', type=str,
                         help='the  data directory')
     parser.add_argument('--num_cands', default=64, type=int,
-                        help='the total number of candidates')
-    parser.add_argument('--load', action="store_true",
                         help='the total number of candidates')
     parser.add_argument('--type_model', type=str,
                         default='dual',

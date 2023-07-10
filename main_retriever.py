@@ -83,7 +83,7 @@ def evaluate(mention_loader, model, all_candidates_embeds, k, device,
                 scores = model(batch[0], batch[1], None, None)
             else:
                 scores = []
-                for j in range(len_en_loader):
+                for j in tqdm(range(len_en_loader), total = len_en_loader):
                     file_path = os.path.join(en_hidden_path,
                                              'en_hiddens_%s.pt' % j)
                     en_embeds = torch.load(file_path)
@@ -127,8 +127,11 @@ def main(args):
 
     # configure logger
     args.model = './models/{}/{}/'.format(args.type_model, run.id)
+    args.en_hidden_path = './data/{}/{}/'.format(args.type_model, run.id)
     if not os.path.exists(args.model):
         os.makedirs(args.model)
+    if not os.path.exists(args.en_hidden_path):
+        os.makedirs(args.en_hidden_path)
     logger = Logger(args.model + '.log', True)
     logger.log(str(args))
     # load data and initialize model and dataset
@@ -347,45 +350,6 @@ def main(args):
         start_epoch = cpt['epoch'] + 1
     print("epochs")
     for epoch in tqdm(range(start_epoch, args.epochs + 1)):
-        logger.log("evaluate on val set")
-
-        if args.type_model != 'full' and args.type_model != 'extend_multi':
-            all_val_cands_embeds = get_all_entity_hiddens(val_en_loader, model,
-                                                      args.store_en_hiddens,
-                                                      args.en_hidden_path, debug = args.debug)
-            eval_result = evaluate(val_men_loader, model, all_val_cands_embeds,
-                               args.k, device, len(val_en_loader),
-                               args.store_en_hiddens, args.en_hidden_path)
-        
-            logger.log('Done with epoch {:3d} | train loss {:8.4f} | '
-                    'validation recall {:8.4f}'
-                    '|validation accuracy {:8.4f}'.format(
-                epoch,
-                tr_loss / step_num,
-                eval_result[0],
-                eval_result[1]
-            ))
-            wandb.log({"val_recall": eval_result[0], "val_accuracy": eval_result[1], "epoch": epoch})
-        
-        model.evaluate_on = False
-        logger.log('evaluation starts')
-        if args.eval_method == 'micro':
-            val_result = micro_eval(model, loader_val, num_val_samples, debug = args.debug)
-        else:
-            val_result = macro_eval(model, loader_val, num_val_samples)
-        logger.log('Done with epoch {:3d} | train loss {:8.4f} | '
-                'val acc unormalized  {:8.4f} ({}/{})|'
-                'val acc normalized  {:8.4f} ({}/{}) '.format(
-            epoch,
-            tr_loss / step_num,
-            val_result['acc_unorm'],
-            val_result['num_correct'],
-            num_val_samples,
-            val_result['acc_norm'],
-            val_result['num_correct'],
-            val_result['num_total_norm'],
-            newline=False))
-        wandb.log({"unnormalized accuracy": val_result['acc_unorm'] , "normalized acc": val_result['acc_norm'], "epoch": epoch})
         logger.log('\nEpoch {:d}'.format(epoch))
         if args.type_cands == 'hard_adjusted_negative':
             distribution_sampling = True
@@ -408,7 +372,7 @@ def main(args):
                 all_train_cands_embeds = get_all_entity_hiddens(train_en_loader,
                                                                 retriever_model,
                                                                 args.store_en_hiddens,
-                                                                args.en_hidden_path, args.debug)
+                                                                args.en_hidden_path, debug = args.debug)
                 candidates = get_hard_negative(train_men_loader, retriever_model, num_cands,
                                             len(train_en_loader), device,
                                             distribution_sampling,
@@ -416,12 +380,12 @@ def main(args):
                                             args.store_en_hiddens,
                                             all_train_cands_embeds,
                                             args.en_hidden_path,
-                                            adjust_logits, args.smoothing_value)
+                                            adjust_logits, args.smoothing_value, debug = args.debug)
             else:
                 all_train_cands_embeds = get_all_entity_hiddens(train_en_loader,
                                                                 model,
                                                                 args.store_en_hiddens,
-                                                                args.en_hidden_path)
+                                                                args.en_hidden_path, args.debug)
                 candidates = get_hard_negative(train_men_loader, model, num_cands,
                                             len(train_en_loader), device,
                                             distribution_sampling,
@@ -429,7 +393,7 @@ def main(args):
                                             args.store_en_hiddens,
                                             all_train_cands_embeds,
                                             args.en_hidden_path,
-                                            adjust_logits, args.smoothing_value)
+                                            adjust_logits, args.smoothing_value, debug = args.debug)
 
         train_set = ZeshelDataset(tokenizer, samples_train, train_doc,
                                   args.max_len,
@@ -483,6 +447,46 @@ def main(args):
                                          len(train_loader), avg_loss))
                     logging_loss = tr_loss
                     wandb.log({"loss": avg_loss, "epoch": epoch})
+
+        if args.type_model != 'full' and args.type_model != 'extend_multi':
+            logger.log("get all entity hiddens")
+
+            all_val_cands_embeds = get_all_entity_hiddens(val_en_loader, model,
+                                                      args.store_en_hiddens,
+                                                      args.en_hidden_path, debug = args.debug)
+            logger.log("evaluate on val set")
+        
+            eval_result = evaluate(val_men_loader, model, all_val_cands_embeds,
+                               args.k, device, len(val_en_loader),
+                               args.store_en_hiddens, args.en_hidden_path)
+        
+            logger.log('Done with epoch {:3d} | '
+                    'validation recall {:8.4f}'
+                    '|validation accuracy {:8.4f}'.format(
+                epoch,
+                eval_result[0],
+                eval_result[1]
+            ))
+            wandb.log({"val_recall": eval_result[0], "val_accuracy": eval_result[1], "epoch": epoch})
+        
+        # model.evaluate_on = False
+        # logger.log('evaluation starts')
+        # if args.eval_method == 'micro':
+        #     val_result = micro_eval(model, loader_val, num_val_samples, debug = args.debug)
+        # else:
+        #     val_result = macro_eval(model, loader_val, num_val_samples)
+        # logger.log('Done with epoch {:3d} | '
+        #         'val acc unormalized  {:8.4f} ({}/{})|'
+        #         'val acc normalized  {:8.4f} ({}/{}) '.format(
+        #     epoch,
+        #     val_result['acc_unorm'],
+        #     val_result['num_correct'],
+        #     num_val_samples,
+        #     val_result['acc_norm'],
+        #     val_result['num_correct'],
+        #     val_result['num_total_norm'],
+        #     newline=False))
+        # wandb.log({"unnormalized accuracy": val_result['acc_unorm'] , "normalized acc": val_result['acc_norm'], "epoch": epoch})
 
 
         #  eval_train_result = evaluate(train_loader, model, args.k,device)[0]
@@ -641,6 +645,8 @@ if __name__ == '__main__':
                         help='the number of training epochs')
     parser.add_argument('--k', type=int, default=64,
                         help='recall@k when evaluate')
+    parser.add_argument('--too_large', action = 'store_true',
+                    help='too large to evaluate on batch')
     parser.add_argument('--warmup_proportion', type=float, default=0.1,
                         help='proportion of training steps to perform linear '
                              'learning rate warmup for [%(default)g]')

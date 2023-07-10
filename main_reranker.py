@@ -11,6 +11,7 @@ from retriever import UnifiedRetriever
 from transformers import BertTokenizer, BertModel, \
     AdamW, get_linear_schedule_with_warmup, get_constant_schedule
 from tqdm import tqdm
+import wandb
 
 def set_seed(args):
     random.seed(args.seed)
@@ -21,16 +22,24 @@ def set_seed(args):
 def configure_optimizer(args, model, num_train_examples):
     # https://github.com/google-research/bert/blob/master/optimization.py#L25
     no_decay = ['bias', 'LayerNorm.weight']
+    transformer = ['extend_multi']
+    for n, p in model.named_parameters():
+        count = 0
     optimizer_grouped_parameters = [
         {'params': [p for n, p in model.named_parameters()
-                    if not any(nd in n for nd in no_decay)],
-         'weight_decay': args.weight_decay},
+                    if not any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)],
+         'weight_decay': args.weight_decay, 'lr': 1e-5},
         {'params': [p for n, p in model.named_parameters()
                     if any(nd in n for nd in no_decay)],
-         'weight_decay': 0.0}
+         'weight_decay': 0.0, 'lr': 1e-5},
+        {'params': [p for n, p in model.named_parameters()
+                    if any(nd in n for nd in transformer) and not any(nd in n for nd in no_decay)],
+         'lr': args.lr, 'weight_decay': args.weight_decay},
     ]
-    optimizer = AdamW(optimizer_grouped_parameters, lr=args.lr,
+    
+    optimizer = AdamW(optimizer_grouped_parameters,
                       eps=args.adam_epsilon)
+    print(optimizer)
 
     num_train_steps = int(num_train_examples / args.B /
                           args.gradient_accumulation_steps * args.epochs)
@@ -59,8 +68,8 @@ def micro_eval(model, loader_eval, num_total_unorm, debug = False):
 
     num_total = 0
     num_correct = 0
+    loss_total = 0
     with torch.no_grad():
-        print("micro eval")
         for step, batch in tqdm(enumerate(loader_eval), total = len(loader_eval)):
             if debug and step>10:
                 break
@@ -69,15 +78,17 @@ def micro_eval(model, loader_eval, num_total_unorm, debug = False):
                 preds = result['predictions']
             else:
                 preds = result[1]
+            loss_total += result[0].sum()
             num_total += len(preds)
             num_correct += (preds == 0).sum().item()
-
+    loss_total /= len(loader_eval)
     model.train()
     acc_norm = num_correct / num_total * 100
     acc_unorm = num_correct / num_total_unorm * 100
     return {'acc_norm': acc_norm, 'acc_unorm': acc_unorm,
             'num_correct': num_correct,
-            'num_total_norm': num_total}
+            'num_total_norm': num_total,
+            'val_loss': loss_total}
 
 
 def macro_eval(model, val_loaders, num_total_unorm):
@@ -87,25 +98,32 @@ def macro_eval(model, val_loaders, num_total_unorm):
     acc_unorm = 0
     num_correct_list = []
     num_total_norm = []
+    loss_total = 0
     for i in tqdm(range(len(val_loaders))):
         val_loader = val_loaders[i]
         num_unorm = num_total_unorm[i]
         micro_results = micro_eval(model, val_loader, num_unorm)
         acc_norm += micro_results['acc_norm']
         acc_unorm += micro_results['acc_unorm']
+        loss_total += micro_results['val_loss']
         num_correct_list.append(micro_results['num_correct'])
         num_total_norm.append(micro_results['num_total_norm'])
     acc_norm /= len(val_loaders)
     acc_unorm /= len(val_loaders)
+    loss_total /= len(val_loaders)
     model.train()
     return {'acc_norm': acc_norm, 'acc_unorm': acc_unorm,
             'num_correct': num_correct_list,
-            'num_total_norm': num_total_norm}
+            'num_total_norm': num_total_norm,
+            'val_loss': loss_total}
 
 
 def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
+def write_to_file(path, string, mode="w"):
+    with open(path, mode) as writer:
+        writer.write(string)
 
 def load_model(model_path, device, eval_mode=False, dp=False, type_model='full'):
     package = torch.load(model_path) if device.type == 'cuda' else \
@@ -153,14 +171,19 @@ def load_model(model_path, device, eval_mode=False, dp=False, type_model='full')
 
 def main(args):
     set_seed(args)
-
-    # writer = SummaryWriter()
-    logger = Logger(args.model + '.log', True)
-    logger.log(str(args))
     if args.resume_training:
         run = wandb.init(project = "hard-nce-el", resume = "must", id = args.run_id, config = args)
     else:
         run = wandb.init(project="hard-nce-el", config = args)
+    args.model = './models/{}/{}/'.format(args.type_model, run.id)
+    if not os.path.exists(args.model):
+        os.makedirs(args.model)
+    # writer = SummaryWriter()
+    logger = Logger(args.model + '.log', True)
+    logger.log(str(args))
+    write_to_file(
+        os.path.join(args.model, "training_params.txt"), str(args)
+    )
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     if args.type_bert == 'base':
@@ -184,6 +207,10 @@ def main(args):
             attention_type = 'extend_multi'
             num_mention_vecs = 1
             num_entity_vecs = 1
+        elif args.type_model == 'extend_multi_dot':
+            attention_type = 'extend_multi_dot'
+            num_mention_vecs = 1
+            num_entity_vecs = 1
         else:
             num_mention_vecs = args.num_mention_vecs
             num_entity_vecs = args.num_entity_vecs
@@ -195,6 +222,12 @@ def main(args):
         cpt = torch.load(args.model+"pytorch_model.bin") if device.type == 'cuda' \
             else torch.load(args.model+"pytorch_model.bin", map_location=torch.device('cpu'))
         model.load_state_dict(cpt['sd'])
+    dp = torch.cuda.device_count() > 1
+    if dp:
+        logger.log('Data parallel across %d GPUs: %s' %
+                   (len(args.gpus.split(',')), args.gpus))
+        model = nn.DataParallel(model)
+
     if args.type_bert == 'base':
         tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
     else:
@@ -202,14 +235,7 @@ def main(args):
     use_full_dataset = (args.type_model == 'full')
     macro_eval_mode = (args.eval_method == 'macro')
     data = load_zeshel_data(args.data, args.cands_dir, macro_eval_mode)
-    loader_train, loader_val, loader_test, \
-    num_val_samples, num_test_samples = get_loaders(data, tokenizer, args.L,
-                                                    args.C, args.B,
-                                                    args.num_workers,
-                                                    args.inputmark,
-                                                    args.C_eval,
-                                                    use_full_dataset,
-                                                    macro_eval_mode)
+
 
     if args.simpleoptim:
         optimizer, scheduler, num_train_steps, num_warmup_steps \
@@ -217,6 +243,14 @@ def main(args):
     else:
         optimizer, scheduler, num_train_steps, num_warmup_steps \
             = configure_optimizer(args, model, len(data[1][0]))
+    if args.resume_training:
+        optimizer.load_state_dict(cpt['opt_sd'])
+        scheduler.load_state_dict(cpt['scheduler_sd'])
+        if device.type == 'cuda':
+            for state in optimizer.state.values():
+                for k, v in state.items():
+                    if isinstance(v, torch.Tensor):
+                        state[k] = v.cuda()
     model.to(device)
     if args.fp16:
         try:
@@ -226,11 +260,7 @@ def main(args):
                 "Please install apex from https://www.github.com/nvidia/apex to use fp16 training.")
         model, optimizer = amp.initialize(model, optimizer,
                                           opt_level=args.fp16_opt_level)
-    dp = torch.cuda.device_count() > 1
-    if dp:
-        logger.log('Data parallel across %d GPUs: %s' %
-                   (len(args.gpus.split(',')), args.gpus))
-        model = nn.DataParallel(model)
+
 
     logger.log('\n[TRAIN]')
     logger.log('  # train samples: %d' % len(data[1][0]))
@@ -249,10 +279,28 @@ def main(args):
     tr_loss, logging_loss = 0.0, 0.0
     model.zero_grad()
     best_val_perf = float('-inf')
-    for epoch in range(1, args.epochs + 1):
+    if args.resume_training:
+        step_num = cpt['step_num']
+        tr_loss, logging_loss = cpt['tr_loss'], cpt['logging_loss']
+        best_val_perf = cpt['perf']
+    start_epoch = 1
+    if args.resume_training:
+        start_epoch = cpt['epoch'] + 1    
+    for epoch in range(start_epoch, args.epochs + 1):
         logger.log('\nEpoch %d' % epoch)
+        loader_train, loader_val, loader_test, \
+        num_val_samples, num_test_samples = get_loaders(data, tokenizer, args.L,
+                                                    args.C, args.B,
+                                                    args.num_workers,
+                                                    args.inputmark,
+                                                    args.C_eval,
+                                                    use_full_dataset,
+                                                    macro_eval_mode, args)
+
+
         for batch_idx, batch in tqdm(enumerate(loader_train), total = len(loader_train)):  # Shuffled every epoch
-            
+            if args.debug and batch_idx > 10:
+                break
             model.train()
             result = model.forward(*batch)
             if type(result) is tuple:
@@ -295,7 +343,7 @@ def main(args):
                 #  eval_result = micro_eval(args, model, loader_val)
                 # writer.add_scalar('acc_val', eval_result['acc'], step_num)
         if args.eval_method == 'micro':
-            val_result = micro_eval(model, loader_val, num_val_samples)
+            val_result = micro_eval(model, loader_val, num_val_samples, args.debug)
         else:
             val_result = macro_eval(model, loader_val, num_val_samples)
         logger.log('Done with epoch {:3d} | train loss {:8.4f} | '
@@ -310,17 +358,24 @@ def main(args):
             val_result['num_correct'],
             val_result['num_total_norm'],
             newline=False))
-        wandb.log({"unnormalized acc": val_result['acc_unorm'], "normalized acc": ['acc_norm']})
+        wandb.log({"unnormalized acc": val_result['acc_unorm'], "normalized acc": ['acc_norm']
+        ,"val_loss": val_result['val_loss']})
         
         if val_result['acc_unorm'] > best_val_perf:
             logger.log('      <----------New best val perf: %g -> %g' %
                        (best_val_perf, val_result['acc_unorm']))
             best_val_perf = val_result['acc_unorm']
-            torch.save({'opt': args, 'sd': model.state_dict(),
-                        'perf': best_val_perf}, args.model)
+            torch.save({'opt': args, 'sd': model.module.state_dict() if dp else model.state_dict(),
+                        'perf': best_val_perf, 'epoch': epoch,
+                        'opt_sd': optimizer.state_dict(),
+                        'scheduler_sd': scheduler.state_dict(),
+                        'tr_loss': tr_loss, 'step_num': step_num,
+                        'logging_loss': logging_loss}, os.path.join(args.model, "pytorch_model.bin"))
         else:
             logger.log('')
 
+        if args.training_one_epoch:
+            raise Exception('args: training one epoch')
     model = load_model(args.model, device, eval_mode=True, dp=dp,
                        type_model=args.type_model)
     if args.eval_method == 'micro':
@@ -397,8 +452,27 @@ if __name__ == '__main__':
                                  'multi_vector',
                                  'poly',
                                  'full',
-                                 'extend_multi'],
+                                 'extend_multi',
+                                 'extend_multi_dot'],
                         help='the type of model')
+    parser.add_argument('--debug', action = 'store_true',
+                        help='debugging mode')
+    parser.add_argument('--training_one_epoch', action = 'store_true',
+                        help='stop the training after one epoch')
+    parser.add_argument('--type_cands', type=str,
+                        default='mixed_negative',
+                        choices=['fixed_negative',
+                                'mixed_negative',
+                                 'hard_negative'],
+                        help='fixed: top k, hard: distributionally sampled k')
+    parser.add_argument('--run_id', type = str,
+                        help='run id when resuming the run')
+    parser.add_argument('--num_cands', default=64, type=int,
+                        help='# of candidates')
+    parser.add_argument('--train_one_epoch', action = 'store_true',
+                        help='training only one epoch')
+    parser.add_argument('--cands_ratio', default=0.5, type=float,
+                        help='ratio of sampled negatives')
     parser.add_argument('--num_heads', type=int, default=2,
                         help='the number of multi-head attention in extend_multi ')
     parser.add_argument('--num_layers', type=int, default=2,

@@ -369,7 +369,8 @@ def get_all_entity_hiddens(en_loader, model, store_en_hiddens=False,
     all_en_embeds = []
     with torch.no_grad():
         for i, batch in tqdm(enumerate(en_loader), total = len(en_loader)):
-            if i > 10 and debug: break
+            if i > 10 and debug: 
+                break
             if hasattr(model, 'module'):
                 en_embeds = (
                     model.module.encode(None, None, None, None, batch[0],
@@ -399,7 +400,7 @@ def get_hard_negative(mention_loader, model,
                       too_large=False,
                       all_candidates_embeds=None,
                       en_hidden_path=None, adjust_logits=False,
-                      smoothing_value=1.0):
+                      smoothing_value=1.0, scores = None, debug = False):
     model.eval()
     if not too_large:
         if hasattr(model, 'module'):
@@ -410,33 +411,37 @@ def get_hard_negative(mention_loader, model,
             model.candidates_embeds = all_candidates_embeds
     hard_indices = []
     all_candidates_probs = []
+    if debug: en_hidden_path = './data/en_hidden_sum_max'
     with torch.no_grad():
         print('getting hard negatives')
+
         for i, batch in tqdm(enumerate(mention_loader), total = len(mention_loader)):
-            if not too_large:  # entity embeddings are too large for memory
-                scores = model(batch[0], batch[1], None, None)
-            else:
-                scores = []
-                for j in range(len_en_loader):
-                    file_path = os.path.join(en_hidden_path,
-                                             'en_hiddens_%s.pt' % j)
-                    en_embeds = torch.load(file_path)
-                    if hasattr(model, 'module'):
-                        model.module.evaluate_on = True
-                        model.module.candidates_embeds = en_embeds
-                    else:
-                        model.evaluate_on = True
-                        model.candidates_embeds = en_embeds
-                    score = model(batch[0], batch[1], None,
-                                  None).detach()
-                    scores.append(score)
-                scores = torch.cat(scores, dim=1)
-            if distribution_sampling:
-                scores = scores * smoothing_value
-            if exclude_golds:
-                label_cols = batch[2].view(-1).to(device)
-                label_rows = torch.arange(scores.size(0)).to(device)
-                scores[label_rows, label_cols] = float('-inf')  # exclude golds
+            if debug and i>10: break
+            if scores is None:
+                if not too_large:  # entity embeddings are too large for memory
+                    scores = model(batch[0], batch[1], None, None)
+                else:
+                    scores = []
+                    for j in range(len_en_loader):
+                        file_path = os.path.join(en_hidden_path,
+                                                'en_hiddens_%s.pt' % j)
+                        en_embeds = torch.load(file_path)
+                        if hasattr(model, 'module'):
+                            model.module.evaluate_on = True
+                            model.module.candidates_embeds = en_embeds
+                        else:
+                            model.evaluate_on = True
+                            model.candidates_embeds = en_embeds
+                        score = model(batch[0], batch[1], None,
+                                    None).detach()
+                        scores.append(score)
+                    scores = torch.cat(scores, dim=1)
+                if distribution_sampling:
+                    scores = scores * smoothing_value
+                if exclude_golds:
+                    label_cols = batch[2].view(-1).to(device)
+                    label_rows = torch.arange(scores.size(0)).to(device)
+                    scores[label_rows, label_cols] = float('-inf')  # exclude golds
             if distribution_sampling:
                 probs = scores.softmax(dim=1)
                 hard_cands = distribution_sample(probs, num_hards,
