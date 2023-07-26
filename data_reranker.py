@@ -36,18 +36,19 @@ class BasicDataset(Dataset):
     def __getitem__(self, index):
         raise NotImplementedError
 
-    def prepare_candidates(self, mention, candidates, args):
+    def prepare_candidates(self, mention, candidates, args, self_negs_again = False):
         # xs = candidates['candidates'][:self.max_num_candidates]
         xs = candidates['candidates']
         y = mention['label_document_id']
-
         if self.is_training:
             # At training time we can include target if not already included.
             if not y in xs:
                 xs.append(y)
-            if args.type_cands == 'fixed_negative':
+            if args.type_cands == 'self_negative' and not self_negs_again:
+                return xs[:args.num_eval_cands]
+            elif args.type_cands == 'fixed_negative':
                 xs = [y] + [x for x in xs if x != y]  # Target index always 0
-            elif args.type_cands == 'hard_negative':
+            elif args.type_cands == 'hard_negative' or self_negs_again:
                 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
                 num_hards = len(xs)
                 scores = torch.tensor(candidates['scores'], dtype = float)
@@ -55,7 +56,7 @@ class BasicDataset(Dataset):
                 hard_cands = distribution_sample(probs, args.num_training_cands,
                                                     device)
                 xs = np.array(xs)
-                xs = xs[hard_cands.squeeze(0)]
+                xs = xs[hard_cands.squeeze(0).cpu()]
                 
                 xs = [y] + [x for x in xs if x != y]  # Target index always 0
             elif args.type_cands == 'mixed_negative':
@@ -131,7 +132,7 @@ class BasicDataset(Dataset):
 class UnifiedDataset(BasicDataset):
     def __init__(self, documents, samples, tokenizer, max_len,
                  max_num_candidates,
-                 is_training, indicate_mention_boundaries=False, args=None):
+                 is_training, indicate_mention_boundaries=False, args=None, self_negs_again=False):
         super(UnifiedDataset, self).__init__(documents, samples, tokenizer,
                                              max_len, max_num_candidates,
                                              is_training,
@@ -141,6 +142,7 @@ class UnifiedDataset(BasicDataset):
         self.max_len_candidate = self.max_len - 2  # cls and sep
         self.args = args
         self.is_training = is_training
+        self.self_negs_again = self_negs_again
 
     def __getitem__(self, index):
         mention = self.samples[0][index]
@@ -155,7 +157,7 @@ class UnifiedDataset(BasicDataset):
         mention_masks = torch.tensor(mention_encoded_dict['attention_mask'])
 
 
-        candidate_document_ids = self.prepare_candidates(mention, candidates, self.args)
+        candidate_document_ids = self.prepare_candidates(mention, candidates, self.args, self.self_negs_again)
         candidates_token_ids = torch.zeros((len(candidate_document_ids),
                                             self.max_len))
         candidates_masks = torch.zeros((len(candidate_document_ids),
@@ -211,8 +213,9 @@ class FullDataset(BasicDataset):
 def get_loaders(data, tokenizer, max_len, max_num_candidates, batch_size,
                 num_workers, indicate_mention_boundaries,
                 max_num_cands_val,
-                use_full_dataset=True, macro_eval=True, args = None, eval_batch_size = None):
-    if eval_batch_size is None: eval_batch_size = batch_size
+                use_full_dataset=True, macro_eval=True, args = None, self_negs_again = False):
+    eval_batch_size = batch_size
+    if args.eval_batch_size is not None: eval_batch_size = args.eval_batch_size
     (documents, samples_train,
      samples_val, samples_test) = data
     print('get train loaders')
@@ -223,8 +226,12 @@ def get_loaders(data, tokenizer, max_len, max_num_candidates, batch_size,
     else:
         dataset_train = UnifiedDataset(documents, samples_train, tokenizer,
                                        max_len, max_num_candidates, True,
-                                       indicate_mention_boundaries, args = args)
-    loader_train = DataLoader(dataset_train, batch_size=batch_size,
+                                       indicate_mention_boundaries, args = args, self_negs_again=self_negs_again)
+    if args.type_cands == "self_negative" and not self_negs_again:
+        loader_train = DataLoader(dataset_train, batch_size=eval_batch_size,
+                                  shuffle=True, num_workers=num_workers)
+    else:
+        loader_train = DataLoader(dataset_train, batch_size=batch_size,
                               shuffle=True, num_workers=num_workers)
 
     def help_loader(samples):
@@ -241,29 +248,34 @@ def get_loaders(data, tokenizer, max_len, max_num_candidates, batch_size,
                             shuffle=False,
                             num_workers=num_workers)
         return loader, num_samples
-
-    if macro_eval:
-        loader_val = []
-        loader_test = []
-        val_num_samples = []
-        test_num_samples = []
-        for sample in samples_val:
-            loader, num_samples = help_loader(sample)
-            loader_val.append(loader)
-            val_num_samples.append(num_samples)
-        for sample in samples_test:
-            loader, num_samples = help_loader(sample)
-            loader_test.append(loader)
-            test_num_samples.append(num_samples)
+    if self_negs_again:
+        loader_val = None
+        loader_test = None
+        val_num_samples = None
+        test_num_samples = None
     else:
-        loader_val, val_num_samples = help_loader(samples_val)
-        loader_test, test_num_samples = help_loader(samples_test)
+        if macro_eval:
+            loader_val = []
+            loader_test = []
+            val_num_samples = []
+            test_num_samples = []
+            for sample in samples_val:
+                loader, num_samples = help_loader(sample)
+                loader_val.append(loader)
+                val_num_samples.append(num_samples)
+            for sample in samples_test:
+                loader, num_samples = help_loader(sample)
+                loader_test.append(loader)
+                test_num_samples.append(num_samples)
+        else:
+            loader_val, val_num_samples = help_loader(samples_val)
+            loader_test, test_num_samples = help_loader(samples_test)
 
     return (loader_train, loader_val, loader_test,
             val_num_samples, test_num_samples)
 
 
-def load_zeshel_data(data_dir, cands_dir, macro_eval=True, debug = False):
+def load_zeshel_data(data_dir, cands_dir, macro_eval=True, debug = False, scores = None):
     """
 
     :param data_dir: train_data_dir if args.train else eval_data_dir
@@ -277,7 +289,7 @@ def load_zeshel_data(data_dir, cands_dir, macro_eval=True, debug = False):
         path = os.path.join(data_dir, 'documents')
         for fname in os.listdir(path):
             with open(os.path.join(path, fname)) as f:
-                for line in f:
+                for i, line in enumerate(f):
                     fields = json.loads(line)
                     fields['corpus'] = os.path.splitext(fname)[0]
                     documents[fields['document_id']] = fields
@@ -293,10 +305,11 @@ def load_zeshel_data(data_dir, cands_dir, macro_eval=True, debug = False):
                 domains.add(field['corpus'])
         return list(domains)
 
-    def load_mention_candidates_pairs(part, domain=None, in_domain=False, debug = False):
+    def load_mention_candidates_pairs(part, domain=None, in_domain=False, debug = False, scores = None):
         mentions = []
         with open(os.path.join(men_path, '%s.json' % part)) as f:
             for i, line in enumerate(f):
+                if debug and i>10: break
                 field = json.loads(line)
                 if in_domain:
                     if field['corpus'] == domain:
@@ -308,34 +321,45 @@ def load_zeshel_data(data_dir, cands_dir, macro_eval=True, debug = False):
         candidates = {}
         with open(os.path.join(cands_dir,
                                'candidates_%s.json' % part)) as f:
-            for line in f:
+            for i, line in enumerate(f):
+                if debug and i>10: break
                 field = json.loads(line)
+                if scores is not None:  field['scores'] = scores[i]
+
                 candidates[field['mention_id']] = field
         return mentions, candidates
 
     print('start getting train pairs')
-    samples_train = load_mention_candidates_pairs('train', debug = debug)
+    samples_train = load_mention_candidates_pairs('train', debug = debug, scores = scores)
     print('start getting val and test pairs')
     if macro_eval:
-        print('compute the domains')
-        val_domains = get_domains('val')
-        test_domains = get_domains('test')
-        samples_val = []
-        samples_test = []
-        print('start getting val pairs')
-        for val_domain in val_domains:
-            pair = load_mention_candidates_pairs('val', val_domain, True)
-            samples_val.append(pair)
-        print('start getting test pairs')
-        for test_domain in test_domains:
-            pair = load_mention_candidates_pairs('test', test_domain, True)
-            samples_test.append(pair)
+        if scores is None:
+            print('compute the domains')
+            val_domains = get_domains('val')
+            test_domains = get_domains('test')
+            samples_val = []
+            samples_test = []
+            print('start getting val pairs')
+            for val_domain in val_domains:
+                pair = load_mention_candidates_pairs('val', val_domain, True, debug)
+                samples_val.append(pair)
+            print('start getting test pairs')
+            for test_domain in test_domains:
+                pair = load_mention_candidates_pairs('test', test_domain, True, debug)
+                samples_test.append(pair)
+        else:
+            samples_val = None
+            samples_test = None
+
     else:
+        if scores is None:
+            samples_val = load_mention_candidates_pairs('val')
+            samples_test = load_mention_candidates_pairs('test')
 
-        samples_val = load_mention_candidates_pairs('val')
-        samples_test = load_mention_candidates_pairs('test')
-
-    print('load all done')
+            print('load all done')
+        else:
+            samples_val = None
+            samples_test = None
 
     return documents, samples_train, samples_val, samples_test
 

@@ -5,6 +5,7 @@ import copy
 from torch.nn import CrossEntropyLoss
 import torch.nn.functional as F
 import math
+from torch.utils.data import DataLoader
 from torch.multiprocessing import Pool
 
 NEAR_INF = 1e20
@@ -111,7 +112,7 @@ class SoftAttention(nn.Module):
 class UnifiedRetriever(nn.Module):
     def __init__(self, encoder, device, num_codes_mention, num_codes_entity,
                  mention_use_codes, entity_use_codes, attention_type,
-                 candidates_embeds=None, evaluate_on=False, num_heads = 2, num_layers = 2):
+                 candidates_embeds=None, evaluate_on=False, args= None, num_heads = 2, num_layers = 2):
         super(UnifiedRetriever, self).__init__()
         self.mention_use_codes = mention_use_codes
         self.entity_use_codes = entity_use_codes
@@ -144,36 +145,47 @@ class UnifiedRetriever(nn.Module):
         else:
             self.attention = HardAttention()
         self.candidates_embeds = candidates_embeds
-        self.extend_multi = extend_multi(num_heads, num_layers)
+        self.extend_multi = extend_multi(num_heads, num_layers, args)
 
     def encode(self, mention_token_ids, mention_masks, candidate_token_ids,
-               candidate_masks, entity_token_ids=None, entity_masks=None):
+               candidate_masks, entity_token_ids=None, entity_masks=None, too_large = False, entity_bsz=64):
         candidates_embeds = None
         mention_embeds = None
         mention_embeds_masks = None
-        if candidate_token_ids is not None:
-            candidate_token_ids = candidate_token_ids.to(self.device).long()
-            candidate_masks = candidate_masks.to(self.device).long()
-            B, C, L = candidate_token_ids.size()
-            candidate_token_ids = candidate_token_ids.view(-1, L)
-            candidate_masks = candidate_masks.view(-1, L)
-            # B X C X L --> BC X L
-            candidates_hiddens = (self.entity_encoder(
-                input_ids=candidate_token_ids,
-                attention_mask=candidate_masks
-            )[0]).reshape(B, C, L, -1)
-            candidate_masks = candidate_masks.view(B, C, L)
-            if self.entity_use_codes:
-                n, d = self.entity_codes.size()
-                candidates_embeds = self.entity_codes.unsqueeze(0).unsqueeze(
-                    1).expand(B, C, n, d)
-                candidates_embeds = self.entity_codes_attention(
-                    candidates_embeds, candidates_hiddens,
-                    mask_ys=candidate_masks, values=candidates_hiddens)
-            else:
-                candidates_embeds = candidates_hiddens[:,
-                                    :, :self.num_entity_vecs,
-                                    :]
+        def candidates_encoding(candidate_token_ids, candidate_masks):
+            if candidate_token_ids is not None:
+                candidate_token_ids = candidate_token_ids.to(self.device).long()
+                candidate_masks = candidate_masks.to(self.device).long()
+                B, C, L = candidate_token_ids.size()
+                candidate_token_ids = candidate_token_ids.view(-1, L)
+                candidate_masks = candidate_masks.view(-1, L)
+                # B X C X L --> BC X L
+                candidates_hiddens = (self.entity_encoder(
+                    input_ids=candidate_token_ids,
+                    attention_mask=candidate_masks
+                )[0]).reshape(B, C, L, -1)
+                candidate_masks = candidate_masks.view(B, C, L)
+                if self.entity_use_codes:
+                    n, d = self.entity_codes.size()
+                    candidates_embeds = self.entity_codes.unsqueeze(0).unsqueeze(
+                        1).expand(B, C, n, d)
+                    candidates_embeds = self.entity_codes_attention(
+                        candidates_embeds, candidates_hiddens,
+                        mask_ys=candidate_masks, values=candidates_hiddens)
+                else:
+                    candidates_embeds = candidates_hiddens[:,
+                                        :, :self.num_entity_vecs,
+                                        :]
+                return candidates_embeds
+        if not too_large:
+            candidates_embeds = candidates_encoding(candidate_token_ids, candidate_masks)
+        else:
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            candidates_embeds = torch.tensor([])
+            for i in range(candidate_token_ids.size(1)//64):
+                candidate_embed = candidates_encoding(candidate_token_ids[:,64*i:64*(i+1),:], candidate_masks[:,64*i:64*(i+1),:]).cpu()
+                candidates_embeds = torch.cat((candidates_embeds, candidate_embed), dim = 1)
+            candidates_embeds = candidates_embeds.to(device)
         if mention_token_ids is not None:
             mention_token_ids = mention_token_ids.to(self.device).long()
             mention_masks = mention_masks.to(self.device).long()
@@ -355,7 +367,7 @@ class UnifiedRetriever(nn.Module):
             return scores
         else:  # train
         
-            B, C, L = candidate_token_ids.size()
+            B, C, L = candidate_token_ids.size() # e.g. 8, 256, 128
             # B x m x d
             #  get  embeds
 
@@ -366,55 +378,77 @@ class UnifiedRetriever(nn.Module):
                 else: 
                     dot = False
                 if recall_eval:
+                    candidates_embeds = {}
                     mention_embeds, mention_embeds_masks, \
-                    candidates_embeds = self.encode(mention_token_ids, mention_masks,
+                    candidates_embeds["embeds"] = self.encode(mention_token_ids, mention_masks,
                                             candidate_token_ids,
-                                            candidate_masks)
-                    print("1", mention_embeds, mention_embeds.shape)
-                    print("2", candidates_embeds, candidates_embeds.shape)
-                    scores = None
-                    num_chunks = C//top_k
-                    chunks = torch.chunk(candidates_embeds, num_chunks, dim = 1)
-                    # def process_chunk_helper(mention_embeds, chunk, dot):
-                    #     return self.extend_multi.process_chunk(mention_embeds, chunk, dot)
-                    # print("chunks", chunks, chunks[0].shape)
-                    # /pool = Pool()
-                    # processed_chunk = pool.map(process_chunk_helper, [(mention_embeds, chunk, dot) for chunk in chunks])
-                    # print("processed_chunk", processed_chunk)
-                    # pool.close()
-                    # pool.join()
-                    processed_tensor = torch.cat(chunks, dim=0)
-                    scores = self.extend_multi(mention_embeds, processed_tensor, dot)
-                    scores = torch.nn.functional.softmax(scores, dim = 1)
+                                            candidate_masks, too_large = args.too_large)
+                    candidates_embeds["idxs"] = torch.arange(candidates_embeds["embeds"].size(1))\
+                        .expand(candidates_embeds["embeds"].size(0), -1)
+                    idxs = candidates_embeds["idxs"]
+                    # scores = None
+                    # num_chunks = C//top_k
+                    # (16, 64, 1, 768)
+                    processed_tensor = candidates_embeds["embeds"].reshape(-1, top_k, 1, candidates_embeds["embeds"].size(-1))
+                    # idxs_chunks = candidates_embeds["idxs"].reshape(-1, top_k)
+                    # print("***")
+                    # print(processed_tensor[1], processed_tensor.shape)
+                    scores = self.extend_multi.forward_chunk(mention_embeds, processed_tensor, dot, int(candidates_embeds["embeds"].size(1)/top_k))
+                    # print(scores, scores.shape)
+                    # scores = torch.nn.functional.softmax(scores, dim = 1)
+                    scores = scores.view(B, -1, top_k) # (B, *, 64로 바꾼 다음에 나온 index에 대해 64씩을 더해줌)
                     idxs = torch.topk(scores, int(top_k*beam_ratio))[1]
-                    cumulative_idxs = torch.tensor([top_k*i for i in range(scores.size(0))], device = self.device).unsqueeze(1)
+                    cumulative_idxs = torch.tensor([top_k*i for i in range(idxs.size(1))], device = self.device).unsqueeze(1)
                     idxs += cumulative_idxs
-                    scores = scores.view(B, C)
                     idxs = idxs.view(B, int(C*beam_ratio))
-                    while idxs.size(1) > top_k:
-                        previous_idxs = idxs
-                        new_candidates_embeds = torch.gather(candidates_embeds.squeeze(-2), 1, previous_idxs.unsqueeze(2).expand(-1, -1, candidates_embeds.size(-1))) # (1, 256, 768)
-                        num_chunks = new_candidates_embeds.size(1)//top_k
-                        chunks = torch.chunk(new_candidates_embeds, num_chunks, dim = 1)
-                        processed_tensor = torch.cat(chunks, dim=0)
-                        new_scores = self.extend_multi(mention_embeds, processed_tensor, dot)
-                        new_scores = torch.nn.functional.softmax(new_scores, dim = 1)
+                    batch_idxs = torch.arange(B).unsqueeze(1).expand_as(idxs)
+                    scores = scores.view(B, C)
+                    candidates_embeds["embeds"] = candidates_embeds["embeds"][batch_idxs, idxs, :, :]
+                    candidates_embeds["idxs"] = candidates_embeds["idxs"][batch_idxs, idxs.cpu()]
+                    while idxs.size(1) >= top_k:
+                        processed_tensor = candidates_embeds["embeds"].reshape(-1, top_k, 1, candidates_embeds["embeds"].size(-1))
+                        idxs_chunks = candidates_embeds["idxs"].reshape(-1, top_k)
+                        # print(processed_tensor, processed_tensor.shape)
+                        # print(idxs_chunks, idxs_chunks.shape)
+                        new_scores = self.extend_multi.forward_chunk(mention_embeds, processed_tensor, dot, int(candidates_embeds["embeds"].size(1)/top_k))
+                        # new_scores = torch.nn.functional.softmax(new_scores, dim = 1)
+                        new_scores = new_scores.view(B, -1, top_k)
+                        # print(new_scores.shape)
+                        # print(new_scores, new_scores.shape)
                         idxs = torch.topk(new_scores, int(top_k*beam_ratio))[1]
-                        cumulative_idxs = torch.tensor([top_k*i for i in range(new_scores.size(0))], device = self.device).unsqueeze(1)
-                        new_scores = new_scores.view(B, previous_idxs.size(1))
+                        # print(idxs, previous_idxs)
+                        cumulative_idxs = torch.tensor([top_k*i for i in range(idxs.size(1))], device = self.device).unsqueeze(1)
                         idxs += cumulative_idxs
-                        idxs = idxs.view(B, int(new_candidates_embeds.size(1)*beam_ratio))
-                        idxs = torch.gather(previous_idxs, 1, idxs)
-                        for row in range(previous_idxs.size(0)):
-                            scores[row, previous_idxs[row]] += new_scores[row]
+                        idxs = idxs.view(B, int(candidates_embeds["embeds"].size(1)*beam_ratio))
+                        batch_idxs = torch.arange(B).unsqueeze(1).expand_as(idxs)
+                        new_scores = new_scores.view(B, candidates_embeds["embeds"].size(1))
+                        for row in range(candidates_embeds["embeds"].size(0)):
+                            # print(scores[row, candidates_embeds["idxs"][row]], new_scores[row])
+                            scores[row, candidates_embeds["idxs"][row]] += new_scores[row]
+                        candidates_embeds["embeds"] = candidates_embeds["embeds"][batch_idxs, idxs, :, :]
+                        candidates_embeds["idxs"] = candidates_embeds["idxs"][batch_idxs, idxs.cpu()]
+
+
+                        # idxs = torch.gather(previous_idxs, 1, idxs)
+                        # print(idxs)
+                        # new_scores = new_scores.view(B, previous_idxs.size(1))
+                        # print("new scores", new_scores[0], new_scores.shape)
+
+                        # print("scores", scores[0], scores.shape)
+                        # print("***")
                         
                 else:
                     mention_embeds, mention_embeds_masks, \
                     candidates_embeds = self.encode(mention_token_ids, mention_masks,
-                                            candidate_token_ids[:,:args.num_training_cands,:],
-                                            candidate_masks[:,:args.num_training_cands,:])
-                    scores = self.extend_multi(mention_embeds, candidates_embeds, dot)
+                                                candidate_token_ids[:,:args.num_training_cands,:],
+                                                candidate_masks[:,:args.num_training_cands,:])
+                    scores = self.extend_multi(mention_embeds, candidates_embeds, dot, args)
             else:
+                mention_embeds, mention_embeds_masks, \
+                candidates_embeds = self.encode(mention_token_ids, mention_masks,
+                                                candidate_token_ids[:,:args.num_training_cands,:],
+                                                candidate_masks[:,:args.num_training_cands,:])
+
                 if self.attention_type == 'soft_attention':
                     scores = self.attention(candidates_embeds, mention_embeds,
                                             mention_embeds, mention_embeds_masks)
@@ -429,7 +463,7 @@ class UnifiedRetriever(nn.Module):
             return loss, predicts, scores
 
 class extend_multi(nn.Module):
-    def __init__(self, num_heads, num_layers):
+    def __init__(self, num_heads, num_layers, args):
         super().__init__()
         self.device = torch.device(
             "cuda" if torch.cuda.is_available() else "cpu"
@@ -437,6 +471,10 @@ class extend_multi(nn.Module):
         self.num_heads = num_heads
         self.num_layers = num_layers
         self.embed_dim = 768
+        # if args.anncur:
+            # self.transformerencoderlayer = IdentityInitializedTransformerEncoderLayer(self.embed_dim, self.num_heads).to(self.device)
+        # else:
+        # ToDo: modify dim_feedforward argument of self.transformerencoderlayer
         self.transformerencoderlayer = torch.nn.TransformerEncoderLayer(self.embed_dim, self.num_heads, batch_first = True).to(self.device)
         self.transformerencoder = torch.nn.TransformerEncoder(self.transformerencoderlayer, self.num_layers).to(self.device)
         self.linearhead = torch.nn.Linear(self.embed_dim, 1).to(self.device)
@@ -445,9 +483,30 @@ class extend_multi(nn.Module):
         # Process the chunk using your deep learning model
         processed_chunk = self.forward(xs, ys, dot)
         return processed_chunk
-    def forward(self, xs, ys, dot = False):
+    def forward(self, xs, ys, dot = False, args = None):
         xs = xs.to(self.device) # (batch size, 1, embed_dim)
         ys = ys.squeeze(dim = -2).to(self.device) #(batch_size, cands, embed_dim)
+        if args.model_top is None and args.token_type :
+            token_type_xs = torch.zeros(xs.size(0), xs.size(1)).int().to(self.device)
+            token_embedding_xs = self.token_type_embeddings(token_type_xs)
+            token_type_ys = torch.ones(ys.size(0), ys.size(1)).int().to(self.device)
+            token_embedding_ys = self.token_type_embeddings(token_type_ys)
+            input = torch.cat([xs + token_embedding_xs, ys + token_embedding_ys], dim = 1)
+        else:
+            input = torch.cat([xs, ys], dim = 1)
+        
+        attention_result = self.transformerencoder(input)
+        if dot:
+            scores = torch.bmm(attention_result[:,0,:].unsqueeze(1), attention_result[:,1:,:].transpose(2,1))
+            scores = scores.squeeze(-2)
+        else:
+            scores = self.linearhead(attention_result[:,1:,:])
+            scores = scores.squeeze(-1)
+        return scores
+    def forward_chunk(self, xs, ys, dot = False, size_chunk = 1):
+        xs = xs.to(self.device) # (batch size, 1, embed_dim)
+        ys = ys.squeeze(dim = -2).to(self.device) #(batch_size, cands, embed_dim)
+        xs = xs.repeat_interleave(size_chunk, dim=0)
         token_type_xs = torch.zeros(xs.size(0), xs.size(1)).int().to(self.device)
         token_embedding_xs = self.token_type_embeddings(token_type_xs)
         token_type_ys = torch.ones(ys.size(0), ys.size(1)).int().to(self.device)
@@ -461,28 +520,35 @@ class extend_multi(nn.Module):
             scores = self.linearhead(attention_result[:,1:,:])
             scores = scores.squeeze(-1)
         return scores
-    def forward_chunk(self, xs, ys, dot = False):
-        xs = xs.to(self.device) # (batch size, 1, embed_dim)
-        print(xs, xs.shape, ys, ys.shape)
-        print("**1**")
-        ys = ys.squeeze(dim = -2).to(self.device) #(batch_size, cands, embed_dim)
-        print(xs, xs.shape, ys, ys.shape)
-        print("**2**")
-        xs = xs.unsqueeze(0).expand(ys.size(0), -1, -1, -1)
-        print(xs, xs.shape, ys, ys.shape)
-        print("**3**")
-        xs = xs.reshape(xs.size(0)*xs.size(1), xs.size(2), xs.size(3))
-        print(xs, xs.shape, ys, ys.shape)
-        token_type_xs = torch.zeros(xs.size(0), xs.size(1)).int().to(self.device)
-        token_embedding_xs = self.token_type_embeddings(token_type_xs)
-        token_type_ys = torch.ones(ys.size(0), ys.size(1)).int().to(self.device)
-        token_embedding_ys = self.token_type_embeddings(token_type_ys)
-        input = torch.cat([xs + token_embedding_xs, ys + token_embedding_ys], dim = 1)
-        attention_result = self.transformerencoder(input)
-        if dot:
-            scores = torch.bmm(attention_result[:,0,:].unsqueeze(1), attention_result[:,1:,:].transpose(2,1))
-            scores = scores.squeeze(-2)
-        else:
-            scores = self.linearhead(attention_result[:,1:,:])
-            scores = scores.squeeze(-1)
-        return scores
+
+class IdentityInitializedTransformerEncoderLayer(torch.nn.TransformerEncoderLayer):
+    def __init__(self, d_model, nhead, dim_feedforward=3072, dropout=0.1, activation="relu"):
+        super().__init__(d_model, nhead, dim_feedforward, dropout, activation, batch_first = True)
+        # Initialize the weight matrices to the identity matrix
+        self.self_attn.in_proj_weight.data.copy_(0.5*torch.cat([torch.eye(d_model),torch.eye(d_model),torch.eye(d_model)], dim = 0))
+        self.self_attn.in_proj_bias.data.zero_()
+        self.self_attn.out_proj.weight.data.copy_(0.5*torch.eye(d_model))
+        self.self_attn.out_proj.bias.data.zero_()
+
+        self.linear1.weight.data.copy_(torch.cat([torch.eye(d_model),torch.eye(d_model),torch.eye(d_model),torch.eye(d_model)], dim = 0))
+        self.linear1.bias.data.zero_()
+        self.linear2.weight.data.copy_(torch.cat([torch.eye(d_model),torch.eye(d_model),torch.eye(d_model),torch.eye(d_model)], dim = 1))
+        self.linear2.bias.data.zero_()
+        self.norm1.weight.data.fill_(1.0)
+        self.norm1.bias.data.zero_()
+        self.norm2.weight.data.fill_(1.0)
+        self.norm2.bias.data.zero_()
+        self.dropout1.p = dropout
+        self.dropout2.p = dropout
+        self.self_attn.q_proj = None
+        self.self_attn.k_proj = None
+        self.self_attn.v_proj = None
+    def forward(self, src, src_mask=None, src_key_padding_mask=None):
+        # If the embeddings are not initialized, initialize them with the input tensor x
+        if self.self_attn.q_proj is None:
+            self.self_attn.q_proj = nn.Parameter(src)
+            self.self_attn.k_proj = nn.Parameter(src)
+            self.self_attn.v_proj = nn.Parameter(src)
+
+        # Call the forward method of the parent class
+        return super().forward(src, src_mask, src_key_padding_mask)
