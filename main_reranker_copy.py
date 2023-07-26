@@ -65,7 +65,7 @@ def configure_optimizer_simple(args, model, num_train_examples):
 
 def micro_eval(model, loader_eval, num_total_unorm, debug = False, args = None):
     model.eval()
-
+    
     num_total = 0
     num_correct = 0
     loss_total = 0
@@ -115,7 +115,7 @@ def macro_eval(model, val_loaders, num_total_unorm, args = None):
             'num_total_norm': num_total_norm,
             'val_loss': loss_total}
 
-def recall_eval(model, val_loaders, num_total_unorm, k = 64, all_candidates_embeds = None, beam_ratio = 0.25):
+def recall_eval(model, val_loaders, num_total_unorm, eval_mode = "micro", k = 64, all_candidates_embeds = None, beam_ratio = 0.25):
 
     # if hasattr(model, 'module'):
     #     model.module.evaluate_on = True
@@ -241,7 +241,7 @@ def main(args):
     logger = Logger(args.model + '.log', True)
     logger.log(str(args))
     write_to_file(
-        os.path.join(args.model, "training_params.json"), str(args)
+        os.path.join(args.model, "training_params.txt"), str(args)
     )
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -278,12 +278,8 @@ def main(args):
                                  args.mention_use_codes, args.entity_use_codes,
                                  attention_type, None, False, num_heads = args.num_heads, num_layers = args.num_layers)
     if args.resume_training:
-        for each_file_name in os.listdir(args.model):
-            if each_file_name.startswith('epoch'):
-                cpt=torch.load(os.path.join(args.model,each_file_name)) if device.type == 'cuda' \
-                else torch.load(os.path.join(args.model,each_file_name) , map_location=torch.device('cpu'))
-                break
-        print(os.path.join(args.model,each_file_name))
+        cpt = torch.load(args.model+"pytorch_model.bin") if device.type == 'cuda' \
+            else torch.load(args.model+"pytorch_model.bin", map_location=torch.device('cpu'))
         model.load_state_dict(cpt['sd'])
     dp = torch.cuda.device_count() > 1
     if dp:
@@ -298,6 +294,7 @@ def main(args):
     use_full_dataset = (args.type_model == 'full')
     macro_eval_mode = (args.eval_method == 'macro')
     data = load_zeshel_data(args.data, args.cands_dir, macro_eval_mode, args.debug)
+
 
     if args.simpleoptim:
         optimizer, scheduler, num_train_steps, num_warmup_steps \
@@ -357,13 +354,13 @@ def main(args):
                                                     args.inputmark,
                                                     args.C_eval,
                                                     use_full_dataset,
-                                                    macro_eval_mode, args = args)
+                                                    macro_eval_mode, args, args.eval_batch_size)
         # ToDo: cache the entity embeddings in advance at inference time
-        # recall_result = recall_eval(model, loader_val, num_val_samples)
+        # recall_result = recall_eval(model, loader_val, num_val_samples, eval_mode = args.eval_method)
         # print(recall_result)
-        recall_result = recall_eval(model, loader_val, num_val_samples, eval_mode = args.eval_method)
-        print(recall_result)
+
         for batch_idx, batch in tqdm(enumerate(loader_train), total = len(loader_train)):  # Shuffled every epoch
+            
             if args.debug and batch_idx > 10:
                 break
             model.train()
@@ -401,7 +398,7 @@ def main(args):
                                'Average Loss {:8.4f}'.format(
                         step_num, num_train_steps, epoch,
                         batch_idx + 1, len(loader_train), avg_loss))
-                    wandb.log({"average loss": avg_loss, "learning_rate": optimizer.param_groups[0]['lr'], "epoch": epoch})
+                    wandb.log({"average loss": avg_loss, "epoch": epoch})
 
                     logging_loss = tr_loss
 
@@ -423,23 +420,13 @@ def main(args):
             val_result['num_correct'],
             val_result['num_total_norm'],
             newline=False))
-        wandb.log({"unnormalized acc": val_result['acc_unorm'], "normalized acc": val_result['acc_norm']
-        ,"val_loss": val_result['val_loss'], "epoch": epoch})
-        if epoch >= 2:
-            try:
-                os.remove(os.path.join(args.model, "epoch_{}.bin".format(epoch - 1)))
-            except:
-                pass
-        if val_result['acc_unorm'] >= best_val_perf:
+        wandb.log({"unnormalized acc": val_result['acc_unorm'], "normalized acc": ['acc_norm']
+        ,"val_loss": val_result['val_loss']})
+        
+        if val_result['acc_unorm'] > best_val_perf:
             logger.log('      <----------New best val perf: %g -> %g' %
                        (best_val_perf, val_result['acc_unorm']))
             best_val_perf = val_result['acc_unorm']
-            torch.save({'opt': args, 'sd': model.module.state_dict() if dp else model.state_dict(),
-                    'perf': best_val_perf, 'epoch': epoch,
-                    'opt_sd': optimizer.state_dict(),
-                    'scheduler_sd': scheduler.state_dict(),
-                    'tr_loss': tr_loss, 'step_num': step_num,
-                    'logging_loss': logging_loss}, os.path.join(args.model, "epoch_{}.bin".format(epoch)))
             torch.save({'opt': args, 'sd': model.module.state_dict() if dp else model.state_dict(),
                         'perf': best_val_perf, 'epoch': epoch,
                         'opt_sd': optimizer.state_dict(),
@@ -447,22 +434,12 @@ def main(args):
                         'tr_loss': tr_loss, 'step_num': step_num,
                         'logging_loss': logging_loss}, os.path.join(args.model, "pytorch_model.bin"))
         else:
-            
-            torch.save({'opt': args, 'sd': model.module.state_dict() if dp else model.state_dict(),
-                    'perf': best_val_perf, 'epoch': epoch,
-                    'opt_sd': optimizer.state_dict(),
-                    'scheduler_sd': scheduler.state_dict(),
-                    'tr_loss': tr_loss, 'step_num': step_num,
-                    'logging_loss': logging_loss}, os.path.join(args.model, "epoch_{}.bin".format(epoch)))
-
+            logger.log('')
 
         if args.training_one_epoch:
-            break
-    model = torch.load(os.path.join(args.model,"pytorch_model.bin")) if device.type == 'cuda' \
-                else torch.load(os.path.join(args.model,"pytorch_model.bin") , map_location=torch.device('cpu'))
-
-    # model = load_model(os.path.join(args.model, "pytorch_model.bin"), device, eval_mode=True, dp=dp,
-                    #    type_model=args.type_model)
+            raise Exception('args: training one epoch')
+    model = load_model(args.model, device, eval_mode=True, dp=dp,
+                       type_model=args.type_model)
     if args.eval_method == 'micro':
         test_result = micro_eval(model, loader_test, num_test_samples, args)
     else:
@@ -478,7 +455,6 @@ def main(args):
         test_result['num_correct'],
         test_result['num_total_norm']))
 
-    wandb.log({"unnormalized acc": test_result['acc_unorm'], "normalized acc": test_result['acc_norm']})
 
 #  writer.close()
 
@@ -500,10 +476,8 @@ if __name__ == '__main__':
                         help='max number of candidates [%(default)d] when eval')
     parser.add_argument('--B', type=int, default=8,
                         help='batch size [%(default)d]')
-
     parser.add_argument('--eval_batch_size', type=int, default=16,
                         help='batch size [%(default)d]')
-
     parser.add_argument('--lr', type=float, default=2e-5,
                         help='initial learning rate [%(default)g]')
     parser.add_argument('--warmup_proportion', type=float, default=0.1,
@@ -549,6 +523,10 @@ if __name__ == '__main__':
                         help='debugging mode')
     parser.add_argument('--training_one_epoch', action = 'store_true',
                         help='stop the training after one epoch')
+    parser.add_argument('--num_training_cands', default=64, type=int,
+                        help='# of candidates')
+    parser.add_argument('--num_eval_cands', default=256, type=int,
+                        help='# of candidates')
     parser.add_argument('--type_cands', type=str,
                         default='mixed_negative',
                         choices=['fixed_negative',
@@ -557,9 +535,7 @@ if __name__ == '__main__':
                         help='fixed: top k, hard: distributionally sampled k')
     parser.add_argument('--run_id', type = str,
                         help='run id when resuming the run')
-    parser.add_argument('--num_training_cands', default=64, type=int,
-                        help='# of candidates')
-    parser.add_argument('--num_eval_cands', default=256, type=int,
+    parser.add_argument('--num_cands', default=64, type=int,
                         help='# of candidates')
     parser.add_argument('--train_one_epoch', action = 'store_true',
                         help='training only one epoch')

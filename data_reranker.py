@@ -15,7 +15,7 @@ class BasicDataset(Dataset):
 
     def __init__(self, documents, samples, tokenizer, max_len,
                  max_num_candidates,
-                 is_training, indicate_mention_boundaries=False):
+                 is_training, indicate_mention_boundaries=False, args = None):
         self.documents = documents
         self.tokenizer = tokenizer
         self.max_len = max_len
@@ -28,6 +28,7 @@ class BasicDataset(Dataset):
         self.MENTION_START = '[unused0]'
         self.MENTION_END = '[unused1]'
         self.samples = self.cull_samples(samples)
+        self.args = args
 
     def __len__(self):
         return len(self.samples[0])
@@ -51,7 +52,7 @@ class BasicDataset(Dataset):
                 num_hards = len(xs)
                 scores = torch.tensor(candidates['scores'], dtype = float)
                 probs = scores.softmax(dim=0).unsqueeze(0)
-                hard_cands = distribution_sample(probs, args.num_cands,
+                hard_cands = distribution_sample(probs, args.num_training_cands,
                                                     device)
                 xs = np.array(xs)
                 xs = xs[hard_cands.squeeze(0)]
@@ -59,8 +60,8 @@ class BasicDataset(Dataset):
                 xs = [y] + [x for x in xs if x != y]  # Target index always 0
             elif args.type_cands == 'mixed_negative':
                 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-                num_fixed = int(args.num_cands * args.cands_ratio)
-                num_hards = args.num_cands - num_fixed
+                num_fixed = int(args.num_training_cands * args.cands_ratio)
+                num_hards = args.num_training_cands - num_fixed
                 xs = [y] + [x for x in xs if x != y]  # Target index always 0
                 xs = np.array(xs)
                 fixed_xs = xs[:num_fixed]
@@ -73,12 +74,13 @@ class BasicDataset(Dataset):
                 hard_xs = xs[hard_cands.squeeze(0)]
                 xs = np.concatenate((fixed_xs, hard_xs))
 
-            return xs[:args.num_cands]
+            return xs[:args.num_training_cands]
         else:
             # At test time we assume candidates already include target.
             assert y in xs
             xs = [y] + [x for x in xs if x != y]  # Target index always 0
-            return xs[:self.max_num_candidates]
+            # return xs[:self.max_num_candidates]
+            return xs[:args.num_eval_cands]
 
             
 
@@ -133,11 +135,12 @@ class UnifiedDataset(BasicDataset):
         super(UnifiedDataset, self).__init__(documents, samples, tokenizer,
                                              max_len, max_num_candidates,
                                              is_training,
-                                             indicate_mention_boundaries)
+                                             indicate_mention_boundaries, args)
         self.max_len = max_len // 2
         self.max_len_mention = self.max_len - 2  # cls and sep
         self.max_len_candidate = self.max_len - 2  # cls and sep
         self.args = args
+        self.is_training = is_training
 
     def __getitem__(self, index):
         mention = self.samples[0][index]
@@ -150,13 +153,13 @@ class UnifiedDataset(BasicDataset):
                                                           truncation=True)
         mention_token_ids = torch.tensor(mention_encoded_dict['input_ids'])
         mention_masks = torch.tensor(mention_encoded_dict['attention_mask'])
-        candidates_token_ids = torch.zeros((self.max_num_candidates,
-                                            self.max_len))
-        candidates_masks = torch.zeros((self.max_num_candidates,
-                                        self.max_len))
+
 
         candidate_document_ids = self.prepare_candidates(mention, candidates, self.args)
-
+        candidates_token_ids = torch.zeros((len(candidate_document_ids),
+                                            self.max_len))
+        candidates_masks = torch.zeros((len(candidate_document_ids),
+                                        self.max_len))
         for i, candidate_document_id in enumerate(candidate_document_ids):
             candidate_window = self.get_candidate_prefix(candidate_document_id)
             candidate_dict = self.tokenizer.encode_plus(candidate_window,
@@ -173,14 +176,14 @@ class UnifiedDataset(BasicDataset):
 class FullDataset(BasicDataset):
     def __init__(self, documents, samples, tokenizer, max_len,
                  max_num_candidates,
-                 is_training, indicate_mention_boundaries=False):
+                 is_training, indicate_mention_boundaries=False, args = None):
         super(FullDataset, self).__init__(documents, samples, tokenizer,
                                           max_len, max_num_candidates,
                                           is_training,
                                           indicate_mention_boundaries)
         self.max_len_mention = (max_len - 3) // 2  # [CLS], [SEP], [SEP]
         self.max_len_candidate = (max_len - 3) - self.max_len_mention
-
+        self.args = args
     def __getitem__(self, index):
         mention = self.samples[0][index]
         candidates = self.samples[1][mention['mention_id']]
@@ -192,7 +195,7 @@ class FullDataset(BasicDataset):
         encoded_pairs = torch.zeros((self.max_num_candidates, self.max_len))
         type_marks = torch.zeros((self.max_num_candidates, self.max_len))
         input_lens = torch.zeros(self.max_num_candidates)
-        candidate_document_ids = self.prepare_candidates(mention, candidates)
+        candidate_document_ids = self.prepare_candidates(mention, candidates, self.args)
         for i, candidate_document_id in enumerate(candidate_document_ids):
             candidate_prefix = self.get_candidate_prefix(candidate_document_id)
             encoded_dict = self.tokenizer.encode_plus(
@@ -208,19 +211,19 @@ class FullDataset(BasicDataset):
 def get_loaders(data, tokenizer, max_len, max_num_candidates, batch_size,
                 num_workers, indicate_mention_boundaries,
                 max_num_cands_val,
-                use_full_dataset=True, macro_eval=True, args = None):
+                use_full_dataset=True, macro_eval=True, args = None, eval_batch_size = None):
+    if eval_batch_size is None: eval_batch_size = batch_size
     (documents, samples_train,
      samples_val, samples_test) = data
     print('get train loaders')
     if use_full_dataset:
         dataset_train = FullDataset(documents, samples_train, tokenizer,
                                     max_len, max_num_candidates, True,
-                                    indicate_mention_boundaries)
+                                    indicate_mention_boundaries, args = args)
     else:
         dataset_train = UnifiedDataset(documents, samples_train, tokenizer,
                                        max_len, max_num_candidates, True,
-                                       indicate_mention_boundaries, args)
-
+                                       indicate_mention_boundaries, args = args)
     loader_train = DataLoader(dataset_train, batch_size=batch_size,
                               shuffle=True, num_workers=num_workers)
 
@@ -229,12 +232,12 @@ def get_loaders(data, tokenizer, max_len, max_num_candidates, batch_size,
         if use_full_dataset:
             dataset = FullDataset(documents, samples, tokenizer,
                                   max_len, max_num_cands_val, False,
-                                  indicate_mention_boundaries)
+                                  indicate_mention_boundaries, args)
         else:
             dataset = UnifiedDataset(documents, samples, tokenizer,
                                      max_len, max_num_cands_val, False,
-                                     indicate_mention_boundaries)
-        loader = DataLoader(dataset, batch_size=batch_size,
+                                     indicate_mention_boundaries, args)
+        loader = DataLoader(dataset, batch_size=eval_batch_size,
                             shuffle=False,
                             num_workers=num_workers)
         return loader, num_samples
@@ -260,7 +263,7 @@ def get_loaders(data, tokenizer, max_len, max_num_candidates, batch_size,
             val_num_samples, test_num_samples)
 
 
-def load_zeshel_data(data_dir, cands_dir, macro_eval=True):
+def load_zeshel_data(data_dir, cands_dir, macro_eval=True, debug = False):
     """
 
     :param data_dir: train_data_dir if args.train else eval_data_dir
@@ -290,7 +293,7 @@ def load_zeshel_data(data_dir, cands_dir, macro_eval=True):
                 domains.add(field['corpus'])
         return list(domains)
 
-    def load_mention_candidates_pairs(part, domain=None, in_domain=False):
+    def load_mention_candidates_pairs(part, domain=None, in_domain=False, debug = False):
         mentions = []
         with open(os.path.join(men_path, '%s.json' % part)) as f:
             for i, line in enumerate(f):
@@ -311,7 +314,8 @@ def load_zeshel_data(data_dir, cands_dir, macro_eval=True):
         return mentions, candidates
 
     print('start getting train pairs')
-    samples_train = load_mention_candidates_pairs('train')
+    samples_train = load_mention_candidates_pairs('train', debug = debug)
+    print('start getting val and test pairs')
     if macro_eval:
         print('compute the domains')
         val_domains = get_domains('val')
@@ -327,6 +331,7 @@ def load_zeshel_data(data_dir, cands_dir, macro_eval=True):
             pair = load_mention_candidates_pairs('test', test_domain, True)
             samples_test.append(pair)
     else:
+
         samples_val = load_mention_candidates_pairs('val')
         samples_test = load_mention_candidates_pairs('test')
 
