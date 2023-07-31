@@ -25,7 +25,7 @@ def set_seed(args):
 def configure_optimizer(args, model, num_train_examples):
     # https://github.com/google-research/bert/blob/master/optimization.py#L25
     no_decay = ['bias', 'LayerNorm.weight']
-    transformer = ['extend_multi']
+    transformer = ['extend_multi', 'mlp']
     for n, p in model.named_parameters():
         count = 0
     optimizer_grouped_parameters = [
@@ -143,11 +143,15 @@ def recall_eval(model, val_loaders, num_total_unorm, eval_mode = "micro", k = 64
         acc_norm = 0
         num_correct = 0
         recall_correct = 0
-
+        if args.type_cands == "self_negative":
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            scores_tensor = torch.tensor([]).to(device)
         with torch.no_grad(): 
             for i, batch in tqdm(enumerate(val_loaders), total = len(val_loaders)):
                 if i > 3 and debug: break
-                scores = model.forward(*batch, recall_eval = True, beam_ratio = args.beam_ratio)[2]
+                scores = model.forward(*batch, recall_eval = True, beam_ratio = args.beam_ratio, args = args)[2]
+                if args.type_cands == "self_negative":
+                    scores_tensor = torch.cat([scores_tensor, scores], dim = 0)
                 top_k = scores.topk(k, dim=1)[1]
                 preds = top_k[:, 0]
                 r_k += (top_k == 0).sum().item()
@@ -164,7 +168,12 @@ def recall_eval(model, val_loaders, num_total_unorm, eval_mode = "micro", k = 64
         else:
             model.evaluate_on = False
             model.candidates_embeds = None
-        return {"recall": r_k, "acc_norm": acc_norm, "acc_unorm":acc_unorm, "num_total_norm": nb_samples, "num_correct": num_correct, "recall_correct": recall_correct, "num_total_norm": nb_samples}
+        if args.type_cands != "self_negative":
+            return {"recall": r_k, "acc_norm": acc_norm, "acc_unorm":acc_unorm, "num_total_norm": nb_samples, "num_correct": num_correct, "recall_correct": recall_correct, "num_total_norm": nb_samples}
+        else:
+            return {"recall": r_k, "acc_norm": acc_norm, "acc_unorm":acc_unorm, "num_total_norm": nb_samples, \
+                    "num_correct": num_correct, "recall_correct": recall_correct, "num_total_norm": nb_samples}, scores_tensor
+
     if eval_mode == "micro":
         return micro_recall_eval(model, val_loaders, num_total_unorm, k, all_candidates_embeds, args)
     elif eval_mode == "macro":
@@ -176,7 +185,10 @@ def recall_eval(model, val_loaders, num_total_unorm, eval_mode = "micro", k = 64
         for i in range(len(val_loaders)):
             val_loader = val_loaders[i]
             num_unorm = num_total_unorm[i]
-            micro_results = micro_recall_eval(model, val_loader, num_unorm, k, all_candidates_embeds, args)
+            if args.type_cands != 'self_negative':
+                micro_results = micro_recall_eval(model, val_loader, num_unorm, k, all_candidates_embeds, args)
+            else:
+                micro_results, scores_tensor = micro_recall_eval(model, val_loader, num_unorm, k, all_candidates_embeds, args)
             recall += micro_results['recall']
             acc_unorm += micro_results['acc_unorm']
             acc_norm += micro_results['acc_norm']
@@ -280,6 +292,10 @@ def main(args):
             num_entity_vecs = 1
         elif args.type_model == 'extend_multi_dot':
             attention_type = 'extend_multi_dot'
+            num_mention_vecs = 1
+            num_entity_vecs = 1
+        elif args.type_model == 'mlp':
+            attention_type = 'mlp'
             num_mention_vecs = 1
             num_entity_vecs = 1
         else:
@@ -398,17 +414,22 @@ def main(args):
                                                     use_full_dataset,
                                                     macro_eval_mode, args = args)
         if args.type_cands == "self_negative":
-            torch.multiprocessing.set_start_method('spawn')
-            scores = torch.tensor([]).to(device)
-            model.eval()
             with torch.no_grad():
-                print("spot 1")
+                torch.multiprocessing.set_start_method('spawn')
+                scores_tensor = torch.tensor([]).to(device)
                 for i, batch in tqdm(enumerate(loader_train), total=len(loader_train)):
-                    score = model.forward(*batch, recall_eval=True, beam_ratio=args.beam_ratio, args=args)[2]
-                    scores = torch.cat((scores, score), dim = 0)
-            print("spot 2")
-
-            data = load_zeshel_data(args.data, args.cands_dir, macro_eval_mode, args.debug, scores = scores)
+                    scores = model.forward(*batch, recall_eval=True, beam_ratio=args.beam_ratio, args=args)[2]
+                    scores_tensor = torch.cat([scores_tensor, scores], dim=0)
+            #
+            # scores = torch.tensor([]).to(device)
+            # model.eval()
+            # with torch.no_grad():
+            #     print("spot 1")
+            #     for i, batch in tqdm(enumerate(loader_train), total=len(loader_train)):
+            #         score = model.forward(*batch, recall_eval=True, beam_ratio=args.beam_ratio, args=args)[2]
+            #         scores = torch.cat((scores, score), dim = 0)
+            # print("spot 2")/
+            data = load_zeshel_data(args.data, args.cands_dir, macro_eval_mode, args.debug, scores = scores_tensor)
 
             loader_train, _, _, \
             _, _ = get_loaders(data, tokenizer, args.L,
@@ -421,6 +442,7 @@ def main(args):
                     # if args.anncur:
         #     val_result = macro_eval(model, loader_val, num_val_samples, args)
         #     print(val_result)
+
         for batch_idx, batch in tqdm(enumerate(loader_train), total = len(loader_train)):  # Shuffled every epoch
             if args.debug and batch_idx > 10: break
             model.train()
@@ -588,7 +610,10 @@ if __name__ == '__main__':
                         help='max number of candidates [%(default)d] when eval')
     parser.add_argument('--B', type=int, default=4,
                         help='batch size [%(default)d]')
-
+    parser.add_argument('--freeze_bert', action = 'store_true',
+                        help='freeze encoder BERT')
+    parser.add_argument('--identity_bert', action = 'store_true',
+                        help='assign same query and key matrix')
     parser.add_argument('--eval_batch_size', type=int, default=8,
                         help='evaluation batch size [%(default)d]')
 
@@ -631,7 +656,8 @@ if __name__ == '__main__':
                                  'poly',
                                  'full',
                                  'extend_multi',
-                                 'extend_multi_dot'],
+                                 'extend_multi_dot',
+                                 'mlp'],
                         help='the type of model')
     parser.add_argument('--debug', action = 'store_true',
                         help='debugging mode')

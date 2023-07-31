@@ -10,6 +10,7 @@ import json
 import os
 from tqdm import tqdm
 import torch.nn as nn
+from collections import OrderedDict
 
 
 def get_all_entity_hiddens(en_loaders, model,
@@ -134,7 +135,8 @@ def main(args):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     package = torch.load(args.model) if device.type == 'cuda' \
         else torch.load(args.model, map_location=torch.device('cpu'))
-    new_state_dict = package['sd']
+    if args.anncur: new_state_dict = package['state_dict']
+    else: new_state_dict = package['sd']
     # encoder=MLPEncoder(args.max_len)
     if args.pre_model == 'Bert':
         encoder = BertModel.from_pretrained('bert-base-uncased')
@@ -156,7 +158,18 @@ def main(args):
     model = UnifiedRetriever(encoder, device, num_mention_vecs, num_entity_vecs,
                              args.mention_use_codes, args.entity_use_codes,
                              attention_type, None, False)
-    model.load_state_dict(new_state_dict)
+    if args.anncur:
+        modified_state_dict = OrderedDict()
+        for k, v in new_state_dict.items():
+            if k.startswith('model.input_encoder'):
+                name = k.replace('model.input_encoder.bert_model', 'mention_encoder')
+            elif k.startswith('model.label_encoder'):
+                name = k.replace('model.label_encoder.bert_model', 'entity_encoder')
+            modified_state_dict[name] = v
+        model.load_state_dict(modified_state_dict, strict = False)        
+
+    else:
+        model.load_state_dict(new_state_dict)
 
     dp = torch.cuda.device_count() > 1
     if dp:
@@ -359,6 +372,8 @@ if __name__ == '__main__':
     parser.add_argument('--pre_model', default='Bert',
                         choices=['Bert', 'Roberta'],
                         type=str, help='the encoder for train')
+    parser.add_argument('--anncur', action='store_true', help = "load anncur ckpt")
+    
     parser.add_argument('--store_en_hiddens', action='store_true',
                         help='store entity hiddens?')
     args = parser.parse_args()

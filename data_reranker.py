@@ -51,13 +51,13 @@ class BasicDataset(Dataset):
             elif args.type_cands == 'hard_negative' or self_negs_again:
                 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
                 num_hards = len(xs)
+                # scores = candidates['scores'].clone().detach()
                 scores = torch.tensor(candidates['scores'], dtype = float)
                 probs = scores.softmax(dim=0).unsqueeze(0)
                 hard_cands = distribution_sample(probs, args.num_training_cands,
                                                     device)
                 xs = np.array(xs)
                 xs = xs[hard_cands.squeeze(0).cpu()]
-                
                 xs = [y] + [x for x in xs if x != y]  # Target index always 0
             elif args.type_cands == 'mixed_negative':
                 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -324,7 +324,8 @@ def load_zeshel_data(data_dir, cands_dir, macro_eval=True, debug = False, scores
             for i, line in enumerate(f):
                 if debug and i>10: break
                 field = json.loads(line)
-                if scores is not None:  field['scores'] = scores[i]
+                if scores is not None:
+                    field['scores'] = scores[i]
 
                 candidates[field['mention_id']] = field
         return mentions, candidates

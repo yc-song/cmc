@@ -356,9 +356,11 @@ def main(args):
                                                     use_full_dataset,
                                                     macro_eval_mode, args, args.eval_batch_size)
         # ToDo: cache the entity embeddings in advance at inference time
-        # recall_result = recall_eval(model, loader_val, num_val_samples, eval_mode = args.eval_method)
-        # print(recall_result)
-
+        try:
+            recall_result = recall_eval(model, loader_val, num_val_samples, eval_mode = args.eval_method)
+            print(recall_result)
+        except:
+            print('Error 발생했음')
         for batch_idx, batch in tqdm(enumerate(loader_train), total = len(loader_train)):  # Shuffled every epoch
             
             if args.debug and batch_idx > 10:
