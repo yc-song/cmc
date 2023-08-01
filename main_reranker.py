@@ -274,7 +274,7 @@ def main(args):
     else:
         encoder = BertModel.from_pretrained('bert-large-uncased')
     if args.type_model == 'full':
-        model = FullRanker(encoder, device)
+        model = FullRanker(encoder, device, args)
     else:
         if args.type_model == 'poly':
             attention_type = 'soft_attention'
@@ -447,7 +447,7 @@ def main(args):
             if args.debug and batch_idx > 10: break
             model.train()
             # try:
-            result = model.forward(*batch, args = args)
+            result = model.forward(*batch)
 
             if type(result) is tuple:
                 loss = result[0]

@@ -7,7 +7,7 @@ NEAR_INF = 1e20
 
 class FullRanker(nn.Module):
 
-    def __init__(self, encoder, device):
+    def __init__(self, encoder, device, args):
         super(FullRanker, self).__init__()
         self.encoder = encoder
         self.dim_hidden = self.encoder.config.hidden_size
@@ -16,14 +16,16 @@ class FullRanker(nn.Module):
                                          nn.Linear(self.dim_hidden, 1))
         self.avgCE = nn.CrossEntropyLoss(reduction='mean')
         self.device = device
-
+        if args.freeze_bert:
+            for param in self.encoder.parameters():
+                param.requires_grad = False
         # FOLLOWING bert-base-uncased INITIALIZATION
         # https://huggingface.co/transformers/_modules/transformers/modeling_bert.html
         self.score_layer[1].weight.data.normal_(
             mean=0.0, std=self.encoder.config.initializer_range)
         self.score_layer[1].bias.data.zero_()
 
-    def forward(self, encoded_pairs, type_marks, input_lens):
+    def forward(self, encoded_pairs, type_marks, input_lens, args=None):
         encoded_pairs = encoded_pairs.to(self.device)
         type_marks = type_marks.to(self.device)
         input_lens = input_lens.to(self.device)
