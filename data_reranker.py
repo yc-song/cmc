@@ -309,7 +309,6 @@ def load_zeshel_data(data_dir, cands_dir, macro_eval=True, debug = False, scores
         mentions = []
         with open(os.path.join(men_path, '%s.json' % part)) as f:
             for i, line in enumerate(f):
-                if debug and i>10: break
                 field = json.loads(line)
                 if in_domain:
                     if field['corpus'] == domain:
@@ -322,7 +321,6 @@ def load_zeshel_data(data_dir, cands_dir, macro_eval=True, debug = False, scores
         with open(os.path.join(cands_dir,
                                'candidates_%s.json' % part)) as f:
             for i, line in enumerate(f):
-                if debug and i>10: break
                 field = json.loads(line)
                 if scores is not None:
                     field['scores'] = scores[i]

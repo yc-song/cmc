@@ -80,9 +80,11 @@ def micro_eval(model, loader_eval, num_total_unorm, args = None):
             result = model.forward(*batch, args = args)
             if type(result) is dict:
                 preds = result['predictions']
+                loss_total += result['loss'].sum()
+
             else:
                 preds = result[1]
-            loss_total += result[0].sum()
+                loss_total += result[0].sum()
             num_total += len(preds)
             num_correct += (preds == 0).sum().item()
             # except:
