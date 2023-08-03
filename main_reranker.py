@@ -47,8 +47,10 @@ def configure_optimizer(args, model, num_train_examples):
     num_train_steps = int(num_train_examples / args.B /
                           args.gradient_accumulation_steps * args.epochs)
     num_warmup_steps = int(num_train_steps * args.warmup_proportion)
-
-    scheduler = get_linear_schedule_with_warmup(
+    if args.lambda_scheduler:
+        scheduler = LambdaLR(optimizer, lr_lambda=lambda step: 1 - step / num_train_steps)
+    else:
+        scheduler = get_linear_schedule_with_warmup(
         optimizer, num_warmup_steps=num_warmup_steps,
         num_training_steps=num_train_steps)
 
@@ -449,7 +451,7 @@ def main(args):
             if args.debug and batch_idx > 10: break
             model.train()
             # try:
-            result = model.forward(*batch)
+            result = model.forward(*batch, args = args)
 
             if type(result) is tuple:
                 loss = result[0]
@@ -711,6 +713,8 @@ if __name__ == '__main__':
     parser.add_argument('--too_large', action='store_true',
                         help='all entity hidden states path')
     parser.add_argument('--entity_bsz', type=int, default=64,
+                        help='the batch size')
+    parser.add_argument('--lambda_scheduler', type=int, default=64,
                         help='the batch size')
     parser.add_argument(
         "--fp16",

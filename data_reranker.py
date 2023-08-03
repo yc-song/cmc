@@ -119,6 +119,7 @@ class BasicDataset(Dataset):
                                self.tokenizer.tokenize(suffix),
                                self.max_len_mention)
 
+
     def get_candidate_prefix(self, candidate_document_id):
         # Get "enough" context from space-tokenized text.
         tokens = self.documents[candidate_document_id]['text'].split()
@@ -126,7 +127,7 @@ class BasicDataset(Dataset):
         prefix = ' '.join(prefix)
 
         # Get prefix under new tokenization.
-        return self.tokenizer.tokenize(prefix)[:self.max_len_candidate]
+        return self.tokenizer.tokenize(prefix)[:self.max_len_candidate], self.documents[candidate_document_id]['text'] 
 
 
 class UnifiedDataset(BasicDataset):
@@ -148,6 +149,7 @@ class UnifiedDataset(BasicDataset):
         mention = self.samples[0][index]
         candidates = self.samples[1][mention['mention_id']]
         mention_window = self.get_mention_window(mention)[0]
+        mention_token  = self.documents[mention['context_document_id']]['text']
         mention_encoded_dict = self.tokenizer.encode_plus(mention_window,
                                                           add_special_tokens=True,
                                                           max_length=self.max_len,
@@ -162,8 +164,9 @@ class UnifiedDataset(BasicDataset):
                                             self.max_len))
         candidates_masks = torch.zeros((len(candidate_document_ids),
                                         self.max_len))
+        candidates_tokens =  [None]*len(candidate_document_ids)
         for i, candidate_document_id in enumerate(candidate_document_ids):
-            candidate_window = self.get_candidate_prefix(candidate_document_id)
+            candidate_window, candidate_token = self.get_candidate_prefix(candidate_document_id)
             candidate_dict = self.tokenizer.encode_plus(candidate_window,
                                                         add_special_tokens=True,
                                                         max_length=self.max_len,
@@ -171,6 +174,17 @@ class UnifiedDataset(BasicDataset):
                                                         truncation=True)
             candidates_token_ids[i] = torch.tensor(candidate_dict['input_ids'])
             candidates_masks[i] = torch.tensor(candidate_dict['attention_mask'])
+            candidates_tokens[i] = candidate_token
+        # print('''
+        # A list of documents is shown below. Each document has a number next to it along with a summary of each entity. A sentence that includes mention and context is also provided.
+        # Respond with the numbers of the documents you should consult to answer the question, in order of relevance, as well as the relevance score. A relevance score is a number from 1–10 based on which entity is the correct reference for the given mention.
+        # Do not include any documents that are not relevant to the question.
+        # Example format:
+        # ''')
+        # for i, elem in enumerate(candidates_tokens):
+        #     print("Document {}: {}".format(i, elem))
+        # print("Question: {}".format(mention_token))
+        # print("Answer:")
         return mention_token_ids, mention_masks, candidates_token_ids, \
                candidates_masks
 
@@ -189,7 +203,7 @@ class FullDataset(BasicDataset):
     def __getitem__(self, index):
         mention = self.samples[0][index]
         candidates = self.samples[1][mention['mention_id']]
-        mention_window, mention_start, mention_end \
+        mention_window, mention_start, mention_end, _ \
             = self.get_mention_window(mention)
         mention_start += 1  # [CLS]
         mention_end += 1  # [CLS]
@@ -199,7 +213,7 @@ class FullDataset(BasicDataset):
         input_lens = torch.zeros(self.max_num_candidates)
         candidate_document_ids = self.prepare_candidates(mention, candidates, self.args)
         for i, candidate_document_id in enumerate(candidate_document_ids):
-            candidate_prefix = self.get_candidate_prefix(candidate_document_id)
+            candidate_prefix, _ = self.get_candidate_prefix(candidate_document_id)
             encoded_dict = self.tokenizer.encode_plus(
                 mention_window, candidate_prefix, return_attention_mask=False,
                 pad_to_max_length=True, max_length=self.max_len,
