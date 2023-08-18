@@ -67,25 +67,25 @@ def configure_optimizer_simple(args, model, num_train_examples):
 
     return optimizer, scheduler, num_train_steps, num_warmup_steps
 
-
-def micro_eval(model, loader_eval, num_total_unorm, args=None):
+def micro_eval(model, loader_eval, num_total_unorm, args = None):
     model.eval()
     debug = args.debug
     num_total = 0
     num_correct = 0
     loss_total = 0
-
+    
     with torch.no_grad():
-        for step, batch in tqdm(enumerate(loader_eval), total=len(loader_eval)):
-            if debug and step > 3: break
+        for step, batch in tqdm(enumerate(loader_eval), total = len(loader_eval)):
+            if debug and step > 10: break
             # try:
-            result = model.forward(*batch, args=args)
+            result = model.forward(*batch, args = args)
             if type(result) is dict:
                 preds = result['predictions']
+                loss_total += result['loss'].sum()
+
             else:
                 preds = result[1]
-            preds_list.append(preds)
-            loss_total += result[0].sum()
+                loss_total += result[0].sum()
             num_total += len(preds)
             num_correct += (preds == 0).sum().item()
             # except:
@@ -101,7 +101,7 @@ def micro_eval(model, loader_eval, num_total_unorm, args=None):
             'val_loss': loss_total}
 
 
-def macro_eval(model, val_loaders, num_total_unorm, args=None):
+def macro_eval(model, val_loaders, num_total_unorm, args = None):
     model.eval()
     assert len(val_loaders) == len(num_total_unorm)
     acc_norm = 0
@@ -112,7 +112,7 @@ def macro_eval(model, val_loaders, num_total_unorm, args=None):
     for i in tqdm(range(len(val_loaders))):
         val_loader = val_loaders[i]
         num_unorm = num_total_unorm[i]
-        micro_results = micro_eval(model, val_loader, num_unorm, args=args)
+        micro_results = micro_eval(model, val_loader, num_unorm, args = args)
         acc_norm += micro_results['acc_norm']
         acc_unorm += micro_results['acc_unorm']
         loss_total += micro_results['val_loss']
@@ -127,9 +127,8 @@ def macro_eval(model, val_loaders, num_total_unorm, args=None):
             'num_total_norm': num_total_norm,
             'val_loss': loss_total}
 
+def recall_eval(model, val_loaders, num_total_unorm, eval_mode = "micro", k = 64, all_candidates_embeds = None,  args = None):
 
-def recall_eval(model, val_loaders, num_total_unorm, eval_mode="micro", k=64, all_candidates_embeds=None,
-                beam_ratio=0.25, args=None):
     # if hasattr(model, 'module'):
     #     model.module.evaluate_on = True
     #     if all_candidates_embeds is not None:
@@ -138,7 +137,7 @@ def recall_eval(model, val_loaders, num_total_unorm, eval_mode="micro", k=64, al
     #     model.evaluate_on = True
     #     if all_candidates_embeds is not None:
     #         model.candidates_embeds = all_candidates_embeds
-    def micro_recall_eval(model, val_loaders, num_total_unorm, k, all_candidates_embeds, beam_ratio=0.25, args=None):
+    def micro_recall_eval(model, val_loaders, num_total_unorm, k, all_candidates_embeds, args = None):
         model.eval()
         if args is not None: debug = args.debug
         nb_samples = 0
@@ -147,21 +146,28 @@ def recall_eval(model, val_loaders, num_total_unorm, eval_mode="micro", k=64, al
         acc_norm = 0
         num_correct = 0
         recall_correct = 0
-
-        with torch.no_grad():
-            for i, batch in tqdm(enumerate(val_loaders), total=len(val_loaders)):
+        if args.type_cands == "self_negative" or args.type_cands == "self_fixed_negative":
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            scores_tensor = torch.tensor([]).to(device)
+        with torch.no_grad(): 
+            for i, batch in tqdm(enumerate(val_loaders), total = len(val_loaders)):
                 if i > 3 and debug: break
-                scores = model.forward(*batch, recall_eval=True, beam_ratio=args.beam_ratio)[2]
+                result = model.forward(*batch, recall_eval = True, beam_ratio = args.beam_ratio, args = args)
+                if type(result) is dict:
+                    scores = result['scores']
+                else:
+                    scores = result[2]
+                if args.type_cands == "self_negative" or args.type_cands == "self_fixed_negative":
+                    scores_tensor = torch.cat([scores_tensor, scores], dim = 0)
                 top_k = scores.topk(k, dim=1)[1]
                 preds = top_k[:, 0]
-                recall_preds.append(preds)
                 r_k += (top_k == 0).sum().item()
                 recall_correct += (top_k == 0).sum().item()
                 num_correct += (preds == 0).sum().item()
                 nb_samples += scores.size(0)
-        r_k = recall_correct / nb_samples * 100
-        acc_norm = num_correct / nb_samples * 100
-        acc_unorm = num_correct / num_total_unorm * 100
+        r_k = recall_correct/nb_samples * 100
+        acc_norm = num_correct/nb_samples * 100
+        acc_unorm = num_correct/num_total_unorm * 100
         model.train()
         if hasattr(model, 'module'):
             model.module.evaluate_on = False
@@ -169,11 +175,14 @@ def recall_eval(model, val_loaders, num_total_unorm, eval_mode="micro", k=64, al
         else:
             model.evaluate_on = False
             model.candidates_embeds = None
-        return {"recall": r_k, "acc_norm": acc_norm, "acc_unorm": acc_unorm, "num_total_norm": nb_samples,
-                "num_correct": num_correct, "recall_correct": recall_correct, "num_total_norm": nb_samples}
+        if args.type_cands != "self_negative" and args.type_cands != "self_fixed_negative":
+            return {"recall": r_k, "acc_norm": acc_norm, "acc_unorm":acc_unorm, "num_total_norm": nb_samples, "num_correct": num_correct, "recall_correct": recall_correct, "num_total_norm": nb_samples}
+        else:
+            return {"recall": r_k, "acc_norm": acc_norm, "acc_unorm":acc_unorm, "num_total_norm": nb_samples, \
+                    "num_correct": num_correct, "recall_correct": recall_correct, "num_total_norm": nb_samples}, scores_tensor
 
     if eval_mode == "micro":
-        return micro_recall_eval(model, val_loaders, num_total_unorm, k, all_candidates_embeds, beam_ratio, args)
+        return micro_recall_eval(model, val_loaders, num_total_unorm, k, all_candidates_embeds, args)
     elif eval_mode == "macro":
         acc_norm = 0
         acc_unorm = 0
@@ -183,7 +192,10 @@ def recall_eval(model, val_loaders, num_total_unorm, eval_mode="micro", k=64, al
         for i in range(len(val_loaders)):
             val_loader = val_loaders[i]
             num_unorm = num_total_unorm[i]
-            micro_results = micro_recall_eval(model, val_loader, num_unorm, k, all_candidates_embeds, beam_ratio, args)
+            if args.type_cands != 'self_negative' and args.type_cands != "self_fixed_negative":
+                micro_results = micro_recall_eval(model, val_loader, num_unorm, k, all_candidates_embeds, args)
+            else:
+                micro_results, scores_tensor = micro_recall_eval(model, val_loader, num_unorm, k, all_candidates_embeds, args)
             recall += micro_results['recall']
             acc_unorm += micro_results['acc_unorm']
             acc_norm += micro_results['acc_norm']
@@ -193,9 +205,7 @@ def recall_eval(model, val_loaders, num_total_unorm, eval_mode="micro", k=64, al
         acc_unorm /= len(val_loaders)
         recall /= len(val_loaders)
         model.train()
-        return {"acc_norm": acc_norm, "acc_unorm": acc_unorm, "recall": recall, "num_total_norm": num_total_norm,
-                "num_correct": num_correct_list}
-
+        return {"acc_norm": acc_norm, "acc_unorm":acc_unorm, "recall": recall, "num_total_norm": num_total_norm, "num_correct": num_correct_list}
 
 def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -297,14 +307,15 @@ def main(args):
                                  attention_type, None, False, args, num_heads=args.num_heads,
                                  num_layers=args.num_layers)
     count = 0
-    cpt = None
-    for each_file_name in os.listdir(args.model):
-        if each_file_name.startswith('epoch'):
-            if count == 1: raise ('More than two bin files found in the model directory')
-            cpt = torch.load(os.path.join(args.model, each_file_name)) if device.type == 'cuda' \
-                else torch.load(os.path.join(args.model, each_file_name), map_location=torch.device('cpu'))
-            count += 1
-            print(os.path.join(args.model, each_file_name))
+    # for each_file_name in os.listdir(args.model):
+    #     if each_file_name.startswith('epoch'):
+    #         if count == 1: raise ('More than two bin files found in the model directory')
+    #         cpt = torch.load(os.path.join(args.model, each_file_name)) if device.type == 'cuda' \
+    #             else torch.load(os.path.join(args.model, each_file_name), map_location=torch.device('cpu'))
+    #         count += 1
+    #         print(os.path.join(args.model, each_file_name))
+    cpt = torch.load(os.path.join(args.model, "pytorch_model.bin"))
+
     model.load_state_dict(cpt['sd'])
     dp = torch.cuda.device_count() > 1
     if dp:
