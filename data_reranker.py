@@ -10,7 +10,7 @@ from collections import Counter
 from torch.utils.data import Dataset, DataLoader
 from util import Logger as BasicLogger
 from data_retriever import distribution_sample
-
+from tqdm import tqdm
 class BasicDataset(Dataset):
 
     def __init__(self, documents, samples, tokenizer, max_len,
@@ -44,36 +44,56 @@ class BasicDataset(Dataset):
             # At training time we can include target if not already included.
             if not y in xs:
                 xs.append(y)
-            if args.type_cands == 'self_negative' and not self_negs_again:
-                return xs[:args.num_eval_cands]
-            elif args.type_cands == 'fixed_negative':
-                xs = [y] + [x for x in xs if x != y]  # Target index always 0
-            elif args.type_cands == 'hard_negative' or self_negs_again:
-                device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-                num_hards = len(xs)
-                # scores = candidates['scores'].clone().detach()
-                scores = torch.tensor(candidates['scores'], dtype = float)
-                probs = scores.softmax(dim=0).unsqueeze(0)
-                hard_cands = distribution_sample(probs, args.num_training_cands,
-                                                    device)
-                xs = np.array(xs)
-                xs = xs[hard_cands.squeeze(0).cpu()]
-                xs = [y] + [x for x in xs if x != y]  # Target index always 0
-            elif args.type_cands == 'mixed_negative':
-                device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-                num_fixed = int(args.num_training_cands * args.cands_ratio)
-                num_hards = args.num_training_cands - num_fixed
-                xs = [y] + [x for x in xs if x != y]  # Target index always 0
-                xs = np.array(xs)
-                fixed_xs = xs[:num_fixed]
-                scores = torch.tensor(candidates['scores'], dtype = float)[num_fixed:]
-                probs = scores.softmax(dim=0)
-                probs = probs.unsqueeze(0)
-                a = distribution_sample(probs, num_hards, device).squeeze(0)
-                hard_cands = torch.tensor([num_fixed]) + distribution_sample(probs, num_hards, device).squeeze(0)
-                
-                hard_xs = xs[hard_cands.squeeze(0)]
-                xs = np.concatenate((fixed_xs, hard_xs))
+            if not self_negs_again:
+                # At first, training set == entire set
+                if args.type_cands == 'self_negative' or args.type_cands == "self_fixed_negative":
+                    return xs[:args.num_sampled]
+                elif args.type_cands == 'fixed_negative':
+                    xs = [y] + [x for x in xs if x != y]  # Target index always 0
+                elif args.type_cands == 'mixed_negative':
+                    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+                    num_fixed = int(args.num_training_cands * args.cands_ratio)
+                    num_hards = args.num_training_cands - num_fixed
+                    xs = [y] + [x for x in xs if x != y]  # Target index always 0
+                    xs = np.array(xs)
+                    fixed_xs = xs[:num_fixed]
+                    # Random sampling by giving same probs to each candidate
+                    scores = torch.zeros(len(candidates['scores']))[num_fixed:] 
+                    probs = scores.softmax(dim=0)
+                    probs = probs.unsqueeze(0)
+                    hard_cands = torch.tensor([num_fixed]) + distribution_sample(probs, num_hards, device).squeeze(0)
+                    hard_xs = xs[hard_cands.squeeze(0)]
+                    xs = np.concatenate((fixed_xs, hard_xs))
+                if args.type_cands == 'hard_negative': 
+                    # Later, training set is obtained by hard negs mining
+                    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+                    num_hards = len(xs)
+                    # scores = candidates['scores'].clone().detach()
+                    scores = torch.tensor(candidates['scores'], dtype = float)
+                    probs = scores.softmax(dim=0).unsqueeze(0)
+                    hard_cands = distribution_sample(probs, args.num_training_cands,
+                                                        device)
+                    xs = np.array(xs)
+                    xs = xs[hard_cands.squeeze(0).cpu()]
+                    xs = [y] + [x for x in xs if x != y]  # Target index always 0
+            else: 
+                if args.type_cands == 'self_fixed_negative':
+                    scores = torch.tensor(candidates['scores'], dtype = float)
+                    topk_indices = torch.topk(scores, args.num_training_cands)[1]
+                    xs = np.array(xs)[topk_indices.cpu()]
+                    xs = [y] + [x for x in xs if x!= y]
+                elif args.type_cands == "self_negative":
+                    # Later, training set is obtained by hard negs mining
+                    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+                    num_hards = len(xs)
+                    # scores = candidates['scores'].clone().detach()
+                    scores = torch.tensor(candidates['scores'], dtype = float)
+                    probs = scores.softmax(dim=0).unsqueeze(0)
+                    hard_cands = distribution_sample(probs, args.num_training_cands,
+                                                        device)
+                    xs = np.array(xs)
+                    xs = xs[hard_cands.squeeze(0).cpu()]
+                    xs = [y] + [x for x in xs if x != y]  # Target index always 0
 
             return xs[:args.num_training_cands]
         else:
@@ -128,7 +148,6 @@ class BasicDataset(Dataset):
 
         # Get prefix under new tokenization.
         return self.tokenizer.tokenize(prefix)[:self.max_len_candidate], self.documents[candidate_document_id]['text'] 
-
 
 class UnifiedDataset(BasicDataset):
     def __init__(self, documents, samples, tokenizer, max_len,
@@ -192,7 +211,7 @@ class UnifiedDataset(BasicDataset):
 class FullDataset(BasicDataset):
     def __init__(self, documents, samples, tokenizer, max_len,
                  max_num_candidates,
-                 is_training, indicate_mention_boundaries=False, args = None):
+                 is_training, indicate_mention_boundaries=False, args = None, self_negs_again = False):
         super(FullDataset, self).__init__(documents, samples, tokenizer,
                                           max_len, max_num_candidates,
                                           is_training,
@@ -200,18 +219,19 @@ class FullDataset(BasicDataset):
         self.max_len_mention = (max_len - 3) // 2  # [CLS], [SEP], [SEP]
         self.max_len_candidate = (max_len - 3) - self.max_len_mention
         self.args = args
+        self.self_negs_again = self_negs_again
     def __getitem__(self, index):
         mention = self.samples[0][index]
         candidates = self.samples[1][mention['mention_id']]
-        mention_window, mention_start, mention_end, _ \
+        mention_window, mention_start, mention_end\
             = self.get_mention_window(mention)
         mention_start += 1  # [CLS]
         mention_end += 1  # [CLS]
         assert self.tokenizer.pad_token_id == 0
-        encoded_pairs = torch.zeros((self.max_num_candidates, self.max_len))
-        type_marks = torch.zeros((self.max_num_candidates, self.max_len))
-        input_lens = torch.zeros(self.max_num_candidates)
-        candidate_document_ids = self.prepare_candidates(mention, candidates, self.args)
+        candidate_document_ids = self.prepare_candidates(mention, candidates, self.args, self.self_negs_again)
+        encoded_pairs = torch.zeros((len(candidate_document_ids), self.max_len))
+        type_marks = torch.zeros((len(candidate_document_ids), self.max_len))
+        input_lens = torch.zeros(len(candidate_document_ids))
         for i, candidate_document_id in enumerate(candidate_document_ids):
             candidate_prefix, _ = self.get_candidate_prefix(candidate_document_id)
             encoded_dict = self.tokenizer.encode_plus(
@@ -236,13 +256,17 @@ def get_loaders(data, tokenizer, max_len, max_num_candidates, batch_size,
     if use_full_dataset:
         dataset_train = FullDataset(documents, samples_train, tokenizer,
                                     max_len, max_num_candidates, True,
-                                    indicate_mention_boundaries, args = args)
+                                    indicate_mention_boundaries, args = args, self_negs_again=self_negs_again)
     else:
         dataset_train = UnifiedDataset(documents, samples_train, tokenizer,
                                        max_len, max_num_candidates, True,
                                        indicate_mention_boundaries, args = args, self_negs_again=self_negs_again)
-    if args.type_cands == "self_negative" and not self_negs_again:
-        loader_train = DataLoader(dataset_train, batch_size=eval_batch_size,
+    if not self_negs_again:
+        if args.type_cands == "self_negative" or args.type_cands == "self_fixed_negative":
+            loader_train = DataLoader(dataset_train, batch_size=eval_batch_size,
+                                  shuffle=True, num_workers=num_workers)            
+        else:
+            loader_train = DataLoader(dataset_train, batch_size=batch_size,
                                   shuffle=True, num_workers=num_workers)
     else:
         loader_train = DataLoader(dataset_train, batch_size=batch_size,
@@ -323,6 +347,7 @@ def load_zeshel_data(data_dir, cands_dir, macro_eval=True, debug = False, scores
         mentions = []
         with open(os.path.join(men_path, '%s.json' % part)) as f:
             for i, line in enumerate(f):
+                if debug and i > 9: break
                 field = json.loads(line)
                 if in_domain:
                     if field['corpus'] == domain:
@@ -335,6 +360,7 @@ def load_zeshel_data(data_dir, cands_dir, macro_eval=True, debug = False, scores
         with open(os.path.join(cands_dir,
                                'candidates_%s.json' % part)) as f:
             for i, line in enumerate(f):
+                if debug and i > 9: break
                 field = json.loads(line)
                 if scores is not None:
                     field['scores'] = scores[i]
@@ -476,3 +502,14 @@ class Logger(BasicLogger):
                                    if len(valid_perfs) > 1 else 0.0))
         self.log('(excluded %d out of %d runs that produced -inf)' %
                  (len(perfs) - len(valid_perfs), len(perfs)))
+
+def preprocess_data(dataloader, model, debug):
+    preprocessed_data = []
+    print('preprocessing data')
+    with torch.no_grad():
+        for batch_idx, batch in tqdm(enumerate(dataloader), total = len(dataloader)):  # Shuffled every epoch
+            if debug and batch_idx>10: break
+            mention_embeds, mention_embeds_mask, candidates_embeds =\
+                model.encode(*batch)
+            preprocessed_data.append((mention_embeds.cpu(), mention_embeds_mask.cpu(), candidates_embeds.cpu()))
+    return preprocessed_data

@@ -4,14 +4,15 @@ import os
 import random
 import torch
 import torch.nn as nn
-from data_reranker import get_loaders, load_zeshel_data, Logger
+from data_reranker import get_loaders, load_zeshel_data, Logger, preprocess_data
 from datetime import datetime
 from reranker import FullRanker
-from retriever import UnifiedRetriever
+from retriever import UnifiedRetriever, FrozenRetriever
 from data_retriever import get_all_entity_hiddens
 from transformers import BertTokenizer, BertModel, \
     AdamW, get_linear_schedule_with_warmup, get_constant_schedule
 from tqdm import tqdm
+from torch.optim.lr_scheduler import LambdaLR
 import traceback
 import wandb
 from collections import OrderedDict
@@ -31,15 +32,14 @@ def configure_optimizer(args, model, num_train_examples):
     optimizer_grouped_parameters = [
         {'params': [p for n, p in model.named_parameters()
                     if not any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)],
-         'weight_decay': args.weight_decay, 'lr': 1e-5},
+         'weight_decay': args.weight_decay, 'lr': args.bert_lr},
         {'params': [p for n, p in model.named_parameters()
                     if any(nd in n for nd in no_decay)],
-         'weight_decay': 0.0, 'lr': 1e-5},
+         'weight_decay': 0.0, 'lr': args.bert_lr},
         {'params': [p for n, p in model.named_parameters()
                     if any(nd in n for nd in transformer) and not any(nd in n for nd in no_decay)],
          'lr': args.lr, 'weight_decay': args.weight_decay},
     ]
-    
     optimizer = AdamW(optimizer_grouped_parameters,
                       eps=args.adam_epsilon)
     print(optimizer)
@@ -77,7 +77,7 @@ def micro_eval(model, loader_eval, num_total_unorm, args = None):
     
     with torch.no_grad():
         for step, batch in tqdm(enumerate(loader_eval), total = len(loader_eval)):
-            if debug and step > 30: break
+            if debug and step > 10: break
             # try:
             result = model.forward(*batch, args = args)
             if type(result) is dict:
@@ -147,14 +147,14 @@ def recall_eval(model, val_loaders, num_total_unorm, eval_mode = "micro", k = 64
         acc_norm = 0
         num_correct = 0
         recall_correct = 0
-        if args.type_cands == "self_negative":
+        if args.type_cands == "self_negative" or args.type_cands == "self_fixed_negative":
             device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
             scores_tensor = torch.tensor([]).to(device)
         with torch.no_grad(): 
             for i, batch in tqdm(enumerate(val_loaders), total = len(val_loaders)):
                 if i > 3 and debug: break
                 scores = model.forward(*batch, recall_eval = True, beam_ratio = args.beam_ratio, args = args)[2]
-                if args.type_cands == "self_negative":
+                if args.type_cands == "self_negative" or args.type_cands == "self_fixed_negative":
                     scores_tensor = torch.cat([scores_tensor, scores], dim = 0)
                 top_k = scores.topk(k, dim=1)[1]
                 preds = top_k[:, 0]
@@ -172,7 +172,7 @@ def recall_eval(model, val_loaders, num_total_unorm, eval_mode = "micro", k = 64
         else:
             model.evaluate_on = False
             model.candidates_embeds = None
-        if args.type_cands != "self_negative":
+        if args.type_cands != "self_negative" and args.type_cands != "self_fixed_negative":
             return {"recall": r_k, "acc_norm": acc_norm, "acc_unorm":acc_unorm, "num_total_norm": nb_samples, "num_correct": num_correct, "recall_correct": recall_correct, "num_total_norm": nb_samples}
         else:
             return {"recall": r_k, "acc_norm": acc_norm, "acc_unorm":acc_unorm, "num_total_norm": nb_samples, \
@@ -189,7 +189,7 @@ def recall_eval(model, val_loaders, num_total_unorm, eval_mode = "micro", k = 64
         for i in range(len(val_loaders)):
             val_loader = val_loaders[i]
             num_unorm = num_total_unorm[i]
-            if args.type_cands != 'self_negative':
+            if args.type_cands != 'self_negative' and args.type_cands != "self_fixed_negative":
                 micro_results = micro_recall_eval(model, val_loader, num_unorm, k, all_candidates_embeds, args)
             else:
                 micro_results, scores_tensor = micro_recall_eval(model, val_loader, num_unorm, k, all_candidates_embeds, args)
@@ -220,7 +220,7 @@ def load_model(model_path, device, eval_mode=False, dp=False, type_model='full')
     else:
         encoder = BertModel.from_pretrained('bert-large-uncased')
     if type_model == 'full':
-        model = FullRanker(encoder, device).to(device)
+        model = FullRanker(encoder, device, args).to(device)
     else:
         if args.type_model == 'poly':
             attention_type = 'soft_attention'
@@ -258,7 +258,7 @@ def load_model(model_path, device, eval_mode=False, dp=False, type_model='full')
 def main(args):
     set_seed(args)
     if args.resume_training:
-        run = wandb.init(project = "hard-nce-el", resume = "must", id = args.run_id, config = args)
+        run = wandb.init(project = "hard-nce-el", resume = "auto", id = args.run_id, config = args)
     else:
         run = wandb.init(project="hard-nce-el", config = args)
     if not args.anncur or args.resume_training: args.model = './models/{}/{}/'.format(args.type_model, run.id)
@@ -298,6 +298,10 @@ def main(args):
             attention_type = 'extend_multi_dot'
             num_mention_vecs = 1
             num_entity_vecs = 1
+        elif args.type_model == 'mlp_with_som':
+            attention_type = 'mlp_with_som'
+            num_mention_vecs = args.num_mention_vecs
+            num_entity_vecs = args.num_entity_vecs
         elif args.type_model == 'mlp':
             attention_type = 'mlp'
             num_mention_vecs = 1
@@ -305,7 +309,14 @@ def main(args):
         else:
             num_mention_vecs = args.num_mention_vecs
             num_entity_vecs = args.num_entity_vecs
-        model = UnifiedRetriever(encoder, device, num_mention_vecs,
+        if args.freeze_bert:
+            model = FrozenRetriever(encoder, device, num_mention_vecs,
+                                 num_entity_vecs,
+                                 args.mention_use_codes, args.entity_use_codes,
+                                 attention_type, None, False,args, num_heads = args.num_heads, num_layers = args.num_layers)
+  
+        else:
+            model = UnifiedRetriever(encoder, device, num_mention_vecs,
                                  num_entity_vecs,
                                  args.mention_use_codes, args.entity_use_codes,
                                  attention_type, None, False,args, num_heads = args.num_heads, num_layers = args.num_layers)
@@ -357,7 +368,7 @@ def main(args):
     use_full_dataset = (args.type_model == 'full')
     macro_eval_mode = (args.eval_method == 'macro')
     data = load_zeshel_data(args.data, args.cands_dir, macro_eval_mode, args.debug)
-
+    loader_test = None
     if args.simpleoptim:
         optimizer, scheduler, num_train_steps, num_warmup_steps \
             = configure_optimizer_simple(args, model, len(data[1][0]))
@@ -397,6 +408,7 @@ def main(args):
     start_time = datetime.now()
 
     step_num = 0
+    trigger_times = 0 # Overfitting
     tr_loss, logging_loss = 0.0, 0.0
     model.zero_grad()
     best_val_perf = float('-inf')
@@ -407,8 +419,7 @@ def main(args):
     start_epoch = 1
     if args.resume_training:
         start_epoch = cpt['epoch'] + 1 
-    for epoch in range(start_epoch, args.epochs + 1):
-        logger.log('\nEpoch %d' % epoch)
+    if args.freeze_bert:
         loader_train, loader_val, loader_test, \
         num_val_samples, num_test_samples = get_loaders(data, tokenizer, args.L,
                                                     args.C, args.B,
@@ -417,12 +428,40 @@ def main(args):
                                                     args.C_eval,
                                                     use_full_dataset,
                                                     macro_eval_mode, args = args)
-        if args.type_cands == "self_negative":
+        loader_train = preprocess_data(loader_train, model, args.debug)
+        loader_val = preprocess_data(loader_val, model, args.debug)
+        loader_test = preprocess_data(loader_test, model, args.debug)
+            
+    for epoch in range(start_epoch, args.epochs + 1):
+        logger.log('\nEpoch %d' % epoch)
+
+        if not args.freeze_bert:
+            data = load_zeshel_data(args.data, args.cands_dir, macro_eval_mode, args.debug)
+
+            loader_train, loader_val, loader_test, \
+            num_val_samples, num_test_samples = get_loaders(data, tokenizer, args.L,
+                                                    args.C, args.B,
+                                                    args.num_workers,
+                                                    args.inputmark,
+                                                    args.C_eval,
+                                                    use_full_dataset,
+                                                    macro_eval_mode, args = args)
+        if args.type_cands == "self_negative" or args.type_cands == "self_fixed_negative":
             with torch.no_grad():
-                torch.multiprocessing.set_start_method('spawn')
+                try:
+                    torch.multiprocessing.set_start_method('spawn')
+                except:
+                    pass
                 scores_tensor = torch.tensor([]).to(device)
+                recall_evaluate = False
+                if args.type_model == 'extend_multi' or args.type_model == 'extend_multi_dot':
+                    recall_evaluate = True
                 for i, batch in tqdm(enumerate(loader_train), total=len(loader_train)):
-                    scores = model.forward(*batch, recall_eval=True, beam_ratio=args.beam_ratio, args=args)[2]
+                    result = model.forward(*batch, recall_eval=recall_evaluate, beam_ratio=args.beam_ratio, args=args)
+                    try:
+                        scores = result[2]
+                    except:
+                        scores = result['scores']
                     scores_tensor = torch.cat([scores_tensor, scores], dim=0)
             #
             # scores = torch.tensor([]).to(device)
@@ -437,12 +476,15 @@ def main(args):
 
             loader_train, _, _, \
             _, _ = get_loaders(data, tokenizer, args.L,
-                                                                args.C, args.B,
-                                                                args.num_workers,
-                                                                args.inputmark,
-                                                                args.C_eval,
-                                                                use_full_dataset,
-                                                                macro_eval_mode, args=args, self_negs_again=True)
+                        args.C, args.B,
+                        args.num_workers,
+                        args.inputmark,
+                        args.C_eval,
+                        use_full_dataset,
+                        macro_eval_mode, args=args, self_negs_again=True)
+            if args.freeze_bert:
+                loader_train = preprocess_data(loader_train, model, args.debug)
+            
                     # if args.anncur:
         #     val_result = macro_eval(model, loader_val, num_val_samples, args)
         #     print(val_result)
@@ -451,12 +493,15 @@ def main(args):
             if args.debug and batch_idx > 10: break
             model.train()
             # try:
+
             result = model.forward(*batch, args = args)
 
             if type(result) is tuple:
                 loss = result[0]
+                scores = result[-1]
             elif type(result) is dict:
                 loss = result['loss']
+                scores = result['scores']
             loss = loss.mean()  # Needed in case of dataparallel
             if args.fp16:
                 with amp.scale_loss(loss, optimizer) as scaled_loss:
@@ -494,6 +539,13 @@ def main(args):
 
                 #  eval_result = micro_eval(args, model, loader_val)
                 # writer.add_scalar('acc_val', eval_result['acc'], step_num)
+        torch.save({'opt': args, 'sd': model.module.state_dict() if dp else model.state_dict(),
+                    'perf': best_val_perf, 'epoch': epoch,
+                    'opt_sd': optimizer.state_dict(),
+                    'scheduler_sd': scheduler.state_dict(),
+                    'tr_loss': tr_loss, 'step_num': step_num,
+                    'logging_loss': logging_loss}, os.path.join(args.model, "epoch_{}.bin".format(epoch)))
+
         if args.eval_method == "skip":
             pass
         else:
@@ -515,24 +567,28 @@ def main(args):
             newline=False))
             wandb.log({"unnormalized acc": val_result['acc_unorm'], "normalized acc": val_result['acc_norm']
             ,"val_loss": val_result['val_loss'], "epoch": epoch})
-        try: 
-            recall_result = recall_eval(model, loader_val, num_val_samples, eval_mode = args.eval_method, args = args)
+        if args.type_model == 'extend_multi' or args.type_model == 'extend_multi_dot':
+            if args.eval_method == 'micro':
+                if args.type_cands == 'self_negative' or args.type_cands == "self_fixed_negative":
+                    recall_result = recall_eval(model, loader_val, num_val_samples, eval_mode = args.eval_method, args = args)[0]
+                else:
+                    recall_result = recall_eval(model, loader_val, num_val_samples, eval_mode = args.eval_method, args = args)
+            else:
+                recall_result = recall_eval(model, loader_val, num_val_samples, eval_mode = args.eval_method, args = args)
             logger.log('Done with epoch {:3d} | recall {:8.4f} | '
-                   'val acc unormalized  {:8.4f} ({}/{})|'
-                   'val acc normalized  {:8.4f} ({}/{}) '.format(
-            epoch,
-            recall_result['recall'],
-            recall_result['acc_unorm'],
-            recall_result['num_correct'],
-            num_val_samples,
-            recall_result['acc_norm'],
-            recall_result['num_correct'],
-            recall_result['num_total_norm'],
-            newline=False))
+                    'val acc unormalized  {:8.4f} ({}/{})|'
+                    'val acc normalized  {:8.4f} ({}/{}) '.format(
+                epoch,
+                recall_result['recall'],
+                recall_result['acc_unorm'],
+                recall_result['num_correct'],
+                num_val_samples,
+                recall_result['acc_norm'],
+                recall_result['num_correct'],
+                recall_result['num_total_norm'],
+                newline=False))
             wandb.log({"rereanker_recall": recall_result['recall'], "tournament_normalized_acc": recall_result['acc_norm']
-            ,"tournament_unnormalized_acc": recall_result['acc_unorm'], "epoch": epoch})
-        except:
-            traceback.print_exc()
+                ,"tournament_unnormalized_acc": recall_result['acc_unorm'], "epoch": epoch})
 
         if epoch >= 2:
             try:
@@ -540,15 +596,10 @@ def main(args):
             except:
                 pass
         if val_result['acc_unorm'] >= best_val_perf:
+            triggert_times = 0 
             logger.log('      <----------New best val perf: %g -> %g' %
                        (best_val_perf, val_result['acc_unorm']))
             best_val_perf = val_result['acc_unorm']
-            torch.save({'opt': args, 'sd': model.module.state_dict() if dp else model.state_dict(),
-                    'perf': best_val_perf, 'epoch': epoch,
-                    'opt_sd': optimizer.state_dict(),
-                    'scheduler_sd': scheduler.state_dict(),
-                    'tr_loss': tr_loss, 'step_num': step_num,
-                    'logging_loss': logging_loss}, os.path.join(args.model, "epoch_{}.bin".format(epoch)))
             torch.save({'opt': args, 'sd': model.module.state_dict() if dp else model.state_dict(),
                         'perf': best_val_perf, 'epoch': epoch,
                         'opt_sd': optimizer.state_dict(),
@@ -556,24 +607,26 @@ def main(args):
                         'tr_loss': tr_loss, 'step_num': step_num,
                         'logging_loss': logging_loss}, os.path.join(args.model, "pytorch_model.bin"))
         else:
-            
-            torch.save({'opt': args, 'sd': model.module.state_dict() if dp else model.state_dict(),
-                    'perf': best_val_perf, 'epoch': epoch,
-                    'opt_sd': optimizer.state_dict(),
-                    'scheduler_sd': scheduler.state_dict(),
-                    'tr_loss': tr_loss, 'step_num': step_num,
-                    'logging_loss': logging_loss}, os.path.join(args.model, "epoch_{}.bin".format(epoch)))
+            trigger_times += 1
 
-
+        wandb.log({"epoch": epoch, "best acc": best_val_perf})
+        if trigger_times > 5: break
         if args.training_one_epoch:
             break
-    # cpt = torch.load(os.path.join/(args.model,"pytorch_model.bin")) if device.type == 'cuda' \
-                # else torch.load(os.path.join(args.model,"pytorch_model.bin") , map_location=torch.device('cpu'))
-    # model.load_state_dict(cpt['sd'])
-    # model = load_model(os.path.join(args.model, "pytorch_model.bin"), device, eval_mode=True, dp=dp,
-                    #    type_model=args.type_model)
-
-
+    cpt = torch.load(os.path.join(args.model,"pytorch_model.bin")) if device.type == 'cuda' \
+                else torch.load(os.path.join(args.model,"pytorch_model.bin") , map_location=torch.device('cpu'))
+    model.load_state_dict(cpt['sd'])
+    model = load_model(os.path.join(args.model, "pytorch_model.bin"), device, eval_mode=True, dp=dp,
+                       type_model=args.type_model)
+    if loader_test is None:
+        _, _, loader_test, \
+        _, num_test_samples = get_loaders(data, tokenizer, args.L,
+                                                        args.C, args.B,
+                                                        args.num_workers,
+                                                        args.inputmark,
+                                                        args.C_eval,
+                                                        use_full_dataset,
+                                                        macro_eval_mode, args = args)
     if args.eval_method == 'micro':
         test_result = micro_eval(model, loader_test, num_test_samples, args)
     elif args.eval_method == 'macro':
@@ -642,7 +695,7 @@ if __name__ == '__main__':
                         help='init (default if 0) [%(default)g]')
     parser.add_argument('--seed', type=int, default=42,
                         help='random seed [%(default)d]')
-    parser.add_argument('--num_workers', type=int, default=2,
+    parser.add_argument('--num_workers', type=int, default=4,
                         help='num workers [%(default)d]')
     parser.add_argument('--gpus', type=str, default='0,1',
                         help='GPUs separated by comma [%(default)s]')
@@ -661,7 +714,7 @@ if __name__ == '__main__':
                                  'full',
                                  'extend_multi',
                                  'extend_multi_dot',
-                                 'mlp'],
+                                 'mlp_with_som'],
                         help='the type of model')
     parser.add_argument('--debug', action = 'store_true',
                         help='debugging mode')
@@ -672,7 +725,8 @@ if __name__ == '__main__':
                         choices=['fixed_negative',
                                 'mixed_negative',
                                  'hard_negative',
-                                 'self_negative'],
+                                 'self_negative',
+                                 'self_fixed_negative'],
                         help='fixed: top k, hard: distributionally sampled k')
     parser.add_argument('--run_id', type = str,
                         help='run id when resuming the run')
@@ -714,8 +768,18 @@ if __name__ == '__main__':
                         help='all entity hidden states path')
     parser.add_argument('--entity_bsz', type=int, default=64,
                         help='the batch size')
-    parser.add_argument('--lambda_scheduler', type=int, default=64,
+    parser.add_argument('--lambda_scheduler', action='store_true',
                         help='the batch size')
+    parser.add_argument('--recall_eval', action='store_true',
+                        help='the batch size')
+    parser.add_argument('--distil', action='store_true',
+                        help='the batch size')
+    parser.add_argument('--bert_lr', type=float, default=1e-5,
+                        help='the batch size')
+    parser.add_argument('--num_sampled', type=int, default=256,
+                        help='the batch size')
+    parser.add_argument('--mlp_layers', type=str, default=1536,
+                        help='num of layers for mlp or mlp-with-som model (except for the first and the last layer)')
     parser.add_argument(
         "--fp16",
         action="store_true",

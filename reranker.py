@@ -25,7 +25,7 @@ class FullRanker(nn.Module):
             mean=0.0, std=self.encoder.config.initializer_range)
         self.score_layer[1].bias.data.zero_()
 
-    def forward(self, encoded_pairs, type_marks, input_lens, args=None):
+    def forward(self, encoded_pairs, type_marks, input_lens, args=None, beam_ratio=None, recall_eval =None):
         encoded_pairs = encoded_pairs.to(self.device)
         type_marks = type_marks.to(self.device)
         input_lens = input_lens.to(self.device)
@@ -40,7 +40,6 @@ class FullRanker(nn.Module):
         scores.masked_fill_(input_lens == 0, float('-inf'))
         loss = self.avgCE(scores, torch.zeros(B).long().to(self.device))
         max_scores, predictions = scores.max(dim=1)
-
         return {'loss': loss, 'predictions': predictions,
                 'max_scores': max_scores, 'scores': scores}
 

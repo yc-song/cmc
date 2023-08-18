@@ -268,7 +268,7 @@ def main(args):
     else:
         encoder = BertModel.from_pretrained('bert-large-uncased')
     if args.type_model == 'full':
-        model = FullRanker(encoder, device)
+        model = FullRanker(encoder, device, args)
     else:
         if args.type_model == 'poly':
             attention_type = 'soft_attention'
@@ -409,14 +409,13 @@ def main(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-
-    parser.add_argument('--model', type=str, default='./models/reranker',
+    parser.add_argument('--model', type=str,default='./models/reranker',
                         help='model path')
     parser.add_argument('--model_top', type=str,
                         help='when loading top model path')
-    parser.add_argument('--data', type=str, default='./data',
+    parser.add_argument('--data', type=str,default='./data',
                         help='data path (zeshel data directory)')
-    parser.add_argument('--cands_dir', type=str, default='./data/cands_anncur_top1024',
+    parser.add_argument('--cands_dir', type=str, default = './data/cands_anncur_top1024',
                         help='candidates directory')
     parser.add_argument('--L', type=int, default=256,
                         help='max length of joint input [%(default)d]')
@@ -426,10 +425,12 @@ if __name__ == '__main__':
                         help='max number of candidates [%(default)d] when eval')
     parser.add_argument('--B', type=int, default=4,
                         help='batch size [%(default)d]')
-
+    parser.add_argument('--freeze_bert', action = 'store_true',
+                        help='freeze encoder BERT')
+    parser.add_argument('--identity_bert', action = 'store_true',
+                        help='assign same query and key matrix')
     parser.add_argument('--eval_batch_size', type=int, default=8,
                         help='evaluation batch size [%(default)d]')
-
     parser.add_argument('--lr', type=float, default=2e-5,
                         help='initial learning rate [%(default)g]')
     parser.add_argument('--warmup_proportion', type=float, default=0.1,
@@ -451,7 +452,7 @@ if __name__ == '__main__':
                         help='init (default if 0) [%(default)g]')
     parser.add_argument('--seed', type=int, default=42,
                         help='random seed [%(default)d]')
-    parser.add_argument('--num_workers', type=int, default=2,
+    parser.add_argument('--num_workers', type=int, default=4,
                         help='num workers [%(default)d]')
     parser.add_argument('--gpus', type=str, default='0,1',
                         help='GPUs separated by comma [%(default)s]')
@@ -469,27 +470,28 @@ if __name__ == '__main__':
                                  'poly',
                                  'full',
                                  'extend_multi',
-                                 'extend_multi_dot'],
+                                 'extend_multi_dot',
+                                 'mlp_with_som'],
                         help='the type of model')
-    parser.add_argument('--debug', action='store_true',
+    parser.add_argument('--debug', action = 'store_true',
                         help='debugging mode')
-    parser.add_argument('--beam_ratio', type=float, default = 0.5,
-                        help='debugging mode')
-    parser.add_argument('--training_one_epoch', action='store_true',
+    parser.add_argument('--training_one_epoch', action = 'store_true',
                         help='stop the training after one epoch')
     parser.add_argument('--type_cands', type=str,
                         default='fixed_negative',
                         choices=['fixed_negative',
-                                 'mixed_negative',
-                                 'hard_negative'],
+                                'mixed_negative',
+                                 'hard_negative',
+                                 'self_negative',
+                                 'self_fixed_negative'],
                         help='fixed: top k, hard: distributionally sampled k')
-    parser.add_argument('--run_id', type=str,
+    parser.add_argument('--run_id', type = str,
                         help='run id when resuming the run')
     parser.add_argument('--num_training_cands', default=64, type=int,
                         help='# of candidates')
     parser.add_argument('--num_eval_cands', default=256, type=int,
                         help='# of candidates')
-    parser.add_argument('--train_one_epoch', action='store_true',
+    parser.add_argument('--train_one_epoch', action = 'store_true',
                         help='training only one epoch')
     parser.add_argument('--cands_ratio', default=0.5, type=float,
                         help='ratio of sampled negatives')
@@ -517,6 +519,24 @@ if __name__ == '__main__':
                         help='store entity hiddens?')
     parser.add_argument('--en_hidden_path', type=str,
                         help='all entity hidden states path')
+    parser.add_argument('--beam_ratio', type=float, default=0.25,
+                        help='all entity hidden states path')
+    parser.add_argument('--too_large', action='store_true',
+                        help='all entity hidden states path')
+    parser.add_argument('--entity_bsz', type=int, default=64,
+                        help='the batch size')
+    parser.add_argument('--lambda_scheduler', action='store_true',
+                        help='the batch size')
+    parser.add_argument('--recall_eval', action='store_true',
+                        help='the batch size')
+    parser.add_argument('--distil', action='store_true',
+                        help='the batch size')
+    parser.add_argument('--bert_lr', type=float, default=1e-5,
+                        help='the batch size')
+    parser.add_argument('--num_sampled', type=int, default=256,
+                        help='the batch size')
+    parser.add_argument('--mlp_layers', type=str, default=1536,
+                        help='num of layers for mlp or mlp-with-som model (except for the first and the last layer)')
     parser.add_argument(
         "--fp16",
         action="store_true",
@@ -531,7 +551,9 @@ if __name__ == '__main__':
              "'O2', and 'O3']."
              "See details at https://nvidia.github.io/apex/amp.html",
     )
-    parser.add_argument('--anncur', action='store_true', help="load anncur ckpt")
+    parser.add_argument('--anncur', action='store_true', help = "load anncur ckpt")
+    parser.add_argument('--token_type', action='store_false', help = "no token type id when specified")
+
 
     args = parser.parse_args()
 
