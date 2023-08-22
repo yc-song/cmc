@@ -650,8 +650,11 @@ class mlp_with_som(nn.Module):
         return scores
 
 
-class IdentityInitializedTransformerEncoderLayer(nn.Module):
-    def __init__(self, d_model, nhead, dim_feedforward=3072, dropout=0.1, activation="relu"):
-        super().__init__(d_model, nhead, batch_first=True)
-
-        self.self_attn.in_proj_weight.data.copy_(torch.cat([self.query_mapping, self.query_mapping, self.value_mapping], dim = 0))
+class IdentityInitializedTransformerEncoderLayer(torch.nn.TransformerEncoderLayer):
+    def __init__(self, d_model, n_head, num_layers, dim_feedforward=3072, dropout=0.1, activation="relu"):
+        super(IdentityInitializedTransformerEncoderLayer, self).__init__(d_model, n_head)
+    def forward(self,src, src_mask=None, src_key_padding_mask=None, is_causal = False):
+        out1 = super(IdentityInitializedTransformerEncoderLayer, self).forward(src, src_mask, src_key_padding_mask)
+        out = out1 + src
+        
+        return out
