@@ -457,7 +457,7 @@ def main(args):
                 if args.type_model == 'extend_multi' or args.type_model == 'extend_multi_dot':
                     recall_evaluate = True
                 for i, batch in tqdm(enumerate(loader_train), total=len(loader_train)):
-                    result = model.forward(*batch, recall_eval=recall_evaluate, beam_ratio=args.beam_ratio, args=args)
+                    result = model.forward(*batch, recall_eval=recall_evaluate, beam_ratio=args.beam_ratio, args=args, sampling = True)
                     try:
                         scores = result[2]
                     except:
@@ -488,7 +488,7 @@ def main(args):
                     # if args.anncur:
         #     val_result = macro_eval(model, loader_val, num_val_samples, args)
         #     print(val_result)
-
+        print('Begin Training')
         for batch_idx, batch in tqdm(enumerate(loader_train), total = len(loader_train)):  # Shuffled every epoch
             if args.debug and batch_idx > 10: break
             model.train()
@@ -778,7 +778,7 @@ if __name__ == '__main__':
                         help='the batch size')
     parser.add_argument('--num_sampled', type=int, default=256,
                         help='the batch size')
-    parser.add_argument('--mlp_layers', type=str, default=1536,
+    parser.add_argument('--mlp_layers', type=str, default="1536",
                         help='num of layers for mlp or mlp-with-som model (except for the first and the last layer)')
     parser.add_argument(
         "--fp16",

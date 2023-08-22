@@ -73,7 +73,7 @@ def micro_eval(model, loader_eval, num_total_unorm, args = None):
     num_total = 0
     num_correct = 0
     loss_total = 0
-    
+    scores = []
     with torch.no_grad():
         for step, batch in tqdm(enumerate(loader_eval), total = len(loader_eval)):
             if debug and step > 10: break
@@ -82,12 +82,15 @@ def micro_eval(model, loader_eval, num_total_unorm, args = None):
             if type(result) is dict:
                 preds = result['predictions']
                 loss_total += result['loss'].sum()
+                tmp_scores = result['scores']
 
             else:
                 preds = result[1]
                 loss_total += result[0].sum()
+                tmp_scores = result[2]
             num_total += len(preds)
             num_correct += (preds == 0).sum().item()
+            scores.append(tmp_scores.tolist())
             # except:
             #     for i in range(4):
             #         print(step, batch[i].shape)
@@ -98,7 +101,8 @@ def micro_eval(model, loader_eval, num_total_unorm, args = None):
     return {'acc_norm': acc_norm, 'acc_unorm': acc_unorm,
             'num_correct': num_correct,
             'num_total_norm': num_total,
-            'val_loss': loss_total}
+            'val_loss': loss_total,
+            'scores':scores}
 
 
 def macro_eval(model, val_loaders, num_total_unorm, args = None):
@@ -366,6 +370,21 @@ def main(args):
                                                         args.C_eval,
                                                         use_full_dataset,
                                                         macro_eval_mode, args=args)
+    print('start evaluation')
+    if args.eval_method == 'micro':
+        val_result = micro_eval(model, loader_val, num_val_samples, args)
+    elif args.eval_method == 'macro':
+        val_result = macro_eval(model, loader_val, num_val_samples, args)
+    print('val acc unormalized  {:8.4f} ({}/{})|'
+               'val acc normalized  {:8.4f} ({}/{}) '.format(
+        val_result['acc_unorm'],
+        val_result['num_correct'],
+        num_val_samples,
+        val_result['acc_norm'],
+        val_result['num_correct'],
+        val_result['num_total_norm'],
+        newline=False))
+
     recall_result = recall_eval(model, loader_val, num_val_samples, eval_mode=args.eval_method, args=args)
     print('Done with epoch | recall {:8.4f} | '
                'val acc unormalized  {:8.4f} ({}/{})|'
@@ -382,19 +401,6 @@ def main(args):
     # wandb.log(
     #     {"rereanker_recall": recall_result['recall'], "tournament_normalized_acc": recall_result['acc_norm']
     #         , "tournament_unnormalized_acc": recall_result['acc_unorm']})
-    if args.eval_method == 'micro':
-        val_result = micro_eval(model, loader_val, num_val_samples, args)
-    elif args.eval_method == 'macro':
-        val_result = macro_eval(model, loader_val, num_val_samples, args)
-    print('val acc unormalized  {:8.4f} ({}/{})|'
-               'val acc normalized  {:8.4f} ({}/{}) '.format(
-        val_result['acc_unorm'],
-        val_result['num_correct'],
-        num_val_samples,
-        val_result['acc_norm'],
-        val_result['num_correct'],
-        val_result['num_total_norm'],
-        newline=False))
 
     if args.eval_method == 'micro':
         test_result = micro_eval(model, loader_test, num_test_samples, args)

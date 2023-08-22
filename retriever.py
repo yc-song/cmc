@@ -236,7 +236,7 @@ class UnifiedRetriever(nn.Module):
         return mention_embeds, mention_embeds_masks, candidates_embeds
 
     def forward(self, mention_token_ids, mention_masks, candidate_token_ids,
-                candidate_masks, candidate_probs=None, recall_eval = False, top_k = 64, beam_ratio = None, args = None):
+                candidate_masks, candidate_probs=None, recall_eval = False, top_k = 64, beam_ratio = None, args = None, sampling = False):
         if self.evaluate_on:  # evaluate or get candidates
             mention_embeds, mention_embeds_masks = self.encode(
                 mention_token_ids, mention_masks, None, None)[:2]
@@ -288,11 +288,14 @@ class UnifiedRetriever(nn.Module):
                                 tmp_next_round_idxs = tmp_next_round_idxs + torch.tensor([top_k*i], device = self.device)
                                 tmp_next_round_idxs = torch.gather(previous_round_idxs, 1, tmp_next_round_idxs)
                                 next_round_idxs = torch.cat([next_round_idxs, tmp_next_round_idxs], dim = 1)
-                                
-                        # Perform element-wise addition using broadcasting
-                        for row in range(previous_round_idxs.size(0)):
-                            scores[row, candidates_embeds["idxs"][row]] *= (round-1)/round
-                            scores[row, candidates_embeds["idxs"][row]] += new_scores[row]/round
+                        if sampling:
+                            for row in range(candidates_embeds["embeds"].size(0)):
+                                scores[row, candidates_embeds["idxs"][row]] *= (round-1)/round
+                                scores[row, candidates_embeds["idxs"][row]] += new_scores[row]/round
+                        else:
+                            for row in range(candidates_embeds["embeds"].size(0)):
+                                scores[row, candidates_embeds["idxs"][row]] += new_scores[row]                                
+
             elif self.attention_type == "mlp_with_som":
                 mention_embeds, mention_embeds_masks, \
                 candidates_embeds = self.encode(mention_token_ids, mention_masks,
@@ -326,6 +329,7 @@ class UnifiedRetriever(nn.Module):
                 ## if recall_eval is True, # of candidates is same as args.num_eval_cands
                 ## else, # of candidates is same as args.num_training_cands
                 if recall_eval:
+                    round = 1
                     candidates_embeds = {}
                     mention_embeds, mention_embeds_masks, \
                     candidates_embeds["embeds"] = self.encode(mention_token_ids, mention_masks,
@@ -354,6 +358,7 @@ class UnifiedRetriever(nn.Module):
                     candidates_embeds["embeds"] = candidates_embeds["embeds"][batch_idxs, idxs, :, :]
                     candidates_embeds["idxs"] = candidates_embeds["idxs"][batch_idxs, idxs.cpu()]
                     while idxs.size(1) >= top_k:
+                        round += 1
                         processed_tensor = candidates_embeds["embeds"].reshape(-1, top_k, 1, candidates_embeds["embeds"].size(-1))
                         idxs_chunks = candidates_embeds["idxs"].reshape(-1, top_k)
                         # print(processed_tensor, processed_tensor.shape)
@@ -370,20 +375,17 @@ class UnifiedRetriever(nn.Module):
                         idxs = idxs.view(B, int(candidates_embeds["embeds"].size(1)*beam_ratio))
                         batch_idxs = torch.arange(B).unsqueeze(1).expand_as(idxs)
                         new_scores = new_scores.view(B, candidates_embeds["embeds"].size(1))
-                        for row in range(candidates_embeds["embeds"].size(0)):
-                            scores[row, candidates_embeds["idxs"][row]] *= (round-1)/round
-                            scores[row, candidates_embeds["idxs"][row]] += new_scores[row]/round
+                        if sampling:
+                            for row in range(candidates_embeds["embeds"].size(0)):
+                                scores[row, candidates_embeds["idxs"][row]] *= (round-1)/round
+                                scores[row, candidates_embeds["idxs"][row]] += new_scores[row]/round
+                        else:
+                            for row in range(candidates_embeds["embeds"].size(0)):
+                                scores[row, candidates_embeds["idxs"][row]] += new_scores[row]
+
                         candidates_embeds["embeds"] = candidates_embeds["embeds"][batch_idxs, idxs, :, :]
                         candidates_embeds["idxs"] = candidates_embeds["idxs"][batch_idxs, idxs.cpu()]
 
-
-                        # idxs = torch.gather(previous_idxs, 1, idxs)
-                        # print(idxs)
-                        # new_scores = new_scores.view(B, previous_idxs.size(1))
-                        # print("new scores", new_scores[0], new_scores.shape)
-
-                        # print("scores", scores[0], scores.shape)
-                        # print("***")
                         
                 else:
                     mention_embeds, mention_embeds_masks, \
@@ -543,7 +545,7 @@ class extend_multi(nn.Module):
             # self.transformerencoderlayer = IdentityInitializedTransformerEncoderLayer(self.embed_dim, self.num_heads).to(self.device)
         # else:
         # ToDo: modify dim_feedforward argument of self.transformerencoderlayer
-        self.transformerencoderlayer = torch.nn.TransformerEncoderLayer(self.embed_dim, self.num_heads, batch_first = True).to(self.device)
+        self.transformerencoderlayer = torch.nn.TransformerEncoderLayer(self.embed_dim, self.num_heads, batch_first = True, dim_feedforward=3072).to(self.device)
         if args.identity_bert:
             self.transformerencoderlayer = IdentityInitializedTransformerEncoderLayer(self.embed_dim, self.num_heads).to(self.device)
 
