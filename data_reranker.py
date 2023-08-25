@@ -221,6 +221,7 @@ class FullDataset(BasicDataset):
         self.args = args
         self.self_negs_again = self_negs_again
     def __getitem__(self, index):
+        # For storing cross-encoder score, mention id and candidate id is loaded to dataloader
         mention = self.samples[0][index]
         candidates = self.samples[1][mention['mention_id']]
         mention_window, mention_start, mention_end\
@@ -232,6 +233,9 @@ class FullDataset(BasicDataset):
         encoded_pairs = torch.zeros((len(candidate_document_ids), self.max_len))
         type_marks = torch.zeros((len(candidate_document_ids), self.max_len))
         input_lens = torch.zeros(len(candidate_document_ids))
+        candidate_ids = [None]*len(candidate_document_ids)
+        # candidate_ids = np.empty_like(candidate_document_ids)
+
         for i, candidate_document_id in enumerate(candidate_document_ids):
             candidate_prefix, _ = self.get_candidate_prefix(candidate_document_id)
             encoded_dict = self.tokenizer.encode_plus(
@@ -239,9 +243,12 @@ class FullDataset(BasicDataset):
                 pad_to_max_length=True, max_length=self.max_len,
                 truncation=True)
             encoded_pairs[i] = torch.tensor(encoded_dict['input_ids'])
+            candidate_ids[i] = candidate_document_id
             type_marks[i] = torch.tensor(encoded_dict['token_type_ids'])
             input_lens[i] = len(mention_window) + len(candidate_prefix) + 3
-        return encoded_pairs, type_marks, input_lens
+        # print( np.array([mention['mention_id']]), candidate_ids)
+        # return encoded_pairs, type_marks, input_lens, np.array([mention['mention_id']]), candidate_ids
+        return encoded_pairs, type_marks, input_lens, mention['mention_id'], candidate_ids
 
 
 def get_loaders(data, tokenizer, max_len, max_num_candidates, batch_size,

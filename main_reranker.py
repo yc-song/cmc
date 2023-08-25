@@ -74,24 +74,29 @@ def micro_eval(model, loader_eval, num_total_unorm, args = None):
     num_total = 0
     num_correct = 0
     loss_total = 0
-    
     with torch.no_grad():
         for step, batch in tqdm(enumerate(loader_eval), total = len(loader_eval)):
+            if args.distill:
+                batch[-2] = np.array(batch[-2])
+                batch[-1] = np.array(batch[-1]).T
             if debug and step > 10: break
             # try:
             result = model.forward(*batch, args = args)
             if type(result) is dict:
                 preds = result['predictions']
                 loss_total += result['loss'].sum()
-
+                scores = result['scores']
             else:
                 preds = result[1]
                 loss_total += result[0].sum()
+                scores = result[2]
             num_total += len(preds)
             num_correct += (preds == 0).sum().item()
             # except:
             #     for i in range(4):
             #         print(step, batch[i].shape)
+            if step == 0: scores_list = scores
+            else: scores_list = torch.cat([scores_list, scores], dim = 0)
     loss_total /= len(loader_eval)
     model.train()
     acc_norm = num_correct / num_total * 100
@@ -99,7 +104,8 @@ def micro_eval(model, loader_eval, num_total_unorm, args = None):
     return {'acc_norm': acc_norm, 'acc_unorm': acc_unorm,
             'num_correct': num_correct,
             'num_total_norm': num_total,
-            'val_loss': loss_total}
+            'val_loss': loss_total,
+            'scores': scores}
 
 
 def macro_eval(model, val_loaders, num_total_unorm, args = None):
@@ -261,7 +267,7 @@ def main(args):
         run = wandb.init(project = "hard-nce-el", resume = "auto", id = args.run_id, config = args)
     else:
         run = wandb.init(project="hard-nce-el", config = args)
-    if not args.anncur or args.resume_training: args.model = './models/{}/{}/'.format(args.type_model, run.id)
+    if not args.anncur or args.resume_training: args.model = '/shared/s3/lab07/jongsong/hard-nce-el/models/{}/{}/'.format(args.type_model, run.id)
     if not os.path.exists(args.model):
         os.makedirs(args.model)
     # writer = SummaryWriter()
@@ -489,6 +495,10 @@ def main(args):
         #     val_result = macro_eval(model, loader_val, num_val_samples, args)
         #     print(val_result)
         print('Begin Training')
+        if args.eval_method == 'micro':
+            val_result = micro_eval(model, loader_val, num_val_samples, args)
+        elif args.eval_method == 'macro':
+            val_result = macro_eval(model, loader_val, num_val_samples, args)
         for batch_idx, batch in tqdm(enumerate(loader_train), total = len(loader_train)):  # Shuffled every epoch
             if args.debug and batch_idx > 10: break
             model.train()
@@ -772,7 +782,7 @@ if __name__ == '__main__':
                         help='the batch size')
     parser.add_argument('--recall_eval', action='store_true',
                         help='the batch size')
-    parser.add_argument('--distil', action='store_true',
+    parser.add_argument('--distill', action='store_true',
                         help='the batch size')
     parser.add_argument('--bert_lr', type=float, default=1e-5,
                         help='the batch size')

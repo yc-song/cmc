@@ -316,7 +316,7 @@ class UnifiedRetriever(nn.Module):
 
                 
             return scores
-        else:  # train
+        else:  # train\
             B, C, L = candidate_token_ids.size() # e.g. 8, 256, 128
             # B x m x d
             #  get  embeds
@@ -547,7 +547,7 @@ class extend_multi(nn.Module):
         # ToDo: modify dim_feedforward argument of self.transformerencoderlayer
         self.transformerencoderlayer = torch.nn.TransformerEncoderLayer(self.embed_dim, self.num_heads, batch_first = True, dim_feedforward=3072).to(self.device)
         if args.identity_bert:
-            self.transformerencoderlayer = IdentityInitializedTransformerEncoderLayer(self.embed_dim, self.num_heads).to(self.device)
+            self.transformerencoderlayer = IdentityInitializedTransformerEncoderLayer(self.embed_dim, self.num_heads, self.num_layers).to(self.device)
 
         self.transformerencoder = torch.nn.TransformerEncoder(self.transformerencoderlayer, self.num_layers).to(self.device)
         self.linearhead = torch.nn.Linear(self.embed_dim, 1).to(self.device)
