@@ -20,12 +20,62 @@ from collections import OrderedDict
 recall_preds = []
 preds_list =[]
 
+def micro_eval(model, loader_eval, num_total_unorm, args = None, mode = "valid"):
+    model.eval()
+    debug = args.debug
+    num_total = 0
+    num_correct = 0
+    loss_total = 0
+    if args.distill: cands = []
+    print(args.cands_dir)
+    with torch.no_grad():
+        for step, batch in tqdm(enumerate(loader_eval), total = len(loader_eval)):
+            if args.distill:
+                batch[-2] = np.array(batch[-2])
+                batch[-1] = np.array(batch[-1]).T
+            if debug and step > 10: break
+            # try:
+            result = model.forward(*batch, args = args)
+            if type(result) is dict:
+                preds = result['predictions']
+                loss_total += result['loss'].sum()
+                scores = result['scores']
+            else:
+                preds = result[1]
+                loss_total += result[0].sum()
+                scores = result[2]
+            num_total += len(preds)
+            num_correct += (preds == 0).sum().item()
+            # except:
+            #     for i in range(4):
+            #         print(step, batch[i].shape)
+            # if step == 0: scores_list = scores
+            # else: scores_list = torch.cat([scores_list, scores], dim = 0)
+            if args.distill:
+                for i, id in enumerate(batch[3]):
+                    candidate = {}
+                    candidate['mention_id'] = id
+                    candidate['candidates'] = list(batch[4][i])
+                    candidate['scores'] = scores[i].tolist()
+                    cands.append(candidate)
+        if args.distill:
+            with open(os.path.join(args.model, 'candidates_train_distillation.json'), 'w') as f:
+                for item in cands:
+                    f.write('%s\n' % json.dumps(item))
+    loss_total /= len(loader_eval)
+    model.train()
+    acc_norm = num_correct / num_total * 100
+    acc_unorm = num_correct / num_total_unorm * 100
+    return {'acc_norm': acc_norm, 'acc_unorm': acc_unorm,
+            'num_correct': num_correct,
+            'num_total_norm': num_total,
+            'val_loss': loss_total}
 
 
 def main(args):
     print(args)
     set_seed(args)
-    args.model = '/shared/s3/lab07/jongsong/hard-nce-el/models/{}/{}/'.format(args.type_model, args.run_id)
+    args.model = './models/{}/{}/'.format(args.type_model, args.run_id)
     if not os.path.exists(args.model):
         os.makedirs(args.model)
     # writer = SummaryWriter()
@@ -117,6 +167,9 @@ def main(args):
                                                         use_full_dataset,
                                                         macro_eval_mode, args=args)
     print('start evaluation')
+    if args.distill:
+        train_result = micro_eval(model, loader_train, num_val_samples, args, mode = "train")
+        print(train_result)
     if args.eval_method == 'micro':
         val_result = micro_eval(model, loader_val, num_val_samples, args)
     elif args.eval_method == 'macro':
@@ -292,7 +345,7 @@ if __name__ == '__main__':
                         help='the batch size')
     parser.add_argument('--recall_eval', action='store_true',
                         help='the batch size')
-    parser.add_argument('--distil', action='store_true',
+    parser.add_argument('--distill', action='store_true',
                         help='the batch size')
     parser.add_argument('--bert_lr', type=float, default=1e-5,
                         help='the batch size')

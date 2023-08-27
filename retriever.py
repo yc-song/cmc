@@ -7,7 +7,7 @@ import torch.nn.functional as F
 import math
 from torch.utils.data import DataLoader
 from torch.multiprocessing import Pool
-
+import wandb
 NEAR_INF = 1e20
 
 
@@ -108,6 +108,12 @@ class SoftAttention(nn.Module):
             bsz, C, l_y).sum(-1)
         return scores
 
+def distillation_loss(student_outputs, teacher_outputs, labels, alpha = 0.5):
+    teacher_loss = nn.KLDivLoss()(nn.functional.log_softmax(student_outputs, dim=1),
+                             nn.functional.softmax(teacher_outputs, dim=1))
+    student_loss = nn.CrossEntropyLoss(student_outputs, labels)
+    loss = alpha*student_loss + (1-alpha)*teacher_loss
+    return loss
 
 class UnifiedRetriever(nn.Module):
     def __init__(self, encoder, device, num_codes_mention, num_codes_entity,
@@ -236,7 +242,7 @@ class UnifiedRetriever(nn.Module):
         return mention_embeds, mention_embeds_masks, candidates_embeds
 
     def forward(self, mention_token_ids, mention_masks, candidate_token_ids,
-                candidate_masks, candidate_probs=None, recall_eval = False, top_k = 64, beam_ratio = None, args = None, sampling = False):
+                candidate_masks, teacher_scores = None, candidate_probs=None, recall_eval = False, top_k = 64, beam_ratio = None, args = None, sampling = False):
         if self.evaluate_on:  # evaluate or get candidates
             mention_embeds, mention_embeds_masks = self.encode(
                 mention_token_ids, mention_masks, None, None)[:2]
@@ -416,7 +422,10 @@ class UnifiedRetriever(nn.Module):
             if candidate_probs is not None:  # logits adjustment
                 candidate_probs = candidate_probs.to(self.device)
                 scores[:, 1:] -= ((C - 1) * candidate_probs).log()
-            loss = self.loss_fct(scores, labels)
+            if args.distill_training:
+                loss = distillation_loss(scores, teacher_scores, labels)
+            else:
+                loss = self.loss_fct(scores, labels)
             return loss, predicts, scores
 
 class FrozenRetriever(UnifiedRetriever):
@@ -430,7 +439,7 @@ class FrozenRetriever(UnifiedRetriever):
                 param.requires_grad = False
             for param in self.entity_encoder.parameters():
                 param.requires_grad = False
-    def forward(self, mention_embeds, mention_embeds_masks, candidates_embeds\
+    def forward(self, mention_embeds, mention_embeds_masks, candidates_embeds, candidates_embeds_masks\
     ,candidate_probs=None, recall_eval = False, top_k = 64, beam_ratio = None, args = None):
         if self.evaluate_on:  # evaluate or get candidates
             bsz, l_x, mention_dim = mention_embeds.size()
@@ -547,7 +556,7 @@ class extend_multi(nn.Module):
         # ToDo: modify dim_feedforward argument of self.transformerencoderlayer
         self.transformerencoderlayer = torch.nn.TransformerEncoderLayer(self.embed_dim, self.num_heads, batch_first = True, dim_feedforward=3072).to(self.device)
         if args.identity_bert:
-            self.transformerencoderlayer = IdentityInitializedTransformerEncoderLayer(self.embed_dim, self.num_heads, self.num_layers).to(self.device)
+            self.transformerencoderlayer = IdentityInitializedTransformerEncoderLayer(self.embed_dim, self.num_heads).to(self.device)
 
         self.transformerencoder = torch.nn.TransformerEncoder(self.transformerencoderlayer, self.num_layers).to(self.device)
         self.linearhead = torch.nn.Linear(self.embed_dim, 1).to(self.device)
@@ -567,7 +576,6 @@ class extend_multi(nn.Module):
             input = torch.cat([xs + token_embedding_xs, ys + token_embedding_ys], dim = 1)
         else:
             input = torch.cat([xs, ys], dim = 1)
-        
         attention_result = self.transformerencoder(input)
         if dot:
             scores = torch.bmm(attention_result[:,0,:].unsqueeze(1), attention_result[:,1:,:].transpose(2,1))
@@ -649,12 +657,18 @@ class mlp_with_som(nn.Module):
         scores = scores.reshape(bsz, C)
         return scores
 
-
-class IdentityInitializedTransformerEncoderLayer(torch.nn.TransformerEncoderLayer):
-    def __init__(self, d_model, n_head, num_layers, dim_feedforward=3072, dropout=0.1, activation="relu"):
-        super(IdentityInitializedTransformerEncoderLayer, self).__init__(d_model, n_head)
+class IdentityInitializedTransformerEncoderLayer(torch.nn.Module):
+    def __init__(self, d_model, n_head, dim_feedforward=3072, dropout=0.1, activation="relu"):
+        super(IdentityInitializedTransformerEncoderLayer, self).__init__()
+        self.device = torch.device(
+            "cuda" if torch.cuda.is_available() else "cpu"
+        )  
+        self.encoder_layer = torch.nn.TransformerEncoderLayer(d_model, n_head)
+        self.weight = nn.Parameter(torch.tensor([-5.], requires_grad = True))
     def forward(self,src, src_mask=None, src_key_padding_mask=None, is_causal = False):
-        out1 = super(IdentityInitializedTransformerEncoderLayer, self).forward(src, src_mask, src_key_padding_mask)
-        out = out1 + src
-        
+        out1 = self.encoder_layer(src, src_mask, src_key_padding_mask) # For Lower Torch Version
+        # out1 = self.encoder_layer(src, src_mask, src_key_padding_mask, is_causal) # For Higher Torch Version
+        sigmoid_weight = torch.sigmoid(self.weight)
+        wandb.log({"weight": self.weight.item()})
+        out = sigmoid_weight*out1 + (1-sigmoid_weight)*src
         return out

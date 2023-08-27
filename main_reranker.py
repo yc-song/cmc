@@ -16,7 +16,13 @@ from torch.optim.lr_scheduler import LambdaLR
 import traceback
 import wandb
 from collections import OrderedDict
+import json
 
+self_negative_methods=[
+    'self_fixed_negative',
+    'self_mixed_negative',
+    'self_negative'
+]
 
 def set_seed(args):
     random.seed(args.seed)
@@ -74,6 +80,8 @@ def micro_eval(model, loader_eval, num_total_unorm, args = None):
     num_total = 0
     num_correct = 0
     loss_total = 0
+    if args.distill: cands = []
+    print(args.cands_dir)
     with torch.no_grad():
         for step, batch in tqdm(enumerate(loader_eval), total = len(loader_eval)):
             if args.distill:
@@ -95,8 +103,20 @@ def micro_eval(model, loader_eval, num_total_unorm, args = None):
             # except:
             #     for i in range(4):
             #         print(step, batch[i].shape)
-            if step == 0: scores_list = scores
-            else: scores_list = torch.cat([scores_list, scores], dim = 0)
+            # if step == 0: scores_list = scores
+            # else: scores_list = torch.cat([scores_list, scores], dim = 0)
+            if args.distill:
+                for i, id in enumerate(batch[3]):
+                    candidate = {}
+                    candidate['mention_id'] = id
+                    candidate['candidates'] = list(batch[4][i])
+                    candidate['scores'] = scores[i].tolist()
+                    cands.append(candidate)
+            print(len(cands))
+        if args.distill:
+            with open(os.path.join(args.model, 'candidates_train_distillation.json'), 'w') as f:
+                for item in cands:
+                    f.write('%s\n' % json.dumps(item))
     loss_total /= len(loader_eval)
     model.train()
     acc_norm = num_correct / num_total * 100
@@ -104,8 +124,7 @@ def micro_eval(model, loader_eval, num_total_unorm, args = None):
     return {'acc_norm': acc_norm, 'acc_unorm': acc_unorm,
             'num_correct': num_correct,
             'num_total_norm': num_total,
-            'val_loss': loss_total,
-            'scores': scores}
+            'val_loss': loss_total}
 
 
 def macro_eval(model, val_loaders, num_total_unorm, args = None):
@@ -153,14 +172,14 @@ def recall_eval(model, val_loaders, num_total_unorm, eval_mode = "micro", k = 64
         acc_norm = 0
         num_correct = 0
         recall_correct = 0
-        if args.type_cands == "self_negative" or args.type_cands == "self_fixed_negative":
+        if args.type_cands in self_negative_methods:
             device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
             scores_tensor = torch.tensor([]).to(device)
         with torch.no_grad(): 
             for i, batch in tqdm(enumerate(val_loaders), total = len(val_loaders)):
                 if i > 3 and debug: break
                 scores = model.forward(*batch, recall_eval = True, beam_ratio = args.beam_ratio, args = args)[2]
-                if args.type_cands == "self_negative" or args.type_cands == "self_fixed_negative":
+                if args.type_cands in self_negative_methods:
                     scores_tensor = torch.cat([scores_tensor, scores], dim = 0)
                 top_k = scores.topk(k, dim=1)[1]
                 preds = top_k[:, 0]
@@ -178,7 +197,7 @@ def recall_eval(model, val_loaders, num_total_unorm, eval_mode = "micro", k = 64
         else:
             model.evaluate_on = False
             model.candidates_embeds = None
-        if args.type_cands != "self_negative" and args.type_cands != "self_fixed_negative":
+        if not args.type_cands in self_negative_methods:
             return {"recall": r_k, "acc_norm": acc_norm, "acc_unorm":acc_unorm, "num_total_norm": nb_samples, "num_correct": num_correct, "recall_correct": recall_correct, "num_total_norm": nb_samples}
         else:
             return {"recall": r_k, "acc_norm": acc_norm, "acc_unorm":acc_unorm, "num_total_norm": nb_samples, \
@@ -195,7 +214,7 @@ def recall_eval(model, val_loaders, num_total_unorm, eval_mode = "micro", k = 64
         for i in range(len(val_loaders)):
             val_loader = val_loaders[i]
             num_unorm = num_total_unorm[i]
-            if args.type_cands != 'self_negative' and args.type_cands != "self_fixed_negative":
+            if not args.type_cands in self_negative_methods:
                 micro_results = micro_recall_eval(model, val_loader, num_unorm, k, all_candidates_embeds, args)
             else:
                 micro_results, scores_tensor = micro_recall_eval(model, val_loader, num_unorm, k, all_candidates_embeds, args)
@@ -267,7 +286,7 @@ def main(args):
         run = wandb.init(project = "hard-nce-el", resume = "auto", id = args.run_id, config = args)
     else:
         run = wandb.init(project="hard-nce-el", config = args)
-    if not args.anncur or args.resume_training: args.model = '/shared/s3/lab07/jongsong/hard-nce-el/models/{}/{}/'.format(args.type_model, run.id)
+    if not args.anncur or args.resume_training: args.model = './models/{}/{}/'.format(args.type_model, run.id)
     if not os.path.exists(args.model):
         os.makedirs(args.model)
     # writer = SummaryWriter()
@@ -452,7 +471,7 @@ def main(args):
                                                     args.C_eval,
                                                     use_full_dataset,
                                                     macro_eval_mode, args = args)
-        if args.type_cands == "self_negative" or args.type_cands == "self_fixed_negative":
+        if args.type_cands in self_negative_methods:
             with torch.no_grad():
                 try:
                     torch.multiprocessing.set_start_method('spawn')
@@ -495,12 +514,14 @@ def main(args):
         #     val_result = macro_eval(model, loader_val, num_val_samples, args)
         #     print(val_result)
         print('Begin Training')
-        if args.eval_method == 'micro':
-            val_result = micro_eval(model, loader_val, num_val_samples, args)
-        elif args.eval_method == 'macro':
-            val_result = macro_eval(model, loader_val, num_val_samples, args)
+        # if args.eval_method == 'micro':
+        #     val_result = micro_eval(model, loader_val, num_val_samples, args)
+        # elif args.eval_method == 'macro':
+        #     val_result = macro_eval(model, loader_val, num_val_samples, args)
         for batch_idx, batch in tqdm(enumerate(loader_train), total = len(loader_train)):  # Shuffled every epoch
             if args.debug and batch_idx > 10: break
+            print(batch[-1].shape)
+            raise('Exception')
             model.train()
             # try:
 
@@ -543,7 +564,9 @@ def main(args):
                                'Average Loss {:8.4f}'.format(
                         step_num, num_train_steps, epoch,
                         batch_idx + 1, len(loader_train), avg_loss))
-                    wandb.log({"average loss": avg_loss, "learning_rate": optimizer.param_groups[0]['lr'], "epoch": epoch})
+                    wandb.log({"average loss": avg_loss, \
+                    "learning_rate": optimizer.param_groups[0]['lr'], \
+                    "epoch": epoch})
 
                     logging_loss = tr_loss
 
@@ -577,28 +600,28 @@ def main(args):
             newline=False))
             wandb.log({"unnormalized acc": val_result['acc_unorm'], "normalized acc": val_result['acc_norm']
             ,"val_loss": val_result['val_loss'], "epoch": epoch})
-        if args.type_model == 'extend_multi' or args.type_model == 'extend_multi_dot':
-            if args.eval_method == 'micro':
-                if args.type_cands == 'self_negative' or args.type_cands == "self_fixed_negative":
-                    recall_result = recall_eval(model, loader_val, num_val_samples, eval_mode = args.eval_method, args = args)[0]
-                else:
-                    recall_result = recall_eval(model, loader_val, num_val_samples, eval_mode = args.eval_method, args = args)
-            else:
-                recall_result = recall_eval(model, loader_val, num_val_samples, eval_mode = args.eval_method, args = args)
-            logger.log('Done with epoch {:3d} | recall {:8.4f} | '
-                    'val acc unormalized  {:8.4f} ({}/{})|'
-                    'val acc normalized  {:8.4f} ({}/{}) '.format(
-                epoch,
-                recall_result['recall'],
-                recall_result['acc_unorm'],
-                recall_result['num_correct'],
-                num_val_samples,
-                recall_result['acc_norm'],
-                recall_result['num_correct'],
-                recall_result['num_total_norm'],
-                newline=False))
-            wandb.log({"rereanker_recall": recall_result['recall'], "tournament_normalized_acc": recall_result['acc_norm']
-                ,"tournament_unnormalized_acc": recall_result['acc_unorm'], "epoch": epoch})
+        # if args.type_model == 'extend_multi' or args.type_model == 'extend_multi_dot':
+        #     if args.eval_method == 'micro':
+        #         if args.type_cands == 'self_negative' or args.type_cands == "self_fixed_negative":
+        #             recall_result = recall_eval(model, loader_val, num_val_samples, eval_mode = args.eval_method, args = args)[0]
+        #         else:
+        #             recall_result = recall_eval(model, loader_val, num_val_samples, eval_mode = args.eval_method, args = args)
+        #     else:
+        #         recall_result = recall_eval(model, loader_val, num_val_samples, eval_mode = args.eval_method, args = args)
+        #     logger.log('Done with epoch {:3d} | recall {:8.4f} | '
+        #             'val acc unormalized  {:8.4f} ({}/{})|'
+        #             'val acc normalized  {:8.4f} ({}/{}) '.format(
+        #         epoch,
+        #         recall_result['recall'],
+        #         recall_result['acc_unorm'],
+        #         recall_result['num_correct'],
+        #         num_val_samples,
+        #         recall_result['acc_norm'],
+        #         recall_result['num_correct'],
+        #         recall_result['num_total_norm'],
+        #         newline=False))
+        #     wandb.log({"rereanker_recall": recall_result['recall'], "tournament_normalized_acc": recall_result['acc_norm']
+        #         ,"tournament_unnormalized_acc": recall_result['acc_unorm'], "epoch": epoch})
 
         if epoch >= 2:
             try:
@@ -736,7 +759,8 @@ if __name__ == '__main__':
                                 'mixed_negative',
                                  'hard_negative',
                                  'self_negative',
-                                 'self_fixed_negative'],
+                                 'self_fixed_negative',
+                                 'self_mixed_negative'],
                         help='fixed: top k, hard: distributionally sampled k')
     parser.add_argument('--run_id', type = str,
                         help='run id when resuming the run')
@@ -783,7 +807,9 @@ if __name__ == '__main__':
     parser.add_argument('--recall_eval', action='store_true',
                         help='the batch size')
     parser.add_argument('--distill', action='store_true',
-                        help='the batch size')
+                        help='getting score distribution for distillation purpose')
+    parser.add_argument('--distill_training', action='store_true',
+                        help='training smaller model from crossencoder scores')
     parser.add_argument('--bert_lr', type=float, default=1e-5,
                         help='the batch size')
     parser.add_argument('--num_sampled', type=int, default=256,

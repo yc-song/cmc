@@ -46,7 +46,8 @@ class BasicDataset(Dataset):
                 xs.append(y)
             if not self_negs_again:
                 # At first, training set == entire set
-                if args.type_cands == 'self_negative' or args.type_cands == "self_fixed_negative":
+                if args.type_cands == 'self_negative' or args.type_cands == "self_fixed_negative"\
+                or args.type_cands == "self_mixed_negative":
                     return xs[:args.num_sampled]
                 elif args.type_cands == 'fixed_negative':
                     xs = [y] + [x for x in xs if x != y]  # Target index always 0
@@ -94,6 +95,20 @@ class BasicDataset(Dataset):
                     xs = np.array(xs)
                     xs = xs[hard_cands.squeeze(0).cpu()]
                     xs = [y] + [x for x in xs if x != y]  # Target index always 0
+                elif args.type_cands == 'self_mixed_negative':
+                    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+                    num_fixed = int(args.num_training_cands * args.cands_ratio)
+                    num_hards = args.num_training_cands - num_fixed
+                    xs = [y] + [x for x in xs if x != y]  # Target index always 0
+                    xs = np.array(xs)
+                    fixed_xs = xs[:num_fixed]
+                    # Random sampling by giving same probs to each candidate
+                    scores = torch.zeros(len(candidates['scores']))[num_fixed:] 
+                    probs = scores.softmax(dim=0)
+                    probs = probs.unsqueeze(0)
+                    hard_cands = torch.tensor([num_fixed]) + distribution_sample(probs, num_hards, device).squeeze(0)
+                    hard_xs = xs[hard_cands.squeeze(0)]
+                    xs = np.concatenate((fixed_xs, hard_xs))
 
             return xs[:args.num_training_cands]
         else:
@@ -165,6 +180,7 @@ class UnifiedDataset(BasicDataset):
         self.self_negs_again = self_negs_again
 
     def __getitem__(self, index):
+
         mention = self.samples[0][index]
         candidates = self.samples[1][mention['mention_id']]
         mention_window = self.get_mention_window(mention)[0]
@@ -194,6 +210,7 @@ class UnifiedDataset(BasicDataset):
             candidates_token_ids[i] = torch.tensor(candidate_dict['input_ids'])
             candidates_masks[i] = torch.tensor(candidate_dict['attention_mask'])
             candidates_tokens[i] = candidate_token
+
         # print('''
         # A list of documents is shown below. Each document has a number next to it along with a summary of each entity. A sentence that includes mention and context is also provided.
         # Respond with the numbers of the documents you should consult to answer the question, in order of relevance, as well as the relevance score. A relevance score is a number from 1–10 based on which entity is the correct reference for the given mention.
@@ -204,9 +221,12 @@ class UnifiedDataset(BasicDataset):
         #     print("Document {}: {}".format(i, elem))
         # print("Question: {}".format(mention_token))
         # print("Answer:")
-        return mention_token_ids, mention_masks, candidates_token_ids, \
-               candidates_masks
-
+        if self.is_training and self.args.distill_training:
+            return mention_token_ids, mention_masks, candidates_token_ids, \
+                candidates_masks, torch.tensor(candidates["scores"])
+        else:
+            return mention_token_ids, mention_masks, candidates_token_ids, \
+                candidates_masks
 
 class FullDataset(BasicDataset):
     def __init__(self, documents, samples, tokenizer, max_len,
