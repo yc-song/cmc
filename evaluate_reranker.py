@@ -4,6 +4,7 @@ import os
 import random
 import torch
 import torch.nn as nn
+import json
 from data_reranker import get_loaders, load_zeshel_data, Logger
 from datetime import datetime
 from reranker import FullRanker
@@ -11,7 +12,7 @@ from retriever import UnifiedRetriever
 from data_retriever import get_all_entity_hiddens
 from transformers import BertTokenizer, BertModel, \
     AdamW, get_linear_schedule_with_warmup, get_constant_schedule
-from main_reranker import micro_eval, macro_eval, recall_eval, count_parameters, set_seed, write_to_file, load_model
+from main_reranker import macro_eval, recall_eval, count_parameters, set_seed, write_to_file, load_model
 from tqdm import tqdm
 import traceback
 import wandb

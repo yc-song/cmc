@@ -33,19 +33,36 @@ def configure_optimizer(args, model, num_train_examples):
     # https://github.com/google-research/bert/blob/master/optimization.py#L25
     no_decay = ['bias', 'LayerNorm.weight']
     transformer = ['extend_multi', 'mlp']
-    for n, p in model.named_parameters():
-        count = 0
+    identity_init = ['transformerencoderlayer.weight']
     optimizer_grouped_parameters = [
         {'params': [p for n, p in model.named_parameters()
+                    if any(nd in n for nd in transformer) and any(nd in n for nd in no_decay) and not any(nd in n for nd in identity_init)],
+         'lr': args.lr, 'weight_decay': 0.0,
+         'names': [n for n, p in model.named_parameters()
+                    if any(nd in n for nd in transformer) and any(nd in n for nd in no_decay) and not any(nd in n for nd in identity_init)]},
+        {'params': [p for n, p in model.named_parameters()
+                    if any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)],
+         'weight_decay': 0.0, 'lr': args.bert_lr,
+         'names': [n for n, p in model.named_parameters()
+                    if any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)]},
+        {'params': [p for n, p in model.named_parameters()
+                    if not any(nd in n for nd in no_decay) and any(nd in n for nd in transformer) and not any(nd in n for nd in identity_init) ],
+         'lr': args.lr, 'weight_decay': args.weight_decay,
+         'names': [n for n, p in model.named_parameters()
+                    if not any(nd in n for nd in no_decay) and any(nd in n for nd in transformer) and not any(nd in n for nd in identity_init)]},
+        {'params': [p for n, p in model.named_parameters()
                     if not any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)],
-         'weight_decay': args.weight_decay, 'lr': args.bert_lr},
+         'weight_decay': args.weight_decay, 'lr': args.bert_lr,
+         'names': [n for n, p in model.named_parameters()
+                    if not any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)]},
         {'params': [p for n, p in model.named_parameters()
-                    if any(nd in n for nd in no_decay)],
-         'weight_decay': 0.0, 'lr': args.bert_lr},
-        {'params': [p for n, p in model.named_parameters()
-                    if any(nd in n for nd in transformer) and not any(nd in n for nd in no_decay)],
-         'lr': args.lr, 'weight_decay': args.weight_decay},
+                    if any(nd in n for nd in identity_init)],
+         'weight_decay': args.weight_decay, 'lr': args.weight_lr,
+         'names': [n for n, p in model.named_parameters()
+                    if any(nd in n for nd in identity_init)]}
     ]
+    for item in optimizer_grouped_parameters:
+        print(item['names'])
     optimizer = AdamW(optimizer_grouped_parameters,
                       eps=args.adam_epsilon)
     print(optimizer)
@@ -112,7 +129,6 @@ def micro_eval(model, loader_eval, num_total_unorm, args = None):
                     candidate['candidates'] = list(batch[4][i])
                     candidate['scores'] = scores[i].tolist()
                     cands.append(candidate)
-            print(len(cands))
         if args.distill:
             with open(os.path.join(args.model, 'candidates_train_distillation.json'), 'w') as f:
                 for item in cands:
@@ -321,7 +337,7 @@ def main(args):
             num_entity_vecs = 1
         elif args.type_model == 'extend_multi_dot':
             attention_type = 'extend_multi_dot'
-            num_mention_vecs = 1
+            num_mention_vecs = args.num_mention_vecs
             num_entity_vecs = 1
         elif args.type_model == 'mlp_with_som':
             attention_type = 'mlp_with_som'
@@ -520,8 +536,6 @@ def main(args):
         #     val_result = macro_eval(model, loader_val, num_val_samples, args)
         for batch_idx, batch in tqdm(enumerate(loader_train), total = len(loader_train)):  # Shuffled every epoch
             if args.debug and batch_idx > 10: break
-            print(batch[-1].shape)
-            raise('Exception')
             model.train()
             # try:
 
@@ -782,7 +796,7 @@ if __name__ == '__main__':
                         default='base',
                         choices=['base', 'large'],
                         help='the type of encoder')
-    parser.add_argument('--num_mention_vecs', type=int, default=8,
+    parser.add_argument('--num_mention_vecs', type=int, default=1,
                         help='the number of mention vectors ')
     parser.add_argument('--num_entity_vecs', type=int, default=8,
                         help='the number of entity vectors  ')
@@ -811,6 +825,8 @@ if __name__ == '__main__':
     parser.add_argument('--distill_training', action='store_true',
                         help='training smaller model from crossencoder scores')
     parser.add_argument('--bert_lr', type=float, default=1e-5,
+                        help='the batch size')
+    parser.add_argument('--weight_lr', type=float, default=1e-2,
                         help='the batch size')
     parser.add_argument('--num_sampled', type=int, default=256,
                         help='the batch size')

@@ -109,7 +109,7 @@ class SoftAttention(nn.Module):
         return scores
 
 def distillation_loss(student_outputs, teacher_outputs, labels, alpha = 0.5):
-    teacher_loss = nn.KLDivLoss()(nn.functional.log_softmax(student_outputs, dim=1),
+    teacher_loss = nn.KLDivLoss(reduction='batchmean')(nn.functional.log_softmax(student_outputs, dim=1),
                              nn.functional.softmax(teacher_outputs, dim=1))
     student_loss = nn.CrossEntropyLoss(student_outputs, labels)
     loss = alpha*student_loss + (1-alpha)*teacher_loss
@@ -262,11 +262,11 @@ class UnifiedRetriever(nn.Module):
                         for i in range(int(num_cands/top_k)+1):
                             tmp_candidates_embed = self.candidates_embeds[top_k*i:min(top_k*(i+1),num_cands), :, :].expand(mention_embeds.size(0), -1, -1, -1)
                             if i == 0:
-                                scores = self.extend_multi(mention_embeds, tmp_candidates_embed)
+                                scores = self.extend_multi(mention_embeds, tmp_candidates_embed, num_mention_vecs = self.num_mention_vecs)
                                 scores = torch.nn.functional.softmax(scores, dim = 1)
                                 _, next_round_idxs = torch.topk(scores, int(top_k/4))
                             else:
-                                tmp_scores = self.extend_multi(mention_embeds, tmp_candidates_embed)
+                                tmp_scores = self.extend_multi(mention_embeds, tmp_candidates_embed, num_mention_vecs = self.num_mention_vecs)
                                 tmp_scores = torch.nn.functional.softmax(tmp_scores, dim = 1)
                                 scores = torch.cat([scores, tmp_scores], dim = 1)
                                 _, tmp_next_round_idxs = torch.topk(tmp_scores, int(tmp_candidates_embed.size(1)/4))
@@ -280,14 +280,14 @@ class UnifiedRetriever(nn.Module):
                         for i in range(int(num_cands/top_k)+1):
                             tmp_candidates_embed = tmp_cls_cands[:,top_k*i:min(top_k*(i+1),num_cands), :]
                             if i == 0:
-                                tmp_scores = self.extend_multi(mention_embeds, tmp_candidates_embed)
+                                tmp_scores = self.extend_multi(mention_embeds, tmp_candidates_embed, num_mention_vecs = self.num_mention_vecs)
                                 tmp_scores = torch.nn.functional.softmax(tmp_scores, dim = 1)
                                 _, tmp_next_round_idxs = torch.topk(tmp_scores, int(tmp_candidates_embed.size(1)/4))
                                 # next_round_idxs = torch.index_select(previous_round_idx, 1, next_round_idxs)
                                 next_round_idxs = torch.gather(previous_round_idxs, 1, tmp_next_round_idxs)
                                 # next_round_idxs = previous_round_idx[tmp_next_round_idxs]
                             else:
-                                tmp_scores2 = self.extend_multi(mention_embeds, tmp_candidates_embed)
+                                tmp_scores2 = self.extend_multi(mention_embeds, tmp_candidates_embed, num_mention_vecs = self.num_mention_vecs)
                                 tmp_scores2 = torch.nn.functional.softmax(tmp_scores2, dim = 1)
                                 tmp_scores = torch.cat([tmp_scores, tmp_scores2], dim = 1)
                                 _, tmp_next_round_idxs = torch.topk(tmp_scores2, int(tmp_candidates_embed.size(1)/4))
@@ -398,7 +398,7 @@ class UnifiedRetriever(nn.Module):
                     candidates_embeds = self.encode(mention_token_ids, mention_masks,
                                                 candidate_token_ids[:,:args.num_training_cands,:],
                                                 candidate_masks[:,:args.num_training_cands,:])
-                    scores = self.extend_multi(mention_embeds, candidates_embeds, dot, args)
+                    scores = self.extend_multi(mention_embeds, candidates_embeds, dot, args, num_mention_vecs = self.num_mention_vecs)
             elif self.attention_type == 'mlp_with_som':
                     mention_embeds, mention_embeds_masks, \
                     candidates_embeds = self.encode(mention_token_ids, mention_masks,
@@ -524,7 +524,7 @@ class FrozenRetriever(UnifiedRetriever):
                         candidates_embeds_dict["embeds"] = candidates_embeds_dict["embeds"][batch_idxs, idxs, :, :]
                         candidates_embeds_dict["idxs"] = candidates_embeds_dict["idxs"][batch_idxs, idxs.cpu()]
                 else:
-                    scores = self.extend_multi(mention_embeds, candidates_embeds, dot, args)
+                    scores = self.extend_multi(mention_embeds, candidates_embeds, dot, args, self.num_mention_vecs)
             else:
                 if self.attention_type == 'soft_attention':
                     scores = self.attention(candidates_embeds, mention_embeds,
@@ -565,7 +565,7 @@ class extend_multi(nn.Module):
         # Process the chunk using your deep learning model
         processed_chunk = self.forward(xs, ys, dot)
         return processed_chunk
-    def forward(self, xs, ys, dot = False, args = None):
+    def forward(self, xs, ys, dot = False, args = None, num_mention_vecs = 1):
         xs = xs.to(self.device) # (batch size, 1, embed_dim)
         ys = ys.squeeze(dim = -2).to(self.device) #(batch_size, cands, embed_dim)
         if args.model_top is None and args.token_type :
@@ -578,10 +578,10 @@ class extend_multi(nn.Module):
             input = torch.cat([xs, ys], dim = 1)
         attention_result = self.transformerencoder(input)
         if dot:
-            scores = torch.bmm(attention_result[:,0,:].unsqueeze(1), attention_result[:,1:,:].transpose(2,1))
+            scores = torch.bmm(attention_result[:,0,:].unsqueeze(1), attention_result[:,num_mention_vecs:,:].transpose(2,1))
             scores = scores.squeeze(-2)
         else:
-            scores = self.linearhead(attention_result[:,1:,:])
+            scores = self.linearhead(attention_result[:,num_mention_vecs:,:])
             scores = scores.squeeze(-1)
         return scores
     def forward_chunk(self, xs, ys, dot = False, size_chunk = 1):
