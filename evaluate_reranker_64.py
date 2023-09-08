@@ -4,7 +4,6 @@ import os
 import random
 import torch
 import torch.nn as nn
-import json
 from data_reranker import get_loaders, load_zeshel_data, Logger
 from datetime import datetime
 from reranker import FullRanker
@@ -36,8 +35,10 @@ def micro_eval(model, loader_eval, num_total_unorm, args = None, mode = "valid")
                 batch[-2] = np.array(batch[-2])
                 batch[-1] = np.array(batch[-1]).T
             if debug and step > 10: break
-            # try:
-            result = model.forward(*batch, args = args)
+            try:
+                result = model.forward(*batch, args = args)
+            except:
+                print(batch)
             if type(result) is dict:
                 preds = result['predictions']
                 loss_total += result['loss'].sum()
@@ -133,6 +134,7 @@ def main(args):
 
     model.load_state_dict(cpt['sd'])
     print("checkpoint from ", cpt['epoch'])
+    print("best performance ", cpt['perf'])
 
     # except:
         # pass
@@ -170,20 +172,8 @@ def main(args):
                                                         use_full_dataset,
                                                         macro_eval_mode, args=args)
 
-    if args.type_model != "full":
-        print('recall eval')
-
-        recall_result = recall_eval(model, loader_val, num_val_samples, eval_mode=args.eval_method, args=args)
-        beam_list = [0.0625, 0.25, 0.5]
-        print(recall_result)
-        for beam in beam_list:
-            print({"recall_result/beam{}_unnorm_acc".format(str(beam)), recall_result['acc_unorm'][beam], \
-            "recall_result/beam{}_norm_acc".format(str(beam)), recall_result['acc_norm'][beam],
-            "recall_result/beam{}_recall".format(str(beam)), recall_result['recall'][beam]})
-            wandb.log({"recall_result/beam{}_unnorm_acc".format(str(beam)): recall_result['acc_unorm'][beam], \
-            "recall_result/beam{}_norm_acc".format(str(beam)): recall_result['acc_norm'][beam],
-            "recall_result/beam{}_recall".format(str(beam)): recall_result['recall'][beam]})
     print('start evaluation')
+    model.eval()
     if args.eval_method == 'micro':
         test_result = micro_eval(model, loader_test, num_test_samples, args)
     elif args.eval_method == 'macro':
@@ -199,10 +189,10 @@ def main(args):
         test_result['num_correct'],
         test_result['num_total_norm'],
         newline=False))
-    wandb.log({"test/unnormalized acc (cands {})".format(args.num_eval_cands): test_result['acc_unorm'], "test/normalized acc": test_result['acc_norm']
-            ,"test/val_loss(cands {})".format(args.num_eval_cands): test_result['val_loss']\
-            ,"test/micro_unnormalized_acc(cands {})".format(args.num_eval_cands): sum(test_result['num_correct'])/sum(test_result['num_total_unorm'])\
-            ,"test/micro_normalized_acc(cands {})".format(args.num_eval_cands): sum(test_result['num_correct'])/sum(test_result['num_total_norm'])})
+    wandb.log({"test/unnormalized acc": test_result['acc_unorm'], "test/normalized acc": test_result['acc_norm']
+            ,"test/val_loss": test_result['val_loss']\
+            ,"test/micro_unnormalized_acc": sum(test_result['num_correct'])/sum(test_result['num_total_unorm'])\
+            ,"test/micro_normalized_acc": sum(test_result['num_correct'])/sum(test_result['num_total_norm'])})
     
     if args.distill:
         train_result = micro_eval(model, loader_train, num_val_samples, args, mode = "train")
@@ -223,10 +213,10 @@ def main(args):
     
     print("micro_unnormalized_acc", sum(val_result['num_correct'])/sum(val_result['num_total_unorm'])\
     ,"micro_normalized_acc", sum(val_result['num_correct'])/sum(val_result['num_total_norm']))
-    wandb.log({"valid/unnormalized acc(cands {})".format(args.num_eval_cands): val_result['acc_unorm'], "valid/normalized acc(cands {})".format(args.num_eval_cands): val_result['acc_norm']
-    ,"valid/val_loss(cands {})".format(args.num_eval_cands): val_result['val_loss']\
-    ,"valid/micro_unnormalized_acc(cands {})".format(args.num_eval_cands): sum(val_result['num_correct'])/sum(val_result['num_total_unorm'])\
-    ,"valid/micro_normalized_acc(cands {})".format(args.num_eval_cands): sum(val_result['num_correct'])/sum(val_result['num_total_norm'])})
+    wandb.log({"valid/unnormalized acc": val_result['acc_unorm'], "valid/normalized acc": val_result['acc_norm']
+    ,"valid/val_loss": val_result['val_loss']\
+    ,"valid/micro_unnormalized_acc": sum(val_result['num_correct'])/sum(val_result['num_total_unorm'])\
+    ,"valid/micro_normalized_acc": sum(val_result['num_correct'])/sum(val_result['num_total_norm'])})
 
 
     # wandb.log(

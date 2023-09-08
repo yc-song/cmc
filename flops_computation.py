@@ -76,7 +76,7 @@ def main(args):
         else:
             encoder = BertModel.from_pretrained('bert-large-uncased')
         if args.type_model == 'full':
-            model = FullRanker(encoder, device)
+            model = FullRanker(encoder, device, args)
         else:
             if args.type_model == 'poly':
                 attention_type = 'soft_attention'
@@ -102,13 +102,23 @@ def main(args):
             model = UnifiedRetriever(encoder, device, num_mention_vecs,
                                 num_entity_vecs,
                                 args.mention_use_codes, args.entity_use_codes,
-                                attention_type, None, False, num_heads = args.num_heads, num_layers = args.num_layers)
-        batch = [torch.randint(1,3, (1, 128)),torch.randint(1,3, (1, 128)),torch.randint(1,3, (1, 64, 128)),torch.randint(1,3, (1, 64, 128))]
-        # batch = [torch.randint(1,3, (1, 64, 256)),torch.randint(1,3, (1, 64, 256)),torch.randint(1,3, (1, 64))]
+                                attention_type, None, False, args, num_heads = args.num_heads, num_layers = args.num_layers)
+        if args.type_model != "full":
+            batch = {"mention_token_ids": torch.randint(1,3, (1, 128)),\
+            "mention_masks": torch.randint(1,3, (1, 128)),\
+            "candidate_token_ids": torch.randint(1,3, (1, 64, 128)),\
+            "candidate_masks": torch.randint(1,3, (1, 64, 128)),\
+            "args": args}
+        else:
+            batch = {
+                "encoded_pairs":torch.randint(1,3, (1, 64, 256)),\
+                "type_marks":torch.randint(0,2, (1, 64, 256)),\
+                "input_lens": torch.randint(0,2, (1, 64)),
+                "args": args}
 
         model = model.to(device)
         flops, macs, params = get_model_profile(model=model, # model
-                                    args=batch, # list of positional arguments to the model.
+                                    kwargs=batch, # list of positional arguments to the model.
                                     ignore_modules=None) # the list of modules to ignore in the profiling
         print(flops, macs, params)
 #  writer.close()
@@ -119,11 +129,13 @@ def write_to_file(path, string, mode="w"):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
 
-    parser.add_argument('--model', type=str,
+    parser.add_argument('--model', type=str,default='./models/reranker',
                         help='model path')
-    parser.add_argument('--data', type=str,
+    parser.add_argument('--model_top', type=str,
+                        help='when loading top model path')
+    parser.add_argument('--data', type=str,default='./data',
                         help='data path (zeshel data directory)')
-    parser.add_argument('--cands_dir', type=str,
+    parser.add_argument('--cands_dir', type=str, default = './data/cands_anncur_top1024',
                         help='candidates directory')
     parser.add_argument('--L', type=int, default=256,
                         help='max length of joint input [%(default)d]')
@@ -131,8 +143,15 @@ if __name__ == '__main__':
                         help='max number of candidates [%(default)d]')
     parser.add_argument('--C_eval', type=int, default=64,
                         help='max number of candidates [%(default)d] when eval')
-    parser.add_argument('--B', type=int, default=8,
+    parser.add_argument('--B', type=int, default=4,
                         help='batch size [%(default)d]')
+    parser.add_argument('--freeze_bert', action = 'store_true',
+                        help='freeze encoder BERT')
+    parser.add_argument('--identity_bert', action = 'store_true',
+                        help='assign same query and key matrix')
+    parser.add_argument('--eval_batch_size', type=int, default=8,
+                        help='evaluation batch size [%(default)d]')
+
     parser.add_argument('--lr', type=float, default=2e-5,
                         help='initial learning rate [%(default)g]')
     parser.add_argument('--warmup_proportion', type=float, default=0.1,
@@ -142,7 +161,7 @@ if __name__ == '__main__':
                         help='weight decay [%(default)g]')
     parser.add_argument('--adam_epsilon', type=float, default=1e-6,
                         help='epsilon for Adam optimizer [%(default)g]')
-    parser.add_argument('--gradient_accumulation_steps', type=int, default=1,
+    parser.add_argument('--gradient_accumulation_steps', type=int, default=4,
                         help='num gradient accumulation steps [%(default)d]')
     parser.add_argument('--epochs', type=int, default=3,
                         help='max number of epochs [%(default)d]')
@@ -154,15 +173,15 @@ if __name__ == '__main__':
                         help='init (default if 0) [%(default)g]')
     parser.add_argument('--seed', type=int, default=42,
                         help='random seed [%(default)d]')
-    parser.add_argument('--num_workers', type=int, default=1,
+    parser.add_argument('--num_workers', type=int, default=4,
                         help='num workers [%(default)d]')
-    parser.add_argument('--gpus', default='', type=str,
+    parser.add_argument('--gpus', type=str, default='0,1',
                         help='GPUs separated by comma [%(default)s]')
     parser.add_argument('--simpleoptim', action='store_true',
                         help='simple optimizer (constant schedule, '
                              'no weight decay?')
     parser.add_argument('--eval_method', default='macro', type=str,
-                        choices=['macro', 'micro'],
+                        choices=['macro', 'micro', 'skip'],
                         help='the evaluate method')
     parser.add_argument('--type_model', type=str,
                         default='full',
@@ -172,31 +191,37 @@ if __name__ == '__main__':
                                  'poly',
                                  'full',
                                  'extend_multi',
-                                 'extend_multi_dot'],
+                                 'extend_multi_dot',
+                                 'mlp_with_som'],
                         help='the type of model')
     parser.add_argument('--debug', action = 'store_true',
+                        help='debugging mode')
+    parser.add_argument('--save_dir', type = str, default = '/shared/s3/lab07/jongsong/hard-nce-el/models',
                         help='debugging mode')
     parser.add_argument('--training_one_epoch', action = 'store_true',
                         help='stop the training after one epoch')
     parser.add_argument('--type_cands', type=str,
-                        default='mixed_negative',
+                        default='fixed_negative',
                         choices=['fixed_negative',
                                 'mixed_negative',
-                                 'hard_negative'],
+                                 'hard_negative',
+                                 'self_negative',
+                                 'self_fixed_negative',
+                                 'self_mixed_negative'],
                         help='fixed: top k, hard: distributionally sampled k')
     parser.add_argument('--run_id', type = str,
                         help='run id when resuming the run')
     parser.add_argument('--num_training_cands', default=64, type=int,
                         help='# of candidates')
-    parser.add_argument('--num_eval_cands', default=256, type=int,
+    parser.add_argument('--num_recall_cands', default=1024, type=int,
                         help='# of candidates')
     parser.add_argument('--train_one_epoch', action = 'store_true',
                         help='training only one epoch')
     parser.add_argument('--cands_ratio', default=0.5, type=float,
                         help='ratio of sampled negatives')
-    parser.add_argument('--num_heads', type=int, default=2,
+    parser.add_argument('--num_heads', type=int, default=16,
                         help='the number of multi-head attention in extend_multi ')
-    parser.add_argument('--num_layers', type=int, default=2,
+    parser.add_argument('--num_layers', type=int, default=4,
                         help='the number of atten                ion layers in extend_multi ')
     parser.add_argument('--resume_training', action='store_true',
                         help='resume training from checkpoint?')
@@ -218,6 +243,30 @@ if __name__ == '__main__':
                         help='store entity hiddens?')
     parser.add_argument('--en_hidden_path', type=str,
                         help='all entity hidden states path')
+    parser.add_argument('--beam_ratio', type=float, default=0.25,
+                        help='all entity hidden states path')
+    parser.add_argument('--too_large', action='store_true',
+                        help='all entity hidden states path')
+    parser.add_argument('--entity_bsz', type=int, default=64,
+                        help='the batch size')
+    parser.add_argument('--lambda_scheduler', action='store_true',
+                        help='the batch size')
+    parser.add_argument('--fixed_initial_weight', action='store_true',
+                        help='fixed weight for identity weight')
+    parser.add_argument('--recall_eval', action='store_true',
+                        help='the batch size')
+    parser.add_argument('--val_random_shuffle', action = 'store_true',
+                        help='training only one epoch')
+    parser.add_argument('--distill', action='store_true',
+                        help='getting score distribution for distillation purpose')
+    parser.add_argument('--distill_training', action='store_true',
+                        help='training smaller model from crossencoder scores')
+    parser.add_argument('--bert_lr', type=float, default=1e-5,
+                        help='the batch size')
+    parser.add_argument('--num_sampled', type=int, default=256,
+                        help='the batch size')
+    parser.add_argument('--mlp_layers', type=str, default="1536",
+                        help='num of layers for mlp or mlp-with-som model (except for the first and the last layer)')
     parser.add_argument(
         "--fp16",
         action="store_true",
@@ -232,6 +281,8 @@ if __name__ == '__main__':
              "'O2', and 'O3']."
              "See details at https://nvidia.github.io/apex/amp.html",
     )
+    parser.add_argument('--anncur', action='store_true', help = "load anncur ckpt")
+    parser.add_argument('--token_type', action='store_false', help = "no token type id when specified")
 
     args = parser.parse_args()
 

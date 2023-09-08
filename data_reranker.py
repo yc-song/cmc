@@ -11,6 +11,7 @@ from torch.utils.data import Dataset, DataLoader
 from util import Logger as BasicLogger
 from data_retriever import distribution_sample
 from tqdm import tqdm
+import random
 class BasicDataset(Dataset):
 
     def __init__(self, documents, samples, tokenizer, max_len,
@@ -38,6 +39,10 @@ class BasicDataset(Dataset):
 
     def prepare_candidates(self, mention, candidates, args, self_negs_again = False):
         # xs = candidates['candidates'][:self.max_num_candidates]
+        def place_elements(lst, elements, indices):
+            for i, x in zip(indices, elements):
+                lst[i] = x
+            return lst
         xs = candidates['candidates']
         y = mention['label_document_id']
         if self.is_training:
@@ -113,10 +118,52 @@ class BasicDataset(Dataset):
             return xs[:args.num_training_cands]
         else:
             # At test time we assume candidates already include target.
+            # assert y in xs
+            # if self.args.val_random_shuffle:
+            #     xs_output = [None]*len(xs)
+            #     xs_output[0] = y
+            #     y_index = xs.index(y)
+            #     num_batches = int(len(xs)//self.args.final_k)
+            #     indices = [(i+1)*num_batches-1 for i in range(self.args.final_k)]
+            #     # print("3", indices)
+            #     if y_index < self.args.final_k:
+            #         xs.remove(y)
+            #         xs_output = place_elements(xs_output, xs[:self.args.final_k-1], indices)
+            #     else:
+            #         xs_output[1] = xs[0]
+            #         xs.remove(y)
+            #         xs_output = place_elements(xs_output, xs[1:self.args.final_k], indices)
+            #     remaining_items = [x for x in xs if x not in xs_output]
+            #     # print("5", remaining_items)
+            #     random.shuffle(remaining_items)
+            #     j = 0
+            #     for i, val in enumerate(xs_output):
+            #         if val is None:
+            #             xs_output[i] = remaining_items[j]
+            #             j+=1
+            #     # print("6", xs_output)
+            #     return xs_output[:args.num_eval_cands]
             assert y in xs
-            xs = [y] + [x for x in xs if x != y]  # Target index always 0
-            # return xs[:self.max_num_candidates]
-            return xs[:args.num_eval_cands]
+            if self.args.val_random_shuffle:
+
+                num_batches = int(len(xs)//self.args.final_k) # 16
+                xs_output = []
+                for i in range(num_batches):
+                    xs_output.extend(xs[i::num_batches])
+                y_original_index = xs.index(y)
+                y_index = xs_output.index(y)
+                if y_original_index//num_batches == 0:
+                    xs_output[0], xs_output[y_index] = xs_output[y_index], xs_output[0]
+                else:
+                    xs_output[(y_original_index//num_batches)], xs_output[y_index] = xs_output[y_index], xs_output[(y_original_index//num_batches)]
+                    xs_output[(y_original_index//num_batches)], xs_output[0] = xs_output[0], xs_output[(y_original_index//num_batches)]
+                return xs_output[:self.max_num_candidates]
+
+            else:
+                xs = [y] + [x for x in xs if x != y]  # Target index always 0
+                return xs[:self.max_num_candidates]
+            # xs = [y] + [x for x in xs if x != y]  # Target index always 0
+            # return xs[:self.maxnum_candidates]
 
             
 
@@ -374,7 +421,7 @@ def load_zeshel_data(data_dir, cands_dir, macro_eval=True, debug = False, scores
         mentions = []
         with open(os.path.join(men_path, '%s.json' % part)) as f:
             for i, line in enumerate(f):
-                if debug and i > 9: break
+                if debug and i > 100: break
                 field = json.loads(line)
                 if in_domain:
                     if field['corpus'] == domain:
@@ -387,7 +434,6 @@ def load_zeshel_data(data_dir, cands_dir, macro_eval=True, debug = False, scores
         with open(os.path.join(cands_dir,
                                'candidates_%s.json' % part)) as f:
             for i, line in enumerate(f):
-                if debug and i > 9: break
                 field = json.loads(line)
                 if scores is not None:
                     field['scores'] = scores[i]
