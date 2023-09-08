@@ -9,30 +9,91 @@ from datetime import datetime
 from reranker import FullRanker
 from retriever import UnifiedRetriever
 from data_retriever import get_all_entity_hiddens
-import shutil
-
 from transformers import BertTokenizer, BertModel, \
     AdamW, get_linear_schedule_with_warmup, get_constant_schedule
+from main_reranker import macro_eval, recall_eval, count_parameters, set_seed, write_to_file, load_model
 from tqdm import tqdm
+import traceback
 import wandb
-import deepspeed
-from deepspeed.profiling.flops_profiler import get_model_profile
-from deepspeed.accelerator import get_accelerator
-def set_seed(args):
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
+from collections import OrderedDict
+import json
 
-def load_model(model_path, device, eval_mode=False, dp=False, type_model='full'):
-    package = torch.load(model_path) if device.type == 'cuda' else \
-        torch.load(model_path, map_location=torch.device('cpu'))
+recall_preds = []
+preds_list =[]
 
+def micro_eval(model, loader_eval, num_total_unorm, args = None, mode = "valid"):
+    model.eval()
+    debug = args.debug
+    num_total = 0
+    num_correct = 0
+    loss_total = 0
+    if args.distill: cands = []
+    print(args.cands_dir)
+    with torch.no_grad():
+        for step, batch in tqdm(enumerate(loader_eval), total = len(loader_eval)):
+            if args.distill:
+                batch[-2] = np.array(batch[-2])
+                batch[-1] = np.array(batch[-1]).T
+            if debug and step > 10: break
+            try:
+                result = model.forward(*batch, args = args)
+            except:
+                print(batch)
+            if type(result) is dict:
+                preds = result['predictions']
+                loss_total += result['loss'].sum()
+                scores = result['scores']
+            else:
+                preds = result[1]
+                loss_total += result[0].sum()
+                scores = result[2]
+            num_total += len(preds)
+            num_correct += (preds == 0).sum().item()
+            # except:
+            #     for i in range(4):
+            #         print(step, batch[i].shape)
+            # if step == 0: scores_list = scores
+            # else: scores_list = torch.cat([scores_list, scores], dim = 0)
+            if args.distill:
+                for i, id in enumerate(batch[3]):
+                    candidate = {}
+                    candidate['mention_id'] = id
+                    candidate['candidates'] = list(batch[4][i])
+                    candidate['scores'] = scores[i].tolist()
+                    cands.append(candidate)
+                with open(os.path.join(args.save_dir, 'candidates_train_distillation_anncur.json'), 'w') as f:
+                    for item in cands:
+                        f.write('%s\n' % json.dumps(item))
+
+    loss_total /= len(loader_eval)
+    model.train()
+    acc_norm = num_correct / num_total * 100
+    acc_unorm = num_correct / num_total_unorm * 100
+    return {'acc_norm': acc_norm, 'acc_unorm': acc_unorm,
+            'num_correct': num_correct,
+            'num_total_norm': num_total,
+            'val_loss': loss_total}
+
+
+def main(args):
+    print(args)
+    set_seed(args)
+    run = wandb.init(project = "hard-nce-el", resume = "must", id = args.run_id, config = args)
+    args.save_dir = '{}/{}/{}/'.format(args.save_dir, args.type_model, run.id)
+    
+    # writer = SummaryWriter()
+    if not args.anncur and not args.resume_training:
+        write_to_file(
+            os.path.join(args.save_dir, "training_params.txt"), str(args)
+        )
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     if args.type_bert == 'base':
         encoder = BertModel.from_pretrained('bert-base-uncased')
     else:
         encoder = BertModel.from_pretrained('bert-large-uncased')
-    if type_model == 'full':
-        model = FullRanker(encoder, device).to(device)
+    if args.type_model == 'full':
+        model = FullRanker(encoder, device, args)
     else:
         if args.type_model == 'poly':
             attention_type = 'soft_attention'
@@ -44,91 +105,133 @@ def load_model(model_path, device, eval_mode=False, dp=False, type_model='full')
         elif args.type_model == 'multi_vector':
             num_mention_vecs = 1
             num_entity_vecs = args.num_entity_vecs
+        elif args.type_model == 'extend_multi':
+            attention_type = 'extend_multi'
+            num_mention_vecs = 1
+            num_entity_vecs = 1
+        elif args.type_model == 'extend_multi_dot':
+            attention_type = 'extend_multi_dot'
+            num_mention_vecs = 1
+            num_entity_vecs = 1
         else:
             num_mention_vecs = args.num_mention_vecs
             num_entity_vecs = args.num_entity_vecs
         model = UnifiedRetriever(encoder, device, num_mention_vecs,
                                  num_entity_vecs,
                                  args.mention_use_codes, args.entity_use_codes,
-                                 attention_type, None, False).to(device)
+                                 attention_type, None, False, args, num_heads=args.num_heads,
+                                 num_layers=args.num_layers)
+    count = 0
+    # for each_file_name in os.listdir(args.model):
+    #     if each_file_name.startswith('epoch'):
+    #         if count == 1: raise ('More than two bin files found in the model directory')
+    #         cpt = torch.load(os.path.join(args.model, each_file_name)) if device.type == 'cuda' \
+    #             else torch.load(os.path.join(args.model, each_file_name), map_location=torch.device('cpu'))
+    #         count += 1
+    #         print(os.path.join(args.model, each_file_name))
+    # try:
+    cpt = torch.load(os.path.join(args.save_dir, "pytorch_model.bin"))
+
+    model.load_state_dict(cpt['sd'])
+    print("checkpoint from ", cpt['epoch'])
+    print("best performance ", cpt['perf'])
+
+    # except:
+        # pass
+    dp = torch.cuda.device_count() > 1
     if dp:
-        from collections import OrderedDict
-        state_dict = package['sd']
-        new_state_dict = OrderedDict()
-        for k, v in state_dict.items():
-            name = k[7:]  # remove `module.`
-            new_state_dict[name] = v
-        model.load_state_dict(new_state_dict)
+        print('Data parallel across %d GPUs: %s' %
+                   (len(args.gpus.split(',')), args.gpus))
+        model = nn.DataParallel(model)
+
+    if args.type_bert == 'base':
+        tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
     else:
-        model.load_state_dict(package['sd'])
+        tokenizer = BertTokenizer.from_pretrained('bert-large-uncased')
+    use_full_dataset = (args.type_model == 'full')
+    macro_eval_mode = (args.eval_method == 'macro')
+    data = load_zeshel_data(args.data, args.cands_dir, macro_eval_mode, args.debug)
 
-    if eval_mode:
-        model.eval()
-    return model
+    model.to(device)
+    if args.fp16:
+        try:
+            from apex import amp
+        except ImportError:
+            raise ImportError(
+                "Please install apex from https://www.github.com/nvidia/apex to use fp16 training.")
+        model, optimizer = amp.initialize(model, optimizer,
+                                          opt_level=args.fp16_opt_level)
 
 
-def main(args):
+    loader_train, loader_val, loader_test, \
+        num_val_samples, num_test_samples = get_loaders(data, tokenizer, args.L,
+                                                        args.C, args.B,
+                                                        args.num_workers,
+                                                        args.inputmark,
+                                                        args.C_eval,
+                                                        use_full_dataset,
+                                                        macro_eval_mode, args=args)
 
-    with get_accelerator().device(0):
-        device = torch.device('cuda')
-        if args.type_bert == 'base':
-            encoder = BertModel.from_pretrained('bert-base-uncased')
-        else:
-            encoder = BertModel.from_pretrained('bert-large-uncased')
-        if args.type_model == 'full':
-            model = FullRanker(encoder, device, args)
-        else:
-            if args.type_model == 'poly':
-                attention_type = 'soft_attention'
-            else:
-                attention_type = 'hard_attention'
-            if args.type_model == 'dual':
-                num_mention_vecs = 1
-                num_entity_vecs = 1
-            elif args.type_model == 'multi_vector':
-                num_mention_vecs = 1
-                num_entity_vecs = args.num_entity_vecs
-            elif args.type_model == 'extend_multi':
-                attention_type = 'extend_multi'
-                num_mention_vecs = 1
-                num_entity_vecs = 1
-            elif args.type_model == 'extend_multi_dot':
-                attention_type = 'extend_multi_dot'
-                num_mention_vecs = 1
-                num_entity_vecs = 1
-            else:
-                num_mention_vecs = args.num_mention_vecs
-                num_entity_vecs = args.num_entity_vecs
-            model = UnifiedRetriever(encoder, device, num_mention_vecs,
-                                num_entity_vecs,
-                                args.mention_use_codes, args.entity_use_codes,
-                                attention_type, None, False, args, num_heads = args.num_heads, num_layers = args.num_layers)
-        if args.type_model != "full":
-            batch = {"mention_token_ids": torch.randint(1,3, (1, 128)),\
-            "mention_masks": torch.randint(1,3, (1, 128)),\
-            "candidate_token_ids": torch.randint(1,3, (1, 64, 128)),\
-            "candidate_masks": torch.randint(1,3, (1, 64, 128)),\
-            "args": args}
-        else:
-            batch = {
-                "encoded_pairs":torch.randint(1,3, (1, 64, 256)),\
-                "type_marks":torch.randint(0,2, (1, 64, 256)),\
-                "input_lens": torch.randint(0,2, (1, 64)),
-                "args": args}
+    print('start evaluation')
+    model.eval()
+    if args.eval_method == 'micro':
+        test_result = micro_eval(model, loader_test, num_test_samples, args)
+    elif args.eval_method == 'macro':
+        test_result = macro_eval(model, loader_test, num_test_samples, args)
 
-        model = model.to(device)
-        flops, macs, params = get_model_profile(model=model, # model
-                                    kwargs=batch, # list of positional arguments to the model.
-                                    ignore_modules=None) # the list of modules to ignore in the profiling
-        print(flops, macs, params)
+    print(
+               'test acc unormalized  {:8.4f} ({}/{})|'
+               'test acc normalized  {:8.4f} ({}/{}) '.format(
+        test_result['acc_unorm'],
+        test_result['num_correct'],
+        num_test_samples,
+        test_result['acc_norm'],
+        test_result['num_correct'],
+        test_result['num_total_norm'],
+        newline=False))
+    wandb.log({"test/unnormalized acc": test_result['acc_unorm'], "test/normalized acc": test_result['acc_norm']
+            ,"test/val_loss": test_result['val_loss']\
+            ,"test/micro_unnormalized_acc": sum(test_result['num_correct'])/sum(test_result['num_total_unorm'])\
+            ,"test/micro_normalized_acc": sum(test_result['num_correct'])/sum(test_result['num_total_norm'])})
+    
+    if args.distill:
+        train_result = micro_eval(model, loader_train, num_val_samples, args, mode = "train")
+        print(train_result)
+    if args.eval_method == 'micro':
+        val_result = micro_eval(model, loader_val, num_val_samples, args)
+    elif args.eval_method == 'macro':
+        val_result = macro_eval(model, loader_val, num_val_samples, args)
+    print('val acc unormalized  {:8.4f} ({}/{})|'
+               'val acc normalized  {:8.4f} ({}/{}) '.format(
+        val_result['acc_unorm'],
+        val_result['num_correct'],
+        num_val_samples,
+        val_result['acc_norm'],
+        val_result['num_correct'],
+        val_result['num_total_norm'],
+        newline=False))
+    
+    print("micro_unnormalized_acc", sum(val_result['num_correct'])/sum(val_result['num_total_unorm'])\
+    ,"micro_normalized_acc", sum(val_result['num_correct'])/sum(val_result['num_total_norm']))
+    wandb.log({"valid/unnormalized acc": val_result['acc_unorm'], "valid/normalized acc": val_result['acc_norm']
+    ,"valid/val_loss": val_result['val_loss']\
+    ,"valid/micro_unnormalized_acc": sum(val_result['num_correct'])/sum(val_result['num_total_unorm'])\
+    ,"valid/micro_normalized_acc": sum(val_result['num_correct'])/sum(val_result['num_total_norm'])})
+
+
+    # wandb.log(
+    #     {"rereanker_recall": recall_result['recall'], "tournament_normalized_acc": recall_result['acc_norm']
+    #         , "tournament_unnormalized_acc": recall_result['acc_unorm']})
+
+
+    # wandb.log({"test_unnormalized acc": test_result['acc_unorm'], "test_normalized acc": test_result['acc_norm']})
+
+
 #  writer.close()
-def write_to_file(path, string, mode="w"):
-    with open(path, mode) as writer:
-        writer.write(string)
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-
     parser.add_argument('--model', type=str,default='./models/reranker',
                         help='model path')
     parser.add_argument('--model_top', type=str,
@@ -151,7 +254,6 @@ if __name__ == '__main__':
                         help='assign same query and key matrix')
     parser.add_argument('--eval_batch_size', type=int, default=8,
                         help='evaluation batch size [%(default)d]')
-
     parser.add_argument('--lr', type=float, default=2e-5,
                         help='initial learning rate [%(default)g]')
     parser.add_argument('--warmup_proportion', type=float, default=0.1,
@@ -183,6 +285,11 @@ if __name__ == '__main__':
     parser.add_argument('--eval_method', default='macro', type=str,
                         choices=['macro', 'micro', 'skip'],
                         help='the evaluate method')
+    parser.add_argument('--fixed_initial_weight', action='store_true',
+                        help='fixed weight for identity weight')
+    parser.add_argument('--save_dir', type = str, default = '/shared/s3/lab07/jongsong/hard-nce-el/models',
+                        help='debugging mode')
+
     parser.add_argument('--type_model', type=str,
                         default='full',
                         choices=['dual',
@@ -196,8 +303,6 @@ if __name__ == '__main__':
                         help='the type of model')
     parser.add_argument('--debug', action = 'store_true',
                         help='debugging mode')
-    parser.add_argument('--save_dir', type = str, default = '/shared/s3/lab07/jongsong/hard-nce-el/models',
-                        help='debugging mode')
     parser.add_argument('--training_one_epoch', action = 'store_true',
                         help='stop the training after one epoch')
     parser.add_argument('--type_cands', type=str,
@@ -206,16 +311,23 @@ if __name__ == '__main__':
                                 'mixed_negative',
                                  'hard_negative',
                                  'self_negative',
-                                 'self_fixed_negative',
-                                 'self_mixed_negative'],
+                                 'self_fixed_negative'],
                         help='fixed: top k, hard: distributionally sampled k')
     parser.add_argument('--run_id', type = str,
                         help='run id when resuming the run')
     parser.add_argument('--num_training_cands', default=64, type=int,
                         help='# of candidates')
+    parser.add_argument('--num_eval_cands', default=64, type=int,
+                        help='# of candidates')
     parser.add_argument('--num_recall_cands', default=1024, type=int,
                         help='# of candidates')
+    parser.add_argument('--final_k', default=64, type=int,
+                        help='# of candidates')
     parser.add_argument('--train_one_epoch', action = 'store_true',
+                        help='training only one epoch')
+    parser.add_argument('--distill_training', action = 'store_true',
+                        help='training only one epoch')
+    parser.add_argument('--val_random_shuffle', action = 'store_true',
                         help='training only one epoch')
     parser.add_argument('--cands_ratio', default=0.5, type=float,
                         help='ratio of sampled negatives')
@@ -251,21 +363,15 @@ if __name__ == '__main__':
                         help='the batch size')
     parser.add_argument('--lambda_scheduler', action='store_true',
                         help='the batch size')
-    parser.add_argument('--fixed_initial_weight', action='store_true',
-                        help='fixed weight for identity weight')
     parser.add_argument('--recall_eval', action='store_true',
                         help='the batch size')
-    parser.add_argument('--val_random_shuffle', action = 'store_true',
-                        help='training only one epoch')
     parser.add_argument('--distill', action='store_true',
-                        help='getting score distribution for distillation purpose')
-    parser.add_argument('--distill_training', action='store_true',
-                        help='training smaller model from crossencoder scores')
+                        help='the batch size')
     parser.add_argument('--bert_lr', type=float, default=1e-5,
                         help='the batch size')
     parser.add_argument('--num_sampled', type=int, default=256,
                         help='the batch size')
-    parser.add_argument('--mlp_layers', type=str, default="1536",
+    parser.add_argument('--mlp_layers', type=str, default=1536,
                         help='num of layers for mlp or mlp-with-som model (except for the first and the last layer)')
     parser.add_argument(
         "--fp16",
@@ -284,9 +390,16 @@ if __name__ == '__main__':
     parser.add_argument('--anncur', action='store_true', help = "load anncur ckpt")
     parser.add_argument('--token_type', action='store_false', help = "no token type id when specified")
 
+
     args = parser.parse_args()
 
     # Set environment variables before all else.
     os.environ['CUDA_VISIBLE_DEVICES'] = args.gpus  # Sets torch.cuda behavior
 
     main(args)
+    preds_list = torch.tensor(preds_list)
+    recall_preds = torch.tensor(recall_preds)
+
+    print(preds_list)
+    print(recall_preds)
+    print((preds_list == recall_preds).sum().item())

@@ -11,11 +11,12 @@ from retriever import UnifiedRetriever
 from data_retriever import get_all_entity_hiddens
 from transformers import BertTokenizer, BertModel, \
     AdamW, get_linear_schedule_with_warmup, get_constant_schedule
-from main_reranker import micro_eval, macro_eval, recall_eval, count_parameters, set_seed, write_to_file, load_model
+from main_reranker import macro_eval, recall_eval, count_parameters, set_seed, write_to_file, load_model
 from tqdm import tqdm
 import traceback
 import wandb
 from collections import OrderedDict
+import json
 
 recall_preds = []
 preds_list =[]
@@ -58,10 +59,10 @@ def micro_eval(model, loader_eval, num_total_unorm, args = None, mode = "valid")
                     candidate['candidates'] = list(batch[4][i])
                     candidate['scores'] = scores[i].tolist()
                     cands.append(candidate)
-        if args.distill:
-            with open(os.path.join(args.model, 'candidates_train_distillation.json'), 'w') as f:
-                for item in cands:
-                    f.write('%s\n' % json.dumps(item))
+                with open(os.path.join(args.save_dir, 'candidates_train_distillation_anncur.json'), 'w') as f:
+                    for item in cands:
+                        f.write('%s\n' % json.dumps(item))
+
     loss_total /= len(loader_eval)
     model.train()
     acc_norm = num_correct / num_total * 100
@@ -75,13 +76,13 @@ def micro_eval(model, loader_eval, num_total_unorm, args = None, mode = "valid")
 def main(args):
     print(args)
     set_seed(args)
-    args.model = './models/{}/{}/'.format(args.type_model, args.run_id)
-    if not os.path.exists(args.model):
-        os.makedirs(args.model)
+    run = wandb.init(project = "hard-nce-el", resume = "must", id = args.run_id, config = args)
+    args.save_dir = '{}/{}/{}/'.format(args.save_dir, args.type_model, run.id)
+    
     # writer = SummaryWriter()
     if not args.anncur and not args.resume_training:
         write_to_file(
-            os.path.join(args.model, "training_params.txt"), str(args)
+            os.path.join(args.save_dir, "training_params.txt"), str(args)
         )
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -126,9 +127,14 @@ def main(args):
     #             else torch.load(os.path.join(args.model, each_file_name), map_location=torch.device('cpu'))
     #         count += 1
     #         print(os.path.join(args.model, each_file_name))
-    cpt = torch.load(os.path.join(args.model, "pytorch_model.bin"))
+    # try:
+    cpt = torch.load(os.path.join(args.save_dir, "pytorch_model.bin"))
 
     model.load_state_dict(cpt['sd'])
+    print("checkpoint from ", cpt['epoch'])
+
+    # except:
+        # pass
     dp = torch.cuda.device_count() > 1
     if dp:
         print('Data parallel across %d GPUs: %s' %
@@ -153,10 +159,6 @@ def main(args):
         model, optimizer = amp.initialize(model, optimizer,
                                           opt_level=args.fp16_opt_level)
 
-    step_num = cpt['step_num']
-    tr_loss, logging_loss = cpt['tr_loss'], cpt['logging_loss']
-    best_val_perf = cpt['perf']
-    print("checkpoint from ", cpt['epoch'])
 
     loader_train, loader_val, loader_test, \
         num_val_samples, num_test_samples = get_loaders(data, tokenizer, args.L,
@@ -166,7 +168,41 @@ def main(args):
                                                         args.C_eval,
                                                         use_full_dataset,
                                                         macro_eval_mode, args=args)
+
+    if args.type_model != "full":
+        print('recall eval')
+
+        recall_result = recall_eval(model, loader_val, num_val_samples, eval_mode=args.eval_method, args=args)
+        beam_list = [0.0625, 0.25, 0.5]
+        print(recall_result)
+        for beam in beam_list:
+            print({"recall_result/beam{}_unnorm_acc".format(str(beam)), recall_result['acc_unorm'][beam], \
+            "recall_result/beam{}_norm_acc".format(str(beam)), recall_result['acc_norm'][beam],
+            "recall_result/beam{}_recall".format(str(beam)), recall_result['recall'][beam]})
+            wandb.log({"recall_result/beam{}_unnorm_acc".format(str(beam)): recall_result['acc_unorm'][beam], \
+            "recall_result/beam{}_norm_acc".format(str(beam)): recall_result['acc_norm'][beam],
+            "recall_result/beam{}_recall".format(str(beam)): recall_result['recall'][beam]})
     print('start evaluation')
+    if args.eval_method == 'micro':
+        test_result = micro_eval(model, loader_test, num_test_samples, args)
+    elif args.eval_method == 'macro':
+        test_result = macro_eval(model, loader_test, num_test_samples, args)
+
+    print(
+               'test acc unormalized  {:8.4f} ({}/{})|'
+               'test acc normalized  {:8.4f} ({}/{}) '.format(
+        test_result['acc_unorm'],
+        test_result['num_correct'],
+        num_test_samples,
+        test_result['acc_norm'],
+        test_result['num_correct'],
+        test_result['num_total_norm'],
+        newline=False))
+    wandb.log({"test/unnormalized acc (cands {})".format(args.num_eval_cands): test_result['acc_unorm'], "test/normalized acc": test_result['acc_norm']
+            ,"test/val_loss(cands {})".format(args.num_eval_cands): test_result['val_loss']\
+            ,"test/micro_unnormalized_acc(cands {})".format(args.num_eval_cands): sum(test_result['num_correct'])/sum(test_result['num_total_unorm'])\
+            ,"test/micro_normalized_acc(cands {})".format(args.num_eval_cands): sum(test_result['num_correct'])/sum(test_result['num_total_norm'])})
+    
     if args.distill:
         train_result = micro_eval(model, loader_train, num_val_samples, args, mode = "train")
         print(train_result)
@@ -183,39 +219,19 @@ def main(args):
         val_result['num_correct'],
         val_result['num_total_norm'],
         newline=False))
-    if args.type_model != "full":
-        recall_result = recall_eval(model, loader_val, num_val_samples, eval_mode=args.eval_method, args=args)
-        print('Done with epoch | recall {:8.4f} | '
-                'val acc unormalized  {:8.4f} ({}/{})|'
-                'val acc normalized  {:8.4f} ({}/{}) '.format(
-            
-            recall_result['recall'],
-            recall_result['acc_unorm'],
-            recall_result['num_correct'],
-            num_val_samples,
-            recall_result['acc_norm'],
-            recall_result['num_correct'],
-            recall_result['num_total_norm'],
-            newline=False))
+    
+    print("micro_unnormalized_acc", sum(val_result['num_correct'])/sum(val_result['num_total_unorm'])\
+    ,"micro_normalized_acc", sum(val_result['num_correct'])/sum(val_result['num_total_norm']))
+    wandb.log({"valid/unnormalized acc(cands {})".format(args.num_eval_cands): val_result['acc_unorm'], "valid/normalized acc(cands {})".format(args.num_eval_cands): val_result['acc_norm']
+    ,"valid/val_loss(cands {})".format(args.num_eval_cands): val_result['val_loss']\
+    ,"valid/micro_unnormalized_acc(cands {})".format(args.num_eval_cands): sum(val_result['num_correct'])/sum(val_result['num_total_unorm'])\
+    ,"valid/micro_normalized_acc(cands {})".format(args.num_eval_cands): sum(val_result['num_correct'])/sum(val_result['num_total_norm'])})
+
+
     # wandb.log(
     #     {"rereanker_recall": recall_result['recall'], "tournament_normalized_acc": recall_result['acc_norm']
     #         , "tournament_unnormalized_acc": recall_result['acc_unorm']})
 
-    if args.eval_method == 'micro':
-        test_result = micro_eval(model, loader_test, num_test_samples, args)
-    elif args.eval_method == 'macro':
-        test_result = macro_eval(model, loader_test, num_test_samples, args)
-
-    print(
-               'test acc unormalized  {:8.4f} ({}/{})|'
-               'test acc normalized  {:8.4f} ({}/{}) '.format(
-        test_result['acc_unorm'],
-        test_result['num_correct'],
-        num_test_samples,
-        test_result['acc_norm'],
-        test_result['num_correct'],
-        test_result['num_total_norm'],
-        newline=False))
 
     # wandb.log({"test_unnormalized acc": test_result['acc_unorm'], "test_normalized acc": test_result['acc_norm']})
 
@@ -278,6 +294,11 @@ if __name__ == '__main__':
     parser.add_argument('--eval_method', default='macro', type=str,
                         choices=['macro', 'micro', 'skip'],
                         help='the evaluate method')
+    parser.add_argument('--fixed_initial_weight', action='store_true',
+                        help='fixed weight for identity weight')
+    parser.add_argument('--save_dir', type = str, default = '/shared/s3/lab07/jongsong/hard-nce-el/models',
+                        help='debugging mode')
+
     parser.add_argument('--type_model', type=str,
                         default='full',
                         choices=['dual',
@@ -305,9 +326,17 @@ if __name__ == '__main__':
                         help='run id when resuming the run')
     parser.add_argument('--num_training_cands', default=64, type=int,
                         help='# of candidates')
-    parser.add_argument('--num_eval_cands', default=256, type=int,
+    parser.add_argument('--num_eval_cands', default=64, type=int,
+                        help='# of candidates')
+    parser.add_argument('--num_recall_cands', default=1024, type=int,
+                        help='# of candidates')
+    parser.add_argument('--final_k', default=64, type=int,
                         help='# of candidates')
     parser.add_argument('--train_one_epoch', action = 'store_true',
+                        help='training only one epoch')
+    parser.add_argument('--distill_training', action = 'store_true',
+                        help='training only one epoch')
+    parser.add_argument('--val_random_shuffle', action = 'store_true',
                         help='training only one epoch')
     parser.add_argument('--cands_ratio', default=0.5, type=float,
                         help='ratio of sampled negatives')

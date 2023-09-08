@@ -7,7 +7,7 @@ import torch.nn as nn
 from data_reranker import get_loaders, load_zeshel_data, Logger, preprocess_data
 from datetime import datetime
 from reranker import FullRanker
-from retriever import UnifiedRetriever, FrozenRetriever
+from retriever import UnifiedRetriever
 from data_retriever import get_all_entity_hiddens
 from transformers import BertTokenizer, BertModel, \
     AdamW, get_linear_schedule_with_warmup, get_constant_schedule
@@ -33,19 +33,38 @@ def configure_optimizer(args, model, num_train_examples):
     # https://github.com/google-research/bert/blob/master/optimization.py#L25
     no_decay = ['bias', 'LayerNorm.weight']
     transformer = ['extend_multi', 'mlp']
+    identity_init = ['transformerencoderlayer.weight']
     for n, p in model.named_parameters():
         count = 0
     optimizer_grouped_parameters = [
         {'params': [p for n, p in model.named_parameters()
+                    if any(nd in n for nd in transformer) and any(nd in n for nd in no_decay) and not any(nd in n for nd in identity_init)],
+         'lr': args.lr, 'weight_decay': 0.0,
+         'names': [n for n, p in model.named_parameters()
+                    if any(nd in n for nd in transformer) and any(nd in n for nd in no_decay) and not any(nd in n for nd in identity_init)]},
+        {'params': [p for n, p in model.named_parameters()
+                    if any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)],
+         'weight_decay': 0.0, 'lr': args.bert_lr,
+         'names': [n for n, p in model.named_parameters()
+                    if any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)]},
+        {'params': [p for n, p in model.named_parameters()
+                    if not any(nd in n for nd in no_decay) and any(nd in n for nd in transformer) and not any(nd in n for nd in identity_init) ],
+         'lr': args.lr, 'weight_decay': args.weight_decay,
+         'names': [n for n, p in model.named_parameters()
+                    if not any(nd in n for nd in no_decay) and any(nd in n for nd in transformer) and not any(nd in n for nd in identity_init)]},
+        {'params': [p for n, p in model.named_parameters()
                     if not any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)],
-         'weight_decay': args.weight_decay, 'lr': args.bert_lr},
+         'weight_decay': args.weight_decay, 'lr': args.bert_lr,
+         'names': [n for n, p in model.named_parameters()
+                    if not any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)]},
         {'params': [p for n, p in model.named_parameters()
-                    if any(nd in n for nd in no_decay)],
-         'weight_decay': 0.0, 'lr': args.bert_lr},
-        {'params': [p for n, p in model.named_parameters()
-                    if any(nd in n for nd in transformer) and not any(nd in n for nd in no_decay)],
-         'lr': args.lr, 'weight_decay': args.weight_decay},
+                    if any(nd in n for nd in identity_init)],
+         'weight_decay': args.weight_decay, 'lr': args.weight_lr,
+         'names': [n for n, p in model.named_parameters()
+                    if any(nd in n for nd in identity_init)]}
     ]
+    for item in optimizer_grouped_parameters:
+        print(item['names'])
     optimizer = AdamW(optimizer_grouped_parameters,
                       eps=args.adam_epsilon)
     print(optimizer)
@@ -85,9 +104,9 @@ def micro_eval(model, loader_eval, num_total_unorm, args = None):
     with torch.no_grad():
         for step, batch in tqdm(enumerate(loader_eval), total = len(loader_eval)):
             if args.distill:
-                batch[-2] = np.array(batch[-2])
+                batch[-2] = np.array(batch[-2]) 
                 batch[-1] = np.array(batch[-1]).T
-            if debug and step > 10: break
+            if debug and step > 50: break
             # try:
             result = model.forward(*batch, args = args)
             if type(result) is dict:
@@ -112,9 +131,8 @@ def micro_eval(model, loader_eval, num_total_unorm, args = None):
                     candidate['candidates'] = list(batch[4][i])
                     candidate['scores'] = scores[i].tolist()
                     cands.append(candidate)
-            print(len(cands))
         if args.distill:
-            with open(os.path.join(args.model, 'candidates_train_distillation.json'), 'w') as f:
+            with open(os.path.join(args.save_dir, 'candidates_train_distillation.json'), 'w') as f:
                 for item in cands:
                     f.write('%s\n' % json.dumps(item))
     loss_total /= len(loader_eval)
@@ -124,6 +142,7 @@ def micro_eval(model, loader_eval, num_total_unorm, args = None):
     return {'acc_norm': acc_norm, 'acc_unorm': acc_unorm,
             'num_correct': num_correct,
             'num_total_norm': num_total,
+            'num_total_unorm': num_total_unorm,
             'val_loss': loss_total}
 
 
@@ -151,6 +170,7 @@ def macro_eval(model, val_loaders, num_total_unorm, args = None):
     return {'acc_norm': acc_norm, 'acc_unorm': acc_unorm,
             'num_correct': num_correct_list,
             'num_total_norm': num_total_norm,
+            'num_total_unorm': num_total_unorm,
             'val_loss': loss_total}
 
 def recall_eval(model, val_loaders, num_total_unorm, eval_mode = "micro", k = 64, all_candidates_embeds = None,  args = None):
@@ -163,7 +183,7 @@ def recall_eval(model, val_loaders, num_total_unorm, eval_mode = "micro", k = 64
     #     model.evaluate_on = True
     #     if all_candidates_embeds is not None:
     #         model.candidates_embeds = all_candidates_embeds
-    def micro_recall_eval(model, val_loaders, num_total_unorm, k, all_candidates_embeds, args = None):
+    def micro_recall_eval(model, val_loaders, num_total_unorm, k, all_candidates_embeds, args = None, beam = None):
         model.eval()
         if args is not None: debug = args.debug
         nb_samples = 0
@@ -172,24 +192,38 @@ def recall_eval(model, val_loaders, num_total_unorm, eval_mode = "micro", k = 64
         acc_norm = 0
         num_correct = 0
         recall_correct = 0
+        recall_correct_dict = {}
+        num_correct_dict = {}
+        nb_samples_dict = {}
+        acc_norm_dict = {}
+        acc_unorm_dict = {}
+        beam_ratios = [0.0625,0.25, 0.5]
+        for beam in beam_ratios:
+            recall_correct_dict[beam] = recall_correct
+            num_correct_dict[beam] = num_correct
+            nb_samples_dict[beam] = nb_samples
+            acc_norm_dict[beam] = acc_norm
+            acc_unorm_dict[beam] = acc_unorm
         if args.type_cands in self_negative_methods:
             device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
             scores_tensor = torch.tensor([]).to(device)
         with torch.no_grad(): 
             for i, batch in tqdm(enumerate(val_loaders), total = len(val_loaders)):
                 if i > 3 and debug: break
-                scores = model.forward(*batch, recall_eval = True, beam_ratio = args.beam_ratio, args = args)[2]
+                scores_dict = model.forward(*batch, recall_eval = True, beam_ratio = args.beam_ratio, args = args)
                 if args.type_cands in self_negative_methods:
                     scores_tensor = torch.cat([scores_tensor, scores], dim = 0)
-                top_k = scores.topk(k, dim=1)[1]
-                preds = top_k[:, 0]
-                r_k += (top_k == 0).sum().item()
-                recall_correct += (top_k == 0).sum().item()
-                num_correct += (preds == 0).sum().item()
-                nb_samples += scores.size(0)
-        r_k = recall_correct/nb_samples * 100
-        acc_norm = num_correct/nb_samples * 100
-        acc_unorm = num_correct/num_total_unorm * 100
+                for beam in beam_ratios:
+                    scores = scores_dict[beam]
+                    top_k = scores.topk(k, dim=1)[1]
+                    preds = top_k[:, 0]
+                    recall_correct_dict[beam] += (top_k == 0).sum().item()
+                    num_correct_dict[beam] += (preds == 0).sum().item()
+                    nb_samples_dict[beam] += scores.size(0)
+        for beam in beam_ratios:
+            recall_correct_dict[beam] = recall_correct_dict[beam]/nb_samples_dict[beam] * 100
+            acc_norm_dict[beam] = num_correct_dict[beam]/nb_samples_dict[beam] * 100
+            acc_unorm_dict[beam] = num_correct_dict[beam]/num_total_unorm * 100
         model.train()
         if hasattr(model, 'module'):
             model.module.evaluate_on = False
@@ -198,37 +232,57 @@ def recall_eval(model, val_loaders, num_total_unorm, eval_mode = "micro", k = 64
             model.evaluate_on = False
             model.candidates_embeds = None
         if not args.type_cands in self_negative_methods:
-            return {"recall": r_k, "acc_norm": acc_norm, "acc_unorm":acc_unorm, "num_total_norm": nb_samples, "num_correct": num_correct, "recall_correct": recall_correct, "num_total_norm": nb_samples}
-        else:
-            return {"recall": r_k, "acc_norm": acc_norm, "acc_unorm":acc_unorm, "num_total_norm": nb_samples, \
-                    "num_correct": num_correct, "recall_correct": recall_correct, "num_total_norm": nb_samples}, scores_tensor
+            return {"recall": recall_correct_dict, "acc_norm": acc_norm_dict, "acc_unorm":acc_unorm_dict, "num_total_norm": nb_samples_dict, \
+                    "num_correct": num_correct_dict, "num_total_norm": nb_samples_dict}
 
+        else:
+            return {"recall": r_k, "acc_norm": acc_norm, "acc_unorm":acc_unorm, "num_total_norm": nb_samples, "num_correct": num_correct, "recall_correct": recall_correct, "num_total_norm": nb_samples}
+
+            # return {"recall": r_k, "acc_norm": acc_norm, "acc_unorm":acc_unorm, "num_total_norm": nb_samples, \
+                    # "num_correct": num_correct, "recall_correct": recall_correct, "num_total_norm": nb_samples}, scores_tensor
+
+    recall_dict = {}
+    num_correct_dict = {}
+    nb_samples_dict = {}
+    acc_norm_dict = {}
+    acc_unorm_dict = {}
+    beam_ratios = [0.0625,0.25, 0.5]
     if eval_mode == "micro":
         return micro_recall_eval(model, val_loaders, num_total_unorm, k, all_candidates_embeds, args)
     elif eval_mode == "macro":
         acc_norm = 0
         acc_unorm = 0
         recall = 0
-        num_correct_list = []
-        num_total_norm = []
+        for beam in beam_ratios:
+            recall_dict[beam] = 0.
+            acc_norm_dict[beam] = 0.
+            acc_unorm_dict[beam] = 0.   
+        num_correct_list =[]
+        num_total_norm = []   
         for i in range(len(val_loaders)):
+            print("micro eval world {}".format(i))
             val_loader = val_loaders[i]
             num_unorm = num_total_unorm[i]
             if not args.type_cands in self_negative_methods:
                 micro_results = micro_recall_eval(model, val_loader, num_unorm, k, all_candidates_embeds, args)
             else:
-                micro_results, scores_tensor = micro_recall_eval(model, val_loader, num_unorm, k, all_candidates_embeds, args)
-            recall += micro_results['recall']
-            acc_unorm += micro_results['acc_unorm']
-            acc_norm += micro_results['acc_norm']
-            num_correct_list.append(micro_results['num_correct'])
-            num_total_norm.append(micro_results['num_total_norm'])
-        acc_norm /= len(val_loaders)
-        acc_unorm /= len(val_loaders)
-        recall /= len(val_loaders)
+                micro_results = micro_recall_eval(model, val_loader, num_unorm, k, all_candidates_embeds, args)
+            print(micro_results)
+            for beam in beam_ratios:
+                recall_dict[beam] += micro_results['recall'][beam]
+                acc_unorm_dict[beam] += micro_results['acc_unorm'][beam]
+                acc_norm_dict[beam] += micro_results['acc_norm'][beam]
+                num_correct_list.append(micro_results['num_correct'][beam])
+                num_total_norm.append(micro_results['num_total_norm'][beam])
+        for beam in beam_ratios:
+            acc_norm_dict[beam] /= len(val_loaders)
+            acc_unorm_dict[beam] /= len(val_loaders)
+            recall_dict[beam] /= len(val_loaders)
+            num_correct_dict[beam] = num_correct_list
+            nb_samples_dict[beam] = num_total_norm
         model.train()
-        return {"acc_norm": acc_norm, "acc_unorm":acc_unorm, "recall": recall, "num_total_norm": num_total_norm, "num_correct": num_correct_list}
-
+        return {"recall": recall_dict, "acc_norm": acc_norm_dict, "acc_unorm":acc_unorm_dict,\
+        "num_correct": num_correct_list, "num_total_norm": num_total_norm}
 def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
@@ -286,15 +340,15 @@ def main(args):
         run = wandb.init(project = "hard-nce-el", resume = "auto", id = args.run_id, config = args)
     else:
         run = wandb.init(project="hard-nce-el", config = args)
-    if not args.anncur or args.resume_training: args.model = './models/{}/{}/'.format(args.type_model, run.id)
-    if not os.path.exists(args.model):
-        os.makedirs(args.model)
+    args.save_dir = '{}/{}/{}/'.format(args.save_dir, args.type_model, run.id)
+    if not os.path.exists(args.save_dir):
+        os.makedirs(args.save_dir)
     # writer = SummaryWriter()
-    logger = Logger(args.model + '.log', True)
+    logger = Logger(args.save_dir + '.log', True)
     logger.log(str(args))
     if not args.anncur and not args.resume_training:
         write_to_file(
-            os.path.join(args.model, "training_params.txt"), str(args)
+            os.path.join(args.save_dir, "training_params.txt"), str(args)
         )
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -321,7 +375,7 @@ def main(args):
             num_entity_vecs = 1
         elif args.type_model == 'extend_multi_dot':
             attention_type = 'extend_multi_dot'
-            num_mention_vecs = 1
+            num_mention_vecs = args.num_mention_vecs
             num_entity_vecs = 1
         elif args.type_model == 'mlp_with_som':
             attention_type = 'mlp_with_som'
@@ -363,22 +417,19 @@ def main(args):
             new_state_dict = package['model_state_dict']
             modified_state_dict = OrderedDict()
             for k, v in new_state_dict.items():
-                name = k.replace('model', 'extend_multi')
+                name = k.replace('model.', '')
                 modified_state_dict[name] = v
-            model.load_state_dict(modified_state_dict, strict = False)
-        args.model = './models/{}/{}/'.format(args.type_model, run.id)
-        if not os.path.exists(args.model):
-            os.makedirs(args.model)
+            model.extend_multi.load_state_dict(modified_state_dict, strict = False)
 
     if args.resume_training:
         count = 0
-        for each_file_name in os.listdir(args.model):
+        for each_file_name in os.listdir(args.save_dir):
             if each_file_name.startswith('epoch'):
                 if count == 1: raise('More than two bin files found in the model directory')
-                cpt=torch.load(os.path.join(args.model,each_file_name)) if device.type == 'cuda' \
-                else torch.load(os.path.join(args.model,each_file_name) , map_location=torch.device('cpu'))
+                cpt=torch.load(os.path.join(args.save_dir,each_file_name)) if device.type == 'cuda' \
+                else torch.load(os.path.join(args.save_dir,each_file_name) , map_location=torch.device('cpu'))
                 count+=1
-                print(os.path.join(args.model,each_file_name))
+                print(os.path.join(args.save_dir,each_file_name))
         model.load_state_dict(cpt['sd'])
     dp = torch.cuda.device_count() > 1
     if dp:
@@ -435,12 +486,19 @@ def main(args):
     step_num = 0
     trigger_times = 0 # Overfitting
     tr_loss, logging_loss = 0.0, 0.0
+    if args.distill_training:
+        student_tr_loss = 0.
+        teacher_tr_loss = 0.
+        student_logging_loss = 0.
+        teacher_logging_loss = 0.
     model.zero_grad()
     best_val_perf = float('-inf')
     if args.resume_training:
         step_num = cpt['step_num']
         tr_loss, logging_loss = cpt['tr_loss'], cpt['logging_loss']
         best_val_perf = cpt['perf']
+        print("cpt perf:", cpt['perf'])
+        print("best val perf:", best_val_perf)
     start_epoch = 1
     if args.resume_training:
         start_epoch = cpt['epoch'] + 1 
@@ -482,7 +540,7 @@ def main(args):
                 if args.type_model == 'extend_multi' or args.type_model == 'extend_multi_dot':
                     recall_evaluate = True
                 for i, batch in tqdm(enumerate(loader_train), total=len(loader_train)):
-                    result = model.forward(*batch, recall_eval=recall_evaluate, beam_ratio=args.beam_ratio, args=args, sampling = True)
+                    result = model.forward(*batch, recall_eval=recall_evaluate, beam_ratio=args.beam_ratio, sampling = True)
                     try:
                         scores = result[2]
                     except:
@@ -513,26 +571,45 @@ def main(args):
                     # if args.anncur:
         #     val_result = macro_eval(model, loader_val, num_val_samples, args)
         #     print(val_result)
-        print('Begin Training')
+        # print('eval before training')
         # if args.eval_method == 'micro':
         #     val_result = micro_eval(model, loader_val, num_val_samples, args)
         # elif args.eval_method == 'macro':
         #     val_result = macro_eval(model, loader_val, num_val_samples, args)
+        # logger.log('Done with epoch {:3d} | train loss {:8.4f} | '
+        #            'val acc unormalized  {:8.4f} ({}/{})|'
+        #            'val acc normalized  {:8.4f} ({}/{}) '.format(
+        #     epoch,
+        #     tr_loss / step_num,
+        #     val_result['acc_unorm'],
+        #     val_result['num_correct'],
+        #     num_val_samples,
+        #     val_result['acc_norm'],
+        #     val_result['num_correct'],
+        #     val_result['num_total_norm'],
+        #     newline=False))
+        # wandb.log({"unnormalized acc": val_result['acc_unorm'], "normalized acc": val_result['acc_norm']
+        #     ,"val_loss": val_result['val_loss'], "epoch": epoch})
+        print('Begin Training')
+  
         for batch_idx, batch in tqdm(enumerate(loader_train), total = len(loader_train)):  # Shuffled every epoch
-            if args.debug and batch_idx > 10: break
-            print(batch[-1].shape)
-            raise('Exception')
+            if args.debug and batch_idx > 50: break
             model.train()
             # try:
-
             result = model.forward(*batch, args = args)
 
             if type(result) is tuple:
                 loss = result[0]
-                scores = result[-1]
+                scores = result[2]
             elif type(result) is dict:
                 loss = result['loss']
                 scores = result['scores']
+            if args.distill_training:
+                student_loss = result[3].mean()
+                teacher_loss = result[4].mean()
+                student_tr_loss += student_loss.item()
+                teacher_tr_loss += teacher_loss.item()
+
             loss = loss.mean()  # Needed in case of dataparallel
             if args.fp16:
                 with amp.scale_loss(loss, optimizer) as scaled_loss:
@@ -567,17 +644,19 @@ def main(args):
                     wandb.log({"average loss": avg_loss, \
                     "learning_rate": optimizer.param_groups[0]['lr'], \
                     "epoch": epoch})
-
+                    if args.distill_training:
+                        avg_teacher_loss = (teacher_tr_loss-teacher_logging_loss)/args.logging_steps
+                        avg_student_loss = (student_tr_loss-student_logging_loss)/args.logging_steps
+                        wandb.log({"average teacher loss": avg_teacher_loss, \
+                        "average student loss": avg_student_loss,\
+                        "learning_rate": optimizer.param_groups[0]['lr'], \
+                        "epoch": epoch})  
+                        student_logging_loss = student_tr_loss
+                        teacher_logging_loss = teacher_tr_loss                      
                     logging_loss = tr_loss
 
                 #  eval_result = micro_eval(args, model, loader_val)
                 # writer.add_scalar('acc_val', eval_result['acc'], step_num)
-        torch.save({'opt': args, 'sd': model.module.state_dict() if dp else model.state_dict(),
-                    'perf': best_val_perf, 'epoch': epoch,
-                    'opt_sd': optimizer.state_dict(),
-                    'scheduler_sd': scheduler.state_dict(),
-                    'tr_loss': tr_loss, 'step_num': step_num,
-                    'logging_loss': logging_loss}, os.path.join(args.model, "epoch_{}.bin".format(epoch)))
 
         if args.eval_method == "skip":
             pass
@@ -599,7 +678,28 @@ def main(args):
             val_result['num_total_norm'],
             newline=False))
             wandb.log({"unnormalized acc": val_result['acc_unorm'], "normalized acc": val_result['acc_norm']
-            ,"val_loss": val_result['val_loss'], "epoch": epoch})
+            ,"val_loss": val_result['val_loss'], "epoch": epoch\
+            ,"micro_unnormalized_acc": sum(val_result['num_correct'])/sum(val_result['num_total_unorm'])\
+            ,"micro_normalized_acc": sum(val_result['num_correct'])/sum(val_result['num_total_norm'])})
+        if args.eval_method == 'micro':
+            test_result = micro_eval(model, loader_test, num_test_samples, args)
+        elif args.eval_method == 'macro':
+            test_result = macro_eval(model, loader_test, num_test_samples, args)
+
+        logger.log('\nDone training | training time {:s} | '
+                'test acc unormalized {:8.4f} ({}/{})|'
+                'test acc normalized {:8.4f} ({}/{})'.format(str(
+        datetime.now() - start_time),
+        test_result['acc_unorm'],
+        test_result['num_correct'],
+        num_test_samples,
+        test_result['acc_norm'],
+        test_result['num_correct'],
+        test_result['num_total_norm']))
+
+        wandb.log({"test_unnormalized acc": test_result['acc_unorm'], "test_normalized acc": test_result['acc_norm']})
+
+
         # if args.type_model == 'extend_multi' or args.type_model == 'extend_multi_dot':
         #     if args.eval_method == 'micro':
         #         if args.type_cands == 'self_negative' or args.type_cands == "self_fixed_negative":
@@ -623,22 +723,30 @@ def main(args):
         #     wandb.log({"rereanker_recall": recall_result['recall'], "tournament_normalized_acc": recall_result['acc_norm']
         #         ,"tournament_unnormalized_acc": recall_result['acc_unorm'], "epoch": epoch})
 
-        if epoch >= 2:
-            try:
-                os.remove(os.path.join(args.model, "epoch_{}.bin".format(epoch - 1)))
-            except:
-                pass
+
         if val_result['acc_unorm'] >= best_val_perf:
             triggert_times = 0 
             logger.log('      <----------New best val perf: %g -> %g' %
                        (best_val_perf, val_result['acc_unorm']))
             best_val_perf = val_result['acc_unorm']
+            print("saved best val perf:", best_val_perf)
             torch.save({'opt': args, 'sd': model.module.state_dict() if dp else model.state_dict(),
                         'perf': best_val_perf, 'epoch': epoch,
                         'opt_sd': optimizer.state_dict(),
                         'scheduler_sd': scheduler.state_dict(),
                         'tr_loss': tr_loss, 'step_num': step_num,
-                        'logging_loss': logging_loss}, os.path.join(args.model, "pytorch_model.bin"))
+                        'logging_loss': logging_loss}, os.path.join(args.save_dir, "pytorch_model.bin"))
+        torch.save({'opt': args, 'sd': model.module.state_dict() if dp else model.state_dict(),
+        'perf': best_val_perf, 'epoch': epoch,
+        'opt_sd': optimizer.state_dict(),
+        'scheduler_sd': scheduler.state_dict(),
+        'tr_loss': tr_loss, 'step_num': step_num,
+        'logging_loss': logging_loss}, os.path.join(args.save_dir, "epoch_{}.bin".format(epoch)))
+        if epoch >= 2:
+            try:
+                os.remove(os.path.join(args.save_dir, "epoch_{}.bin".format(epoch - 1)))
+            except:
+                pass
         else:
             trigger_times += 1
 
@@ -646,10 +754,10 @@ def main(args):
         if trigger_times > 5: break
         if args.training_one_epoch:
             break
-    cpt = torch.load(os.path.join(args.model,"pytorch_model.bin")) if device.type == 'cuda' \
-                else torch.load(os.path.join(args.model,"pytorch_model.bin") , map_location=torch.device('cpu'))
+    cpt = torch.load(os.path.join(args.save_dir,"pytorch_model.bin")) if device.type == 'cuda' \
+                else torch.load(os.path.join(args.save_dir,"pytorch_model.bin") , map_location=torch.device('cpu'))
     model.load_state_dict(cpt['sd'])
-    model = load_model(os.path.join(args.model, "pytorch_model.bin"), device, eval_mode=True, dp=dp,
+    model = load_model(os.path.join(args.save_dir, "pytorch_model.bin"), device, eval_mode=True, dp=dp,
                        type_model=args.type_model)
     if loader_test is None:
         _, _, loader_test, \
@@ -751,6 +859,8 @@ if __name__ == '__main__':
                         help='the type of model')
     parser.add_argument('--debug', action = 'store_true',
                         help='debugging mode')
+    parser.add_argument('--save_dir', type = str, default = '/shared/s3/lab07/jongsong/hard-nce-el/models',
+                        help='debugging mode')
     parser.add_argument('--training_one_epoch', action = 'store_true',
                         help='stop the training after one epoch')
     parser.add_argument('--type_cands', type=str,
@@ -766,7 +876,7 @@ if __name__ == '__main__':
                         help='run id when resuming the run')
     parser.add_argument('--num_training_cands', default=64, type=int,
                         help='# of candidates')
-    parser.add_argument('--num_eval_cands', default=256, type=int,
+    parser.add_argument('--num_recall_cands', default=1024, type=int,
                         help='# of candidates')
     parser.add_argument('--train_one_epoch', action = 'store_true',
                         help='training only one epoch')
@@ -782,7 +892,7 @@ if __name__ == '__main__':
                         default='base',
                         choices=['base', 'large'],
                         help='the type of encoder')
-    parser.add_argument('--num_mention_vecs', type=int, default=8,
+    parser.add_argument('--num_mention_vecs', type=int, default=1,
                         help='the number of mention vectors ')
     parser.add_argument('--num_entity_vecs', type=int, default=8,
                         help='the number of entity vectors  ')
@@ -804,13 +914,19 @@ if __name__ == '__main__':
                         help='the batch size')
     parser.add_argument('--lambda_scheduler', action='store_true',
                         help='the batch size')
+    parser.add_argument('--fixed_initial_weight', action='store_true',
+                        help='fixed weight for identity weight')
     parser.add_argument('--recall_eval', action='store_true',
                         help='the batch size')
+    parser.add_argument('--val_random_shuffle', action = 'store_true',
+                        help='training only one epoch')
     parser.add_argument('--distill', action='store_true',
                         help='getting score distribution for distillation purpose')
     parser.add_argument('--distill_training', action='store_true',
                         help='training smaller model from crossencoder scores')
     parser.add_argument('--bert_lr', type=float, default=1e-5,
+                        help='the batch size')
+    parser.add_argument('--weight_lr', type=float, default=1e-2,
                         help='the batch size')
     parser.add_argument('--num_sampled', type=int, default=256,
                         help='the batch size')

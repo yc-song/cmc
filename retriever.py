@@ -108,12 +108,20 @@ class SoftAttention(nn.Module):
             bsz, C, l_y).sum(-1)
         return scores
 
-def distillation_loss(student_outputs, teacher_outputs, labels, alpha = 0.5):
-    teacher_loss = nn.KLDivLoss()(nn.functional.log_softmax(student_outputs, dim=1),
-                             nn.functional.softmax(teacher_outputs, dim=1))
-    student_loss = nn.CrossEntropyLoss(student_outputs, labels)
+def distillation_loss(student_outputs, teacher_outputs, labels, alpha = 0.5, temperature = 1, valid = False):
+    if teacher_outputs is not None:
+        teacher_loss = nn.KLDivLoss(reduction='batchmean')(nn.functional.log_softmax(student_outputs/temperature, dim=1),
+                             nn.functional.softmax(teacher_outputs/temperature, dim=1))
+        # print(student_outputs, nn.functional.log_softmax(student_outputs, dim=1))
+        # print(teacher_outputs, nn.functional.softmax(teacher_outputs, dim=1))
+    else: 
+        device = torch.device(
+            "cuda" if torch.cuda.is_available() else "cpu"
+        )  
+        teacher_loss = torch.tensor([0.]).to(device)
+    student_loss = nn.CrossEntropyLoss()(student_outputs, labels)
     loss = alpha*student_loss + (1-alpha)*teacher_loss
-    return loss
+    return loss, student_loss, teacher_loss
 
 class UnifiedRetriever(nn.Module):
     def __init__(self, encoder, device, num_codes_mention, num_codes_entity,
@@ -305,8 +313,10 @@ class UnifiedRetriever(nn.Module):
             elif self.attention_type == "mlp_with_som":
                 mention_embeds, mention_embeds_masks, \
                 candidates_embeds = self.encode(mention_token_ids, mention_masks,
-                                                candidate_token_ids[:,:args.num_training_cands,:],
-                                                candidate_masks[:,:args.num_training_cands,:])
+                                                candidate_token_ids,
+                                                candidate_masks)
+                                                # candidate_token_ids[:,:args.num_training_cands,:],
+                                                # candidate_masks[:,:args.num_training_cands,:])
                 scores = self.mlp_with_som(mention_embeds, candidates_embeds)
             else:
                 # candidate shape: (entity_bsz, 1, embed_dim)
@@ -336,80 +346,83 @@ class UnifiedRetriever(nn.Module):
                 ## else, # of candidates is same as args.num_training_cands
                 if recall_eval:
                     round = 1
+                    beam_ratios = [0.0625,0.25,0.5]
+                    scores_dict = {}
+                    candidates_embeds_entire = {}
                     candidates_embeds = {}
                     mention_embeds, mention_embeds_masks, \
-                    candidates_embeds["embeds"] = self.encode(mention_token_ids, mention_masks,
+                    candidates_embeds_entire["embeds"] = self.encode(mention_token_ids, mention_masks,
                                             candidate_token_ids,
                                             candidate_masks, too_large = args.too_large)
-                    candidates_embeds["idxs"] = torch.arange(candidates_embeds["embeds"].size(1))\
-                        .expand(candidates_embeds["embeds"].size(0), -1)
-                    idxs = candidates_embeds["idxs"]
+                    candidates_embeds_entire["idxs"] = torch.arange(candidates_embeds_entire["embeds"].size(1))\
+                        .expand(candidates_embeds_entire["embeds"].size(0), -1)
+                    idxs = candidates_embeds_entire["idxs"]
                     # scores = None
                     # num_chunks = C//top_k
-                    # (16, 64, 1, 768)
-                    processed_tensor = candidates_embeds["embeds"].reshape(-1, top_k, 1, candidates_embeds["embeds"].size(-1))
-                    # idxs_chunks = candidates_embeds["idxs"].reshape(-1, top_k)
-                    # print("***")
-                    # print(processed_tensor[1], processed_tensor.shape)
-                    scores = self.extend_multi.forward_chunk(mention_embeds, processed_tensor, dot, int(candidates_embeds["embeds"].size(1)/top_k))
-                    # print(scores, scores.shape)
-                    # scores = torch.nn.functional.softmax(scores, dim = 1)
-                    scores = scores.view(B, -1, top_k) # (B, *, 64로 바꾼 다음에 나온 index에 대해 64씩을 더해줌)
-                    idxs = torch.topk(scores, int(top_k*beam_ratio))[1]
-                    cumulative_idxs = torch.tensor([top_k*i for i in range(idxs.size(1))], device = self.device).unsqueeze(1)
-                    idxs += cumulative_idxs
-                    idxs = idxs.view(B, int(C*beam_ratio))
-                    batch_idxs = torch.arange(B).unsqueeze(1).expand_as(idxs)
-                    scores = scores.view(B, C)
-                    candidates_embeds["embeds"] = candidates_embeds["embeds"][batch_idxs, idxs, :, :]
-                    candidates_embeds["idxs"] = candidates_embeds["idxs"][batch_idxs, idxs.cpu()]
-                    while idxs.size(1) >= top_k:
-                        round += 1
-                        processed_tensor = candidates_embeds["embeds"].reshape(-1, top_k, 1, candidates_embeds["embeds"].size(-1))
-                        idxs_chunks = candidates_embeds["idxs"].reshape(-1, top_k)
-                        # print(processed_tensor, processed_tensor.shape)
-                        # print(idxs_chunks, idxs_chunks.shape)
-                        new_scores = self.extend_multi.forward_chunk(mention_embeds, processed_tensor, dot, int(candidates_embeds["embeds"].size(1)/top_k))
-                        # new_scores = torch.nn.functional.softmax(new_scores, dim = 1)
-                        new_scores = new_scores.view(B, -1, top_k)
-                        # print(new_scores.shape)
-                        # print(new_scores, new_scores.shape)
-                        idxs = torch.topk(new_scores, int(top_k*beam_ratio))[1]
-                        # print(idxs, previous_idxs)
-                        cumulative_idxs = torch.tensor([top_k*i for i in range(idxs.size(1))], device = self.device).unsqueeze(1)
-                        idxs += cumulative_idxs
-                        idxs = idxs.view(B, int(candidates_embeds["embeds"].size(1)*beam_ratio))
+                    processed_tensor = candidates_embeds_entire["embeds"].reshape(-1, top_k, 1, candidates_embeds_entire["embeds"].size(-1))
+                    num_instances = processed_tensor.size(1)
+                    initial_scores = self.extend_multi.forward_chunk(mention_embeds, processed_tensor, dot = dot, args = args)
+                    initial_scores = initial_scores.view(B, -1, num_instances) # (B, *, 16) -> 이전 forward pass의 score 정렬
+                    for i, beam_ratio in enumerate(beam_ratios):
+                        idxs = torch.topk(initial_scores, int(num_instances*beam_ratio))[1] 
+                        cumulative_idxs = torch.tensor([num_instances*i for i in range(idxs.size(1))], device = self.device).unsqueeze(1)
+                        idxs += cumulative_idxs # idx에 16씩 누적해 더해서 global indices 얻음
+                        idxs = idxs.view(B, -1)
                         batch_idxs = torch.arange(B).unsqueeze(1).expand_as(idxs)
-                        new_scores = new_scores.view(B, candidates_embeds["embeds"].size(1))
-                        if sampling:
-                            for row in range(candidates_embeds["embeds"].size(0)):
-                                scores[row, candidates_embeds["idxs"][row]] *= (round-1)/round
-                                scores[row, candidates_embeds["idxs"][row]] += new_scores[row]/round
-                        else:
-                            for row in range(candidates_embeds["embeds"].size(0)):
-                                scores[row, candidates_embeds["idxs"][row]] += new_scores[row]
+                        scores = initial_scores.view(B, C)
+                        candidates_embeds["embeds"] = candidates_embeds_entire["embeds"][batch_idxs, idxs, :, :]
+                        candidates_embeds["idxs"] = candidates_embeds_entire["idxs"][batch_idxs, idxs.cpu()]
+                        
+                        while idxs.size(1) >= top_k:
+                            # 여기부터는 batch 당 instance가 64개
+                            round += 1
+                            processed_tensor = candidates_embeds["embeds"].reshape(-1, top_k, 1, candidates_embeds["embeds"].size(-1))
+                            idxs_chunks = candidates_embeds["idxs"].reshape(-1, top_k)
+                            # print(processed_tensor, processed_tensor.shape)
+                            # print(idxs_chunks, idxs_chunks.shape)
+                            new_scores = self.extend_multi.forward_chunk(mention_embeds, processed_tensor, dot = dot, args = args)
+                            # new_scores = torch.nn.functional.softmax(new_scores, dim = 1)
+                            new_scores = new_scores.view(B, -1, top_k)
+                            # print(new_scores.shape)
+                            # print(new_scores, new_scores.shape)
+                            idxs = torch.topk(new_scores, int(top_k*beam_ratio))[1]
+                            # print(idxs, previous_idxs)
+                            cumulative_idxs = torch.tensor([top_k*i for i in range(idxs.size(1))], device = self.device).unsqueeze(1)
+                            idxs += cumulative_idxs
+                            idxs = idxs.view(B, int(candidates_embeds["embeds"].size(1)*beam_ratio))
+                            
+                            batch_idxs = torch.arange(B).unsqueeze(1).expand_as(idxs)
+                            new_scores = new_scores.view(B, candidates_embeds["embeds"].size(1))
+                            if sampling:
+                                for row in range(candidates_embeds["embeds"].size(0)):
+                                    scores[row, candidates_embeds["idxs"][row]] *= (round-1)/round
+                                    scores[row, candidates_embeds["idxs"][row]] += new_scores[row]/round
+                            else:
+                                for row in range(candidates_embeds["embeds"].size(0)):
+                                    scores[row, candidates_embeds["idxs"][row]] += new_scores[row]
 
-                        candidates_embeds["embeds"] = candidates_embeds["embeds"][batch_idxs, idxs, :, :]
-                        candidates_embeds["idxs"] = candidates_embeds["idxs"][batch_idxs, idxs.cpu()]
-
+                            candidates_embeds["embeds"] = candidates_embeds["embeds"][batch_idxs, idxs, :, :]
+                            candidates_embeds["idxs"] = candidates_embeds["idxs"][batch_idxs, idxs.cpu()]
+                        scores_dict[beam_ratio] = scores
+                    return scores_dict
                         
                 else:
                     mention_embeds, mention_embeds_masks, \
                     candidates_embeds = self.encode(mention_token_ids, mention_masks,
-                                                candidate_token_ids[:,:args.num_training_cands,:],
-                                                candidate_masks[:,:args.num_training_cands,:])
+                                                candidate_token_ids[:,:args.C_eval,:],
+                                                candidate_masks[:,:args.C_eval,:])
                     scores = self.extend_multi(mention_embeds, candidates_embeds, dot, args)
             elif self.attention_type == 'mlp_with_som':
                     mention_embeds, mention_embeds_masks, \
                     candidates_embeds = self.encode(mention_token_ids, mention_masks,
-                                                candidate_token_ids[:,:args.num_training_cands,:],
-                                                candidate_masks[:,:args.num_training_cands,:])
+                                                candidate_token_ids[:,:args.C_eval,:],
+                                                candidate_masks[:,:args.C_eval,:])
                     scores = self.mlp_with_som(mention_embeds, candidates_embeds)
             else:
                 mention_embeds, mention_embeds_masks, \
                 candidates_embeds = self.encode(mention_token_ids, mention_masks,
-                                                candidate_token_ids[:,:args.num_training_cands,:],
-                                                candidate_masks[:,:args.num_training_cands,:])
+                                                candidate_token_ids[:,:args.C_eval,:],
+                                                candidate_masks[:,:args.C_eval,:])
                 if self.attention_type == 'soft_attention':
                     scores = self.attention(candidates_embeds, mention_embeds,
                                             mention_embeds, mention_embeds_masks)
@@ -423,123 +436,125 @@ class UnifiedRetriever(nn.Module):
                 candidate_probs = candidate_probs.to(self.device)
                 scores[:, 1:] -= ((C - 1) * candidate_probs).log()
             if args.distill_training:
-                loss = distillation_loss(scores, teacher_scores, labels)
+                loss, student_loss, teacher_loss = distillation_loss(scores, teacher_scores, labels)
+                return loss, predicts, scores, student_loss, teacher_loss
+
             else:
                 loss = self.loss_fct(scores, labels)
-            return loss, predicts, scores
+                return loss, predicts, scores
 
-class FrozenRetriever(UnifiedRetriever):
-    def __init__(self, encoder, device, num_codes_mention, num_codes_entity,
-                 mention_use_codes, entity_use_codes, attention_type,
-                 candidates_embeds=None, evaluate_on=False, args= None, num_heads = 2, num_layers = 2):
-        super(FrozenRetriever, self).__init__(encoder, device, num_codes_mention, num_codes_entity,
-                 mention_use_codes, entity_use_codes, attention_type, candidates_embeds, evaluate_on, args, num_heads, num_layers)
-        if args.freeze_bert: 
-            for param in self.mention_encoder.parameters():
-                param.requires_grad = False
-            for param in self.entity_encoder.parameters():
-                param.requires_grad = False
-    def forward(self, mention_embeds, mention_embeds_masks, candidates_embeds, candidates_embeds_masks\
-    ,candidate_probs=None, recall_eval = False, top_k = 64, beam_ratio = None, args = None):
-        if self.evaluate_on:  # evaluate or get candidates
-            bsz, l_x, mention_dim = mention_embeds.size()
-            num_cands, l_y, cand_dim = candidates_embeds.size()
-            if self.attention_type == 'soft_attention':
-                scores = self.attention(candidates_embeds.unsqueeze(0).to(
-                    self.device), mention_embeds, mention_embeds,
-                    mention_embeds_masks)
-            else:
-                # candidate shape: (entity_bsz, 1, embed_dim)
-                # score shape: (mention_bsz, entity_bsz)
-                scores = (
-                    torch.matmul(mention_embeds.reshape(-1, mention_dim),
-                                 candidates_embeds.reshape(-1,
-                                                                cand_dim).t().to(
-                                     self.device)).reshape(bsz, l_x,
-                                                           num_cands,
-                                                           l_y).max(-1)[
-                        0]).sum(1)
+# class FrozenRetriever(UnifiedRetriever):
+#     def __init__(self, encoder, device, num_codes_mention, num_codes_entity,
+#                  mention_use_codes, entity_use_codes, attention_type,
+#                  candidates_embeds=None, evaluate_on=False, args= None, num_heads = 2, num_layers = 2):
+#         super(FrozenRetriever, self).__init__(encoder, device, num_codes_mention, num_codes_entity,
+#                  mention_use_codes, entity_use_codes, attention_type, candidates_embeds, evaluate_on, args, num_heads, num_layers)
+#         if args.freeze_bert: 
+#             for param in self.mention_encoder.parameters():
+#                 param.requires_grad = False
+#             for param in self.entity_encoder.parameters():
+#                 param.requires_grad = False
+#     def forward(self, mention_embeds, mention_embeds_masks, candidates_embeds, candidates_embeds_masks\
+#     ,candidate_probs=None, recall_eval = False, top_k = 64, beam_ratio = None, args = None, take_only_one = False):
+#         if self.evaluate_on:  # evaluate or get candidates
+#             bsz, l_x, mention_dim = mention_embeds.size()
+#             num_cands, l_y, cand_dim = candidates_embeds.size()
+#             if self.attention_type == 'soft_attention':
+#                 scores = self.attention(candidates_embeds.unsqueeze(0).to(
+#                     self.device), mention_embeds, mention_embeds,
+#                     mention_embeds_masks)
+#             else:
+#                 # candidate shape: (entity_bsz, 1, embed_dim)
+#                 # score shape: (mention_bsz, entity_bsz)
+#                 scores = (
+#                     torch.matmul(mention_embeds.reshape(-1, mention_dim),
+#                                  candidates_embeds.reshape(-1,
+#                                                                 cand_dim).t().to(
+#                                      self.device)).reshape(bsz, l_x,
+#                                                            num_cands,
+#                                                            l_y).max(-1)[
+#                         0]).sum(1)
 
                 
-            return scores
-        else:  # train
-            candidates_embeds = candidates_embeds.squeeze(-2)
-            B, C, L = candidates_embeds.size() # e.g. 8, 256, 128
-            # B x m x d
-            #  get  embeds
-            # print(candidates_embeds.shape) # (1, 65, 128, 768)
-            if self.attention_type == 'extend_multi' or self.attention_type == 'extend_multi_dot':
-                if self.attention_type == 'extend_multi_dot':
-                    dot = True
-                else: 
-                    dot = False
-                ## if recall_eval is True, # of candidates is same as args.num_eval_cands
-                ## else, # of candidates is same as args.num_training_cands
-                if recall_eval:
-                    round = 1
-                    candidates_embeds_dict = {}
-                    candidates_embeds_dict["embeds"] = candidates_embeds
-                    candidates_embeds_dict["idxs"] = torch.arange(candidates_embeds_dict["embeds"].size(1))\
-                        .expand(candidates_embeds_dict["embeds"].size(0), -1)
-                    idxs = candidates_embeds_dict["idxs"]
-                    # scores = None
-                    # num_chunks = C//top_k
-                    # (16, 64, 1, 768)
-                    processed_tensor = candidates_embeds_dict["embeds"].reshape(-1, top_k, 1, candidates_embeds_dict["embeds"].size(-1))
-                    # idxs_chunks = candidates_embeds["idxs"].reshape(-1, top_k)
-                    # print("***")
-                    # print(processed_tensor[1], processed_tensor.shape)
-                    scores = self.extend_multi.forward_chunk(mention_embeds, processed_tensor, dot, int(candidates_embeds_dict["embeds"].size(1)/top_k))
-                    # print(scores, scores.shape)
-                    # scores = torch.nn.functional.softmax(scores, dim = 1)
-                    scores = scores.view(B, -1, top_k) # (B, *, 64로 바꾼 다음에 나온 index에 대해 64씩을 더해줌)
-                    idxs = torch.topk(scores, int(top_k*beam_ratio))[1]
-                    cumulative_idxs = torch.tensor([top_k*i for i in range(idxs.size(1))], device = self.device).unsqueeze(1)
-                    idxs += cumulative_idxs
-                    idxs = idxs.view(B, int(C*beam_ratio))
-                    batch_idxs = torch.arange(B).unsqueeze(1).expand_as(idxs)
-                    scores = scores.view(B, C)
-                    candidates_embeds_dict["embeds"] = candidates_embeds_dict["embeds"][batch_idxs, idxs, :, :]
-                    candidates_embeds_dict["idxs"] = candidates_embeds_dict["idxs"][batch_idxs, idxs.cpu()]
-                    while idxs.size(1) >= top_k:
-                        round +=1
-                        processed_tensor = candidates_embeds_dict["embeds"].reshape(-1, top_k, 1, candidates_embeds_dict["embeds"].size(-1))
-                        idxs_chunks = candidates_embeds_dict["idxs"].reshape(-1, top_k)
-                        new_scores = self.extend_multi.forward_chunk(mention_embeds, processed_tensor, dot, int(candidates_embeds_dict["embeds"].size(1)/top_k))
-                        # new_scores = torch.nn.functional.softmax(new_scores, dim = 1)
-                        new_scores = new_scores.view(B, -1, top_k)
-                        # print(new_scores.shape)
-                        # print(new_scores, new_scores.shape)
-                        idxs = torch.topk(new_scores, int(top_k*beam_ratio))[1]
-                        # print(idxs, previous_idxs)
-                        cumulative_idxs = torch.tensor([top_k*i for i in range(idxs.size(1))], device = self.device).unsqueeze(1)
-                        idxs += cumulative_idxs
-                        idxs = idxs.view(B, int(candidates_embeds_dict["embeds"].size(1)*beam_ratio))
-                        batch_idxs = torch.arange(B).unsqueeze(1).expand_as(idxs)
-                        new_scores = new_scores.view(B, candidates_embeds_dict["embeds"].size(1))
-                        for row in range(candidates_embeds_dict["embeds"].size(0)):
-                            # print(scores[row, candidates_embeds["idxs"][row]], new_scores[row])
-                            scores[row, candidates_embeds["idxs"][row]] *= (round-1)/round
-                            scores[row, candidates_embeds["idxs"][row]] += new_scores[row]/round
-                        candidates_embeds_dict["embeds"] = candidates_embeds_dict["embeds"][batch_idxs, idxs, :, :]
-                        candidates_embeds_dict["idxs"] = candidates_embeds_dict["idxs"][batch_idxs, idxs.cpu()]
-                else:
-                    scores = self.extend_multi(mention_embeds, candidates_embeds, dot, args)
-            else:
-                if self.attention_type == 'soft_attention':
-                    scores = self.attention(candidates_embeds, mention_embeds,
-                                            mention_embeds, mention_embeds_masks)
-                elif self.attention_type == 'mlp':
-                    scores = self.mlp(mention_embeds, candidates_embeds)
-                else:
-                    scores = self.attention(mention_embeds, candidates_embeds)
-            predicts = scores.argmax(1)
-            labels = torch.zeros(B).long().to(self.device)
-            if candidate_probs is not None:  # logits adjustment
-                candidate_probs = candidate_probs.to(self.device)
-                scores[:, 1:] -= ((C - 1) * candidate_probs).log()
-            loss = self.loss_fct(scores, labels)
-            return loss, predicts, scores
+#             return scores
+#         else:  # train
+#             candidates_embeds = candidates_embeds.squeeze(-2)
+#             B, C, L = candidates_embeds.size() # e.g. 8, 256, 128
+#             # B x m x d
+#             #  get  embeds
+#             # print(candidates_embeds.shape) # (1, 65, 128, 768)
+#             if self.attention_type == 'extend_multi' or self.attention_type == 'extend_multi_dot':
+#                 if self.attention_type == 'extend_multi_dot':
+#                     dot = True
+#                 else: 
+#                     dot = False
+#                 ## if recall_eval is True, # of candidates is same as args.num_eval_cands
+#                 ## else, # of candidates is same as args.num_training_cands
+#                 if recall_eval:
+#                     round = 1
+#                     candidates_embeds_dict = {}
+#                     beam_ratios = [0.25, 0.5]
+#                     candidates_embeds_dict["embeds"] = candidates_embeds
+#                     candidates_embeds_dict["idxs"] = torch.arange(candidates_embeds_dict["embeds"].size(1))\
+#                         .expand(candidates_embeds_dict["embeds"].size(0), -1)
+#                     idxs = candidates_embeds_dict["idxs"]
+#                     # scores = None
+#                     # num_chunks = C//top_k
+#                     # (64, 16, 1, 768)
+#                     processed_tensor = candidates_embeds_dict["embeds"].reshape(top_k, -1, 1, candidates_embeds_dict["embeds"].size(-1))
+#                     num_instances = processed_tensor.size(1)
+#                     print("1", processed_tensor, processed_tensor.shape)
+#                     scores = self.extend_multi.forward_chunk(mention_embeds, processed_tensor, dot, top_k)
+#                     print("2", scores, scores.shape)
+#                     scores = scores.view(B, -1, num_instances) # (B, *, 16로 바꾼 다음에 나온 index에 대해 64씩을 더해줌)
+#                     print("3", scores, scores.shape)
+#                     idxs = torch.topk(scores, int(num_instances*beam_ratio))[1]
+#                     cumulative_idxs = torch.tensor([num_instances*i for i in range(idxs.size(1))], device = self.device).unsqueeze(1)
+#                     idxs += cumulative_idxs
+#                     idxs = idxs.view(B, int(C*beam_ratio))
+#                     batch_idxs = torch.arange(B).unsqueeze(1).expand_as(idxs)
+#                     scores = scores.view(B, C)
+#                     candidates_embeds_dict["embeds"] = candidates_embeds_dict["embeds"][batch_idxs, idxs, :, :]
+#                     candidates_embeds_dict["idxs"] = candidates_embeds_dict["idxs"][batch_idxs, idxs.cpu()]
+#                     while idxs.size(1) >= top_k:    
+#                         round +=1
+#                         processed_tensor = candidates_embeds_dict["embeds"].reshape(-1, top_k, 1, candidates_embeds_dict["embeds"].size(-1))
+#                         idxs_chunks = candidates_embeds_dict["idxs"].reshape(-1, top_k)
+#                         new_scores = self.extend_multi.forward_chunk(mention_embeds, processed_tensor, dot, int(candidates_embeds_dict["embeds"].size(1)/top_k))
+#                         # new_scores = torch.nn.functional.softmax(new_scores, dim = 1)
+#                         new_scores = new_scores.view(B, -1, top_k)
+#                         # print(new_scores.shape)
+#                         # print(new_scores, new_scores.shape)
+#                         idxs = torch.topk(new_scores, int(top_k*beam_ratio))[1]
+#                         # print(idxs, previous_idxs)
+#                         cumulative_idxs = torch.tensor([top_k*i for i in range(idxs.size(1))], device = self.device).unsqueeze(1)
+#                         idxs += cumulative_idxs
+#                         idxs = idxs.view(B, int(candidates_embeds_dict["embeds"].size(1)*beam_ratio))
+#                         batch_idxs = torch.arange(B).unsqueeze(1).expand_as(idxs)
+#                         new_scores = new_scores.view(B, candidates_embeds_dict["embeds"].size(1))
+#                         for row in range(candidates_embeds_dict["embeds"].size(0)):
+#                             # print(scores[row, candidates_embeds["idxs"][row]], new_scores[row])
+#                             scores[row, candidates_embeds["idxs"][row]] *= (round-1)/round
+#                             scores[row, candidates_embeds["idxs"][row]] += new_scores[row]/round
+#                         candidates_embeds_dict["embeds"] = candidates_embeds_dict["embeds"][batch_idxs, idxs, :, :]
+#                         candidates_embeds_dict["idxs"] = candidates_embeds_dict["idxs"][batch_idxs, idxs.cpu()]
+#                 else:
+#                     scores = self.extend_multi(mention_embeds, candidates_embeds, dot, args)
+#             else:
+#                 if self.attention_type == 'soft_attention':
+#                     scores = self.attention(candidates_embeds, mention_embeds,
+#                                             mention_embeds, mention_embeds_masks)
+#                 elif self.attention_type == 'mlp':
+#                     scores = self.mlp(mention_embeds, candidates_embeds)
+#                 else:
+#                     scores = self.attention(mention_embeds, candidates_embeds)
+#             predicts = scores.argmax(1)
+#             labels = torch.zeros(B).long().to(self.device)
+#             if candidate_probs is not None:  # logits adjustment
+#                 candidate_probs = candidate_probs.to(self.device)
+#                 scores[:, 1:] -= ((C - 1) * candidate_probs).log()
+#             loss = self.loss_fct(scores, labels)
+#             return loss, predicts, scores
 
 class extend_multi(nn.Module):
     def __init__(self, num_heads, num_layers, args):
@@ -556,7 +571,7 @@ class extend_multi(nn.Module):
         # ToDo: modify dim_feedforward argument of self.transformerencoderlayer
         self.transformerencoderlayer = torch.nn.TransformerEncoderLayer(self.embed_dim, self.num_heads, batch_first = True, dim_feedforward=3072).to(self.device)
         if args.identity_bert:
-            self.transformerencoderlayer = IdentityInitializedTransformerEncoderLayer(self.embed_dim, self.num_heads).to(self.device)
+            self.transformerencoderlayer = IdentityInitializedTransformerEncoderLayer(self.embed_dim, self.num_heads, args = args).to(self.device)
 
         self.transformerencoder = torch.nn.TransformerEncoder(self.transformerencoderlayer, self.num_layers).to(self.device)
         self.linearhead = torch.nn.Linear(self.embed_dim, 1).to(self.device)
@@ -584,15 +599,18 @@ class extend_multi(nn.Module):
             scores = self.linearhead(attention_result[:,1:,:])
             scores = scores.squeeze(-1)
         return scores
-    def forward_chunk(self, xs, ys, dot = False, size_chunk = 1):
+    def forward_chunk(self, xs, ys, dot = False, args = None):
         xs = xs.to(self.device) # (batch size, 1, embed_dim)
         ys = ys.squeeze(dim = -2).to(self.device) #(batch_size, cands, embed_dim)
-        xs = xs.repeat_interleave(size_chunk, dim=0)
-        token_type_xs = torch.zeros(xs.size(0), xs.size(1)).int().to(self.device)
-        token_embedding_xs = self.token_type_embeddings(token_type_xs)
-        token_type_ys = torch.ones(ys.size(0), ys.size(1)).int().to(self.device)
-        token_embedding_ys = self.token_type_embeddings(token_type_ys)
-        input = torch.cat([xs + token_embedding_xs, ys + token_embedding_ys], dim = 1)
+        xs = xs.repeat_interleave(int(ys.size(0)//xs.size(0)), dim=0)
+        if args.token_type:
+            token_type_xs = torch.zeros(xs.size(0), xs.size(1)).int().to(self.device)
+            token_embedding_xs = self.token_type_embeddings(token_type_xs)
+            token_type_ys = torch.ones(ys.size(0), ys.size(1)).int().to(self.device)
+            token_embedding_ys = self.token_type_embeddings(token_type_ys)
+            input = torch.cat([xs + token_embedding_xs, ys + token_embedding_ys], dim = 1)
+        else:
+            input = torch.cat([xs, ys], dim = 1)
         attention_result = self.transformerencoder(input)
         if dot:
             scores = torch.bmm(attention_result[:,0,:].unsqueeze(1), attention_result[:,1:,:].transpose(2,1))
@@ -658,17 +676,24 @@ class mlp_with_som(nn.Module):
         return scores
 
 class IdentityInitializedTransformerEncoderLayer(torch.nn.Module):
-    def __init__(self, d_model, n_head, dim_feedforward=3072, dropout=0.1, activation="relu"):
+    def __init__(self, d_model, n_head, dim_feedforward=3072, dropout=0.1, activation="relu", args = None):
         super(IdentityInitializedTransformerEncoderLayer, self).__init__()
         self.device = torch.device(
             "cuda" if torch.cuda.is_available() else "cpu"
         )  
+        self.args =args
         self.encoder_layer = torch.nn.TransformerEncoderLayer(d_model, n_head)
-        self.weight = nn.Parameter(torch.tensor([-5.], requires_grad = True))
+        if self.args.fixed_initial_weight:
+            self.weight = torch.tensor([0.]).to(self.device)
+        else:
+            self.weight = nn.Parameter(torch.tensor([-5.], requires_grad = True))
     def forward(self,src, src_mask=None, src_key_padding_mask=None, is_causal = False):
         out1 = self.encoder_layer(src, src_mask, src_key_padding_mask) # For Lower Torch Version
         # out1 = self.encoder_layer(src, src_mask, src_key_padding_mask, is_causal) # For Higher Torch Version
-        sigmoid_weight = torch.sigmoid(self.weight)
-        wandb.log({"weight": self.weight.item()})
+        sigmoid_weight = torch.sigmoid(self.weight).to(self.device)
+        try:
+            wandb.log({"weight": self.weight.item()})
+        except:
+            pass
         out = sigmoid_weight*out1 + (1-sigmoid_weight)*src
         return out
