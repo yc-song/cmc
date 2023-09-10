@@ -63,8 +63,6 @@ def configure_optimizer(args, model, num_train_examples):
          'names': [n for n, p in model.named_parameters()
                     if any(nd in n for nd in identity_init)]}
     ]
-    for item in optimizer_grouped_parameters:
-        print(item['names'])
     optimizer = AdamW(optimizer_grouped_parameters,
                       eps=args.adam_epsilon)
     print(optimizer)
@@ -423,6 +421,7 @@ def main(args):
 
     if args.resume_training:
         count = 0
+        print(args.save_dir)
         for each_file_name in os.listdir(args.save_dir):
             if each_file_name.startswith('epoch'):
                 if count == 1: raise('More than two bin files found in the model directory')
@@ -859,7 +858,7 @@ if __name__ == '__main__':
                         help='the type of model')
     parser.add_argument('--debug', action = 'store_true',
                         help='debugging mode')
-    parser.add_argument('--save_dir', type = str, default = '/shared/s3/lab07/jongsong/hard-nce-el/models',
+    parser.add_argument('--save_dir', type = str, default = '/shared/s3/lab07/jongsong/hard-nce-el_garage/models',
                         help='debugging mode')
     parser.add_argument('--training_one_epoch', action = 'store_true',
                         help='stop the training after one epoch')

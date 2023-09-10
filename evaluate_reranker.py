@@ -296,7 +296,7 @@ if __name__ == '__main__':
                         help='the evaluate method')
     parser.add_argument('--fixed_initial_weight', action='store_true',
                         help='fixed weight for identity weight')
-    parser.add_argument('--save_dir', type = str, default = '/shared/s3/lab07/jongsong/hard-nce-el/models',
+    parser.add_argument('--save_dir', type = str, default = '/shared/s3/lab07/jongsong/hard-nce-el_garage/models',
                         help='debugging mode')
 
     parser.add_argument('--type_model', type=str,
