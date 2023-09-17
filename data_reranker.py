@@ -58,8 +58,8 @@ class BasicDataset(Dataset):
                     xs = [y] + [x for x in xs if x != y]  # Target index always 0
                 elif args.type_cands == 'mixed_negative':
                     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-                    num_fixed = int(args.num_training_cands * args.cands_ratio)
-                    num_hards = args.num_training_cands - num_fixed
+                    num_fixed = int(self.max_num_candidates * args.cands_ratio)
+                    num_hards = self.max_num_candidates - num_fixed
                     xs = [y] + [x for x in xs if x != y]  # Target index always 0
                     xs = np.array(xs)
                     fixed_xs = xs[:num_fixed]
@@ -73,11 +73,11 @@ class BasicDataset(Dataset):
                 if args.type_cands == 'hard_negative': 
                     # Later, training set is obtained by hard negs mining
                     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-                    num_hards = len(xs)
+                    num_hards = len(xs) 
                     # scores = candidates['scores'].clone().detach()
                     scores = torch.tensor(candidates['scores'], dtype = float)
                     probs = scores.softmax(dim=0).unsqueeze(0)
-                    hard_cands = distribution_sample(probs, args.num_training_cands,
+                    hard_cands = distribution_sample(probs, self.max_num_candidates,
                                                         device)
                     xs = np.array(xs)
                     xs = xs[hard_cands.squeeze(0).cpu()]
@@ -85,7 +85,7 @@ class BasicDataset(Dataset):
             else: 
                 if args.type_cands == 'self_fixed_negative':
                     scores = torch.tensor(candidates['scores'], dtype = float)
-                    topk_indices = torch.topk(scores, args.num_training_cands)[1]
+                    topk_indices = torch.topk(scores, self.max_num_candidates)[1]
                     xs = np.array(xs)[topk_indices.cpu()]
                     xs = [y] + [x for x in xs if x!= y]
                 elif args.type_cands == "self_negative":
@@ -95,15 +95,15 @@ class BasicDataset(Dataset):
                     # scores = candidates['scores'].clone().detach()
                     scores = torch.tensor(candidates['scores'], dtype = float)
                     probs = scores.softmax(dim=0).unsqueeze(0)
-                    hard_cands = distribution_sample(probs, args.num_training_cands,
+                    hard_cands = distribution_sample(probs, self.max_num_candidates,
                                                         device)
                     xs = np.array(xs)
                     xs = xs[hard_cands.squeeze(0).cpu()]
                     xs = [y] + [x for x in xs if x != y]  # Target index always 0
                 elif args.type_cands == 'self_mixed_negative':
                     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-                    num_fixed = int(args.num_training_cands * args.cands_ratio)
-                    num_hards = args.num_training_cands - num_fixed
+                    num_fixed = int(self.max_num_candidates * args.cands_ratio)
+                    num_hards = self.max_num_candidates - num_fixed
                     xs = [y] + [x for x in xs if x != y]  # Target index always 0
                     xs = np.array(xs)
                     fixed_xs = xs[:num_fixed]
@@ -114,8 +114,7 @@ class BasicDataset(Dataset):
                     hard_cands = torch.tensor([num_fixed]) + distribution_sample(probs, num_hards, device).squeeze(0)
                     hard_xs = xs[hard_cands.squeeze(0)]
                     xs = np.concatenate((fixed_xs, hard_xs))
-
-            return xs[:args.num_training_cands]
+            return xs[:self.max_num_candidates]
         else:
             # At test time we assume candidates already include target.
             # assert y in xs
@@ -335,16 +334,20 @@ def get_loaders(data, tokenizer, max_len, max_num_candidates, batch_size,
         dataset_train = UnifiedDataset(documents, samples_train, tokenizer,
                                        max_len, max_num_candidates, True,
                                        indicate_mention_boundaries, args = args, self_negs_again=self_negs_again)
-    if not self_negs_again:
-        if args.type_cands == "self_negative" or args.type_cands == "self_fixed_negative":
-            loader_train = DataLoader(dataset_train, batch_size=eval_batch_size,
-                                  shuffle=True, num_workers=num_workers)            
+    if args.C>64:
+        loader_train = DataLoader(dataset_train, batch_size=batch_size,
+                                shuffle=True, num_workers=num_workers)
+    else:
+        if not self_negs_again:
+            if args.type_cands == "self_negative" or args.type_cands == "self_fixed_negative":
+                loader_train = DataLoader(dataset_train, batch_size=eval_batch_size,
+                                    shuffle=True, num_workers=num_workers)            
+            else:
+                loader_train = DataLoader(dataset_train, batch_size=batch_size,
+                                    shuffle=True, num_workers=num_workers)
         else:
             loader_train = DataLoader(dataset_train, batch_size=batch_size,
-                                  shuffle=True, num_workers=num_workers)
-    else:
-        loader_train = DataLoader(dataset_train, batch_size=batch_size,
-                              shuffle=True, num_workers=num_workers)
+                                shuffle=True, num_workers=num_workers)
 
     def help_loader(samples):
         num_samples = len(samples[0])

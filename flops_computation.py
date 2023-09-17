@@ -106,14 +106,14 @@ def main(args):
         if args.type_model != "full":
             batch = {"mention_token_ids": torch.randint(1,3, (1, 128)),\
             "mention_masks": torch.randint(1,3, (1, 128)),\
-            "candidate_token_ids": torch.randint(1,3, (1, 64, 128)),\
-            "candidate_masks": torch.randint(1,3, (1, 64, 128)),\
+            "candidate_token_ids": torch.randint(1,3, (1, 256, 128)),\
+            "candidate_masks": torch.randint(1,3, (1, 256, 128)),\
             "args": args}
         else:
             batch = {
-                "encoded_pairs":torch.randint(1,3, (1, 64, 256)),\
-                "type_marks":torch.randint(0,2, (1, 64, 256)),\
-                "input_lens": torch.randint(0,2, (1, 64)),
+                "encoded_pairs":torch.randint(1,3, (1, 128, 256)),\
+                "type_marks":torch.randint(0,2, (1,128, 256)),\
+                "input_lens": torch.randint(0,2, (1, 128)),
                 "args": args}
 
         model = model.to(device)

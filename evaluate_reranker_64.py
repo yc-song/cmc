@@ -173,6 +173,23 @@ def main(args):
                                                         macro_eval_mode, args=args)
 
     print('start evaluation')
+
+    if args.distill:
+        train_result = micro_eval(model, loader_train, num_val_samples, args, mode = "train")
+        print(train_result)
+    if args.eval_method == 'micro':
+        val_result = micro_eval(model, loader_val, num_val_samples, args)
+    elif args.eval_method == 'macro':
+        val_result = macro_eval(model, loader_val, num_val_samples, args)
+    print('val acc unormalized  {:8.4f} ({}/{})|'
+               'val acc normalized  {:8.4f} ({}/{}) '.format(
+        val_result['acc_unorm'],
+        val_result['num_correct'],
+        num_val_samples,
+        val_result['acc_norm'],
+        val_result['num_correct'],
+        val_result['num_total_norm'],
+        newline=False))
     model.eval()
     if args.eval_method == 'micro':
         test_result = micro_eval(model, loader_test, num_test_samples, args)
@@ -193,23 +210,6 @@ def main(args):
             ,"test/val_loss": test_result['val_loss']\
             ,"test/micro_unnormalized_acc": sum(test_result['num_correct'])/sum(test_result['num_total_unorm'])\
             ,"test/micro_normalized_acc": sum(test_result['num_correct'])/sum(test_result['num_total_norm'])})
-    
-    if args.distill:
-        train_result = micro_eval(model, loader_train, num_val_samples, args, mode = "train")
-        print(train_result)
-    if args.eval_method == 'micro':
-        val_result = micro_eval(model, loader_val, num_val_samples, args)
-    elif args.eval_method == 'macro':
-        val_result = macro_eval(model, loader_val, num_val_samples, args)
-    print('val acc unormalized  {:8.4f} ({}/{})|'
-               'val acc normalized  {:8.4f} ({}/{}) '.format(
-        val_result['acc_unorm'],
-        val_result['num_correct'],
-        num_val_samples,
-        val_result['acc_norm'],
-        val_result['num_correct'],
-        val_result['num_total_norm'],
-        newline=False))
     
     print("micro_unnormalized_acc", sum(val_result['num_correct'])/sum(val_result['num_total_unorm'])\
     ,"micro_normalized_acc", sum(val_result['num_correct'])/sum(val_result['num_total_norm']))
