@@ -250,7 +250,7 @@ class UnifiedRetriever(nn.Module):
         return mention_embeds, mention_embeds_masks, candidates_embeds
 
     def forward(self, mention_token_ids, mention_masks, candidate_token_ids,
-                candidate_masks, teacher_scores = None, candidate_probs=None, recall_eval = False, top_k = 64, beam_ratio = None, args = None, sampling = False):
+                candidate_masks, teacher_scores = None, candidate_probs=None, recall_eval = False, top_k = 64, beam_ratio = 0.5, args = None, sampling = False):
         if self.evaluate_on:  # evaluate or get candidates
             mention_embeds, mention_embeds_masks = self.encode(
                 mention_token_ids, mention_masks, None, None)[:2]
@@ -342,87 +342,105 @@ class UnifiedRetriever(nn.Module):
                     dot = True
                 else: 
                     dot = False
-                ## if recall_eval is True, # of candidates is same as args.num_eval_cands
-                ## else, # of candidates is same as args.num_training_cands
+                # if recall_eval is True, # of candidates is same as args.num_eval_cands
+                # else, # of candidates is same as args.num_training_cands
+
                 if recall_eval:
                     round = 1
-                    beam_ratios = [0.0625,0.25,0.5]
-                    scores_dict = {}
-                    candidates_embeds_entire = {}
-                    candidates_embeds = {}
                     mention_embeds, mention_embeds_masks, \
-                    candidates_embeds_entire["embeds"] = self.encode(mention_token_ids, mention_masks,
+                    candidates_embeds = self.encode(mention_token_ids, mention_masks,
                                             candidate_token_ids,
                                             candidate_masks, too_large = args.too_large)
-                    candidates_embeds_entire["idxs"] = torch.arange(candidates_embeds_entire["embeds"].size(1))\
-                        .expand(candidates_embeds_entire["embeds"].size(0), -1)
-                    idxs = candidates_embeds_entire["idxs"]
-                    # scores = None
-                    # num_chunks = C//top_k
-                    processed_tensor = candidates_embeds_entire["embeds"].reshape(-1, top_k, 1, candidates_embeds_entire["embeds"].size(-1))
-                    num_instances = processed_tensor.size(1)
-                    initial_scores = self.extend_multi.forward_chunk(mention_embeds, processed_tensor, dot = dot, args = args)
-                    initial_scores = initial_scores.view(B, -1, num_instances) # (B, *, 16) -> 이전 forward pass의 score 정렬
-                    for i, beam_ratio in enumerate(beam_ratios):
-                        idxs = torch.topk(initial_scores, int(num_instances*beam_ratio))[1] 
-                        cumulative_idxs = torch.tensor([num_instances*i for i in range(idxs.size(1))], device = self.device).unsqueeze(1)
-                        idxs += cumulative_idxs # idx에 16씩 누적해 더해서 global indices 얻음
-                        idxs = idxs.view(B, -1)
-                        batch_idxs = torch.arange(B).unsqueeze(1).expand_as(idxs)
-                        scores = initial_scores.view(B, C)
-                        candidates_embeds["embeds"] = candidates_embeds_entire["embeds"][batch_idxs, idxs, :, :]
-                        candidates_embeds["idxs"] = candidates_embeds_entire["idxs"][batch_idxs, idxs.cpu()]
-                        
-                        while idxs.size(1) >= top_k:
-                            # 여기부터는 batch 당 instance가 64개
-                            round += 1
-                            processed_tensor = candidates_embeds["embeds"].reshape(-1, top_k, 1, candidates_embeds["embeds"].size(-1))
-                            idxs_chunks = candidates_embeds["idxs"].reshape(-1, top_k)
-                            # print(processed_tensor, processed_tensor.shape)
-                            # print(idxs_chunks, idxs_chunks.shape)
-                            new_scores = self.extend_multi.forward_chunk(mention_embeds, processed_tensor, dot = dot, args = args)
-                            # new_scores = torch.nn.functional.softmax(new_scores, dim = 1)
-                            new_scores = new_scores.view(B, -1, top_k)
-                            # print(new_scores.shape)
-                            # print(new_scores, new_scores.shape)
-                            idxs = torch.topk(new_scores, int(top_k*beam_ratio))[1]
-                            # print(idxs, previous_idxs)
-                            cumulative_idxs = torch.tensor([top_k*i for i in range(idxs.size(1))], device = self.device).unsqueeze(1)
-                            idxs += cumulative_idxs
-                            idxs = idxs.view(B, int(candidates_embeds["embeds"].size(1)*beam_ratio))
-                            
-                            batch_idxs = torch.arange(B).unsqueeze(1).expand_as(idxs)
-                            new_scores = new_scores.view(B, candidates_embeds["embeds"].size(1))
-                            if sampling:
-                                for row in range(candidates_embeds["embeds"].size(0)):
-                                    scores[row, candidates_embeds["idxs"][row]] *= (round-1)/round
-                                    scores[row, candidates_embeds["idxs"][row]] += new_scores[row]/round
-                            else:
-                                for row in range(candidates_embeds["embeds"].size(0)):
-                                    scores[row, candidates_embeds["idxs"][row]] += new_scores[row]
-
-                            candidates_embeds["embeds"] = candidates_embeds["embeds"][batch_idxs, idxs, :, :]
-                            candidates_embeds["idxs"] = candidates_embeds["idxs"][batch_idxs, idxs.cpu()]
-                        scores_dict[beam_ratio] = scores
-                    return scores_dict
+                    # Get the indices for 0-th and 1-st dimensions
+                    i_indices = torch.arange(candidates_embeds.size(0)).view(-1, 1, 1, 1).float().expand(-1, candidates_embeds.size(1), -1, -1).to(self.device)
+                    j_indices = torch.arange(candidates_embeds.size(1)).view(1, -1, 1, 1).float().expand(candidates_embeds.size(0), -1, -1, -1).to(self.device)
+                    # Expand these indices to match the shape of the original tensor
+                    candidates_embeds = torch.cat((candidates_embeds, i_indices, j_indices), dim=-1) #(B, C_eval, 1, embed_dim) e.g. (2, 1024, 1, 768)
+                    candidates_reshaped = candidates_embeds.reshape(-1, top_k, 1, candidates_embeds.size(-1))
+                    scores_round_0 = self.extend_multi.forward_chunk(mention_embeds, candidates_reshaped[:,:,:,:-2], dot = dot, args = args)  # (B*16, top_k)
+                    candidates_advanced_idxs = torch.topk(scores_round_0, int(top_k*beam_ratio))[1]
+                    candidates_advanced = torch.gather(candidates_reshaped, 1, candidates_advanced_idxs.unsqueeze(2).unsqueeze(3).expand(-1, -1, 1, candidates_embeds.size(-1))) 
+                    while torch.numel(candidates_advanced_idxs)//B > top_k:
+                        candidates_advanced = candidates_advanced.reshape(-1, top_k, 1, candidates_advanced.size(-1))
+                        scores = self.extend_multi.forward_chunk(mention_embeds, candidates_advanced[:,:,:,:-2], dot = dot, args = args)
+                        candidates_advanced_idxs = torch.topk(scores, int(top_k*beam_ratio))[1]
+                        candidates_advanced = torch.gather(candidates_advanced, 1, candidates_advanced_idxs.unsqueeze(2).unsqueeze(3).expand(-1, -1, 1, candidates_embeds.size(-1))) 
+                    candidates_advanced = candidates_advanced.reshape(-1, top_k, 1, candidates_advanced.size(-1))
+                    scores = self.extend_multi.forward_chunk(mention_embeds, candidates_advanced[:,:,:,:-2], dot = dot, args = args)
+                    candidates_advanced_idxs = torch.argsort(scores, descending = True)
+                    candidates_advanced = torch.gather(candidates_advanced, 1, candidates_advanced_idxs.unsqueeze(2).unsqueeze(3).expand(-1, -1, 1, candidates_embeds.size(-1))) 
+                    return candidates_advanced[:,:,0,-1]
+                # if recall_eval:
+                #     round = 1
+                #     beam_ratios = [0.0625,0.25,0.5]
+                #     scores_dict = {}
+                #     candidates_embeds_entire = {}
+                #     candidates_embeds = {}
+                #     mention_embeds, mention_embeds_masks, \
+                #     candidates_embeds_entire["embeds"] = self.encode(mention_token_ids, mention_masks,
+                #                             candidate_token_ids,
+                #                             candidate_masks, too_large = args.too_large)
+                #     candidates_embeds_entire["idxs"] = torch.arange(candidates_embeds_entire["embeds"].size(1))\
+                #         .expand(candidates_embeds_entire["embeds"].size(0), -1)
+                    
+                #     idxs = candidates_embeds_entire["idxs"]
+                #     # scores = None
+                #     # num_chunks = C//top_k
+                #     processed_tensor = candidates_embeds_entire["embeds"].reshape(-1, top_k, 1, candidates_embeds_entire["embeds"].size(-1))
+                #     num_instances = processed_tensor.size(1)
+                #     initial_scores = nn.Softmax()(self.extend_multi.forward_chunk(mention_embeds, processed_tensor, dot = dot, args = args))
+                #     initial_scores = initial_scores.view(B, -1, num_instances) # (B, *, 16) -> 이전 forward pass의 score 정렬
+                #     for beam_ratio in beam_ratios:
+                #         idxs = torch.topk(initial_scores, int(num_instances*beam_ratio))[1] 
+                #         cumulative_idxs = torch.tensor([num_instances*j for j in range(idxs.size(1))], device = self.device).unsqueeze(1)
+                #         idxs += cumulative_idxs # idx에 16씩 누적해 더해서 global indices 얻음
+                #         idxs = idxs.view(B, -1)
+                #         batch_idxs = torch.arange(B).unsqueeze(1).expand_as(idxs)
+                #         scores = initial_scores.view(B, C)
+                #         candidates_embeds["embeds"] = candidates_embeds_entire["embeds"][batch_idxs, idxs, :, :]
+                #         candidates_embeds["idxs"] = candidates_embeds_entire["idxs"][batch_idxs, idxs.cpu()]
+                #         while idxs.size(1) >= top_k:
+                #             # 여기부터는 batch 당 instance가 64개
+                #             round += 1
+                #             processed_tensor = candidates_embeds["embeds"].reshape(-1, top_k, 1, candidates_embeds["embeds"].size(-1))
+                #             idxs_chunks = candidates_embeds["idxs"].reshape(-1, top_k)
+                #             new_scores = nn.Softmax()(self.extend_multi.forward_chunk(mention_embeds, processed_tensor, dot = dot, args = args))
+                #             new_scores = new_scores.view(B, -1, top_k)
+                #             idxs = torch.topk(new_scores, int(top_k*beam_ratio))[1]
+                #             cumulative_idxs = torch.tensor([top_k*j for j in range(idxs.size(1))], device = self.device).unsqueeze(1)
+                #             idxs += cumulative_idxs
+                #             idxs = idxs.view(B, int(candidates_embeds["embeds"].size(1)*beam_ratio))
+                #             batch_idxs = torch.arange(B).unsqueeze(1).expand_as(idxs)
+                #             new_scores = new_scores.view(B, candidates_embeds["embeds"].size(1))
+                #             if sampling:
+                #                 for row in range(candidates_embeds["embeds"].size(0)):
+                #                     scores[row, candidates_embeds["idxs"][row]] *= (round-1)/round
+                #                     scores[row, candidates_embeds["idxs"][row]] += new_scores[row]/round
+                #             else:
+                #                 for row in range(candidates_embeds["embeds"].size(0)):
+                #                     scores[row, candidates_embeds["idxs"][row]] += new_scores[row]
+                #             candidates_embeds["embeds"] = candidates_embeds["embeds"][batch_idxs, idxs, :, :]
+                #             candidates_embeds["idxs"] = candidates_embeds["idxs"][batch_idxs, idxs.cpu()]
+                #         scores_dict[beam_ratio] = scores.clone()
+                #     return scores_dict
                         
                 else:
                     mention_embeds, mention_embeds_masks, \
                     candidates_embeds = self.encode(mention_token_ids, mention_masks,
-                                                candidate_token_ids[:,:args.C_eval,:],
-                                                candidate_masks[:,:args.C_eval,:])
+                                                candidate_token_ids,
+                                                candidate_masks)
                     scores = self.extend_multi(mention_embeds, candidates_embeds, dot, args)
             elif self.attention_type == 'mlp_with_som':
                     mention_embeds, mention_embeds_masks, \
                     candidates_embeds = self.encode(mention_token_ids, mention_masks,
-                                                candidate_token_ids[:,:args.C_eval,:],
-                                                candidate_masks[:,:args.C_eval,:])
+                                                candidate_token_ids,
+                                                candidate_masks)
                     scores = self.mlp_with_som(mention_embeds, candidates_embeds)
             else:
                 mention_embeds, mention_embeds_masks, \
                 candidates_embeds = self.encode(mention_token_ids, mention_masks,
-                                                candidate_token_ids[:,:args.C_eval,:],
-                                                candidate_masks[:,:args.C_eval,:])
+                                                candidate_token_ids,
+                                                candidate_masks)
                 if self.attention_type == 'soft_attention':
                     scores = self.attention(candidates_embeds, mention_embeds,
                                             mention_embeds, mention_embeds_masks)
@@ -593,10 +611,17 @@ class extend_multi(nn.Module):
             input = torch.cat([xs, ys], dim = 1)
         attention_result = self.transformerencoder(input)
         if dot:
+<<<<<<< HEAD
             scores = torch.bmm(attention_result[:,0,:].unsqueeze(1), attention_result[:,num_mention_vecs:,:].transpose(2,1))
             scores = scores.squeeze(-2)
         else:
             scores = self.linearhead(attention_result[:,num_mention_vecs:,:])
+=======
+            scores = torch.bmm(attention_result[:,0,:].unsqueeze(1), attention_result[:,args.num_mention_vecs:,:].transpose(2,1))
+            scores = scores.squeeze(-2)
+        else:
+            scores = self.linearhead(attention_result[:,args.num_mention_vecs:,:])
+>>>>>>> 68000b0f97e8e15db906a5a1b6b51885ba23641f
             scores = scores.squeeze(-1)
         return scores
     def forward_chunk(self, xs, ys, dot = False, args = None):
@@ -613,10 +638,10 @@ class extend_multi(nn.Module):
             input = torch.cat([xs, ys], dim = 1)
         attention_result = self.transformerencoder(input)
         if dot:
-            scores = torch.bmm(attention_result[:,0,:].unsqueeze(1), attention_result[:,1:,:].transpose(2,1))
+            scores = torch.bmm(attention_result[:,0,:].unsqueeze(1), attention_result[:,args.num_mention_vecs:,:].transpose(2,1))
             scores = scores.squeeze(-2)
         else:
-            scores = self.linearhead(attention_result[:,1:,:])
+            scores = self.linearhead(attention_result[:,args.num_mention_vecs:,:])
             scores = scores.squeeze(-1)
         return scores
 class mlp(nn.Module):
@@ -691,9 +716,5 @@ class IdentityInitializedTransformerEncoderLayer(torch.nn.Module):
         out1 = self.encoder_layer(src, src_mask, src_key_padding_mask) # For Lower Torch Version
         # out1 = self.encoder_layer(src, src_mask, src_key_padding_mask, is_causal) # For Higher Torch Version
         sigmoid_weight = torch.sigmoid(self.weight).to(self.device)
-        try:
-            wandb.log({"weight": self.weight.item()})
-        except:
-            pass
         out = sigmoid_weight*out1 + (1-sigmoid_weight)*src
         return out
