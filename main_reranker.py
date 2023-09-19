@@ -116,7 +116,6 @@ def micro_eval(model, loader_eval, num_total_unorm, args = None, k = 64):
     loss_total = 0
     recall_correct = 0
     if args.distill: cands = []
-    print(args.cands_dir)
     with torch.no_grad():
         for step, batch in tqdm(enumerate(loader_eval), total = len(loader_eval)):
             if args.distill:
@@ -124,6 +123,7 @@ def micro_eval(model, loader_eval, num_total_unorm, args = None, k = 64):
                 batch[-1] = np.array(batch[-1]).T
             if debug and step > 50: break
             # try:
+            batch = tuple(batch)
             result = model.forward(*batch, args = args)
             if type(result) is dict:
                 preds = result['predictions']
@@ -852,25 +852,25 @@ def main(args):
             model.load_state_dict(new_state_dict)
         else:
             model.load_state_dict(cpt['sd'])
-        # print('start evaluation on val set (to check whether correct model loaded)')
-        # if args.eval_method == 'micro':
-        #     val_result = micro_eval(model, loader_val, num_val_samples, args)
-        # elif args.eval_method == 'macro':
-        #     val_result = macro_eval(model, loader_val, num_val_samples, args)
-        # print(val_result)
-        # print('val acc unormalized  {:8.4f} ({}/{})|'
-        #             'val acc normalized  {:8.4f} ({}/{}) '.format(
-        #         val_result['acc_unorm'],
-        #         val_result['num_correct'],
-        #         num_val_samples,
-        #         val_result['acc_norm'],
-        #         val_result['num_correct'],
-        #         val_result['num_total_norm'],
-        #         newline=False))
-        # wandb.log({"valid/unnormalized acc (cands {})".format(str(args.C_eval)): val_result['acc_unorm'], \
-        #         "valid/normalized acc (cands {})".format(str(args.C_eval)): val_result['acc_norm'],\
-        #         "valid/micro_unnormalized_acc(cands {})".format(str(args.C_eval)): sum(val_result['num_correct'])/sum(val_result['num_total_unorm']),\
-        #         "valid/micro_normalized_acc(cands {})".format(str(args.C_eval)): sum(val_result['num_correct'])/sum(val_result['num_total_norm'])})
+        print('start evaluation on val set (to check whether correct model loaded)')
+        if args.eval_method == 'micro':
+            val_result = micro_eval(model, loader_val, num_val_samples, args)
+        elif args.eval_method == 'macro':
+            val_result = macro_eval(model, loader_val, num_val_samples, args)
+        print(val_result)
+        print('val acc unormalized  {:8.4f} ({}/{})|'
+                    'val acc normalized  {:8.4f} ({}/{}) '.format(
+                val_result['acc_unorm'],
+                val_result['num_correct'],
+                num_val_samples,
+                val_result['acc_norm'],
+                val_result['num_correct'],
+                val_result['num_total_norm'],
+                newline=False))
+        wandb.log({"valid/unnormalized acc (cands {})".format(str(args.C_eval)): val_result['acc_unorm'], \
+                "valid/normalized acc (cands {})".format(str(args.C_eval)): val_result['acc_norm'],\
+                "valid/micro_unnormalized_acc(cands {})".format(str(args.C_eval)): sum(val_result['num_correct'])/sum(val_result['num_total_unorm']),\
+                "valid/micro_normalized_acc(cands {})".format(str(args.C_eval)): sum(val_result['num_correct'])/sum(val_result['num_total_norm'])})
 
         # print('start evaluation on test set')
         # if loader_test is None:
