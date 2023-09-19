@@ -4,7 +4,12 @@ import os
 import random
 import torch
 import torch.nn as nn
+<<<<<<< HEAD
+import json
+from data_reranker import get_loaders, load_zeshel_data, Logger
+=======
 from data_reranker import get_loaders, load_zeshel_data, Logger, preprocess_data
+>>>>>>> 68000b0f97e8e15db906a5a1b6b51885ba23641f
 from datetime import datetime
 from reranker import FullRanker
 from retriever import UnifiedRetriever

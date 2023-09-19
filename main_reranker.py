@@ -36,8 +36,6 @@ def configure_optimizer(args, model, num_train_examples):
     no_decay = ['bias', 'LayerNorm.weight']
     transformer = ['extend_multi', 'mlp']
     identity_init = ['transformerencoderlayer.weight']
-    for n, p in model.named_parameters():
-        count = 0
     optimizer_grouped_parameters = [
     {'params': [p for n, p in model.named_parameters()
                 if not any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)],
@@ -429,6 +427,7 @@ def main(args):
         elif args.type_model == 'extend_multi_dot':
             attention_type = 'extend_multi_dot'
             num_mention_vecs = args.num_mention_vecs
+            num_mention_vecs = args.num_mention_vecs
             num_entity_vecs = 1
         elif args.type_model == 'mlp_with_som':
             attention_type = 'mlp_with_som'
@@ -684,7 +683,7 @@ def main(args):
         print('Begin Training')
   
         for batch_idx, batch in tqdm(enumerate(loader_train), total = len(loader_train)):  # Shuffled every epoch
-            if args.debug and batch_idx > 50: break
+            if args.debug and batch_idx > 10: break
             model.train()
             # try:
             result = model.forward(*batch, args = args)

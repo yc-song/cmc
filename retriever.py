@@ -270,11 +270,11 @@ class UnifiedRetriever(nn.Module):
                         for i in range(int(num_cands/top_k)+1):
                             tmp_candidates_embed = self.candidates_embeds[top_k*i:min(top_k*(i+1),num_cands), :, :].expand(mention_embeds.size(0), -1, -1, -1)
                             if i == 0:
-                                scores = self.extend_multi(mention_embeds, tmp_candidates_embed)
+                                scores = self.extend_multi(mention_embeds, tmp_candidates_embed, num_mention_vecs = self.num_mention_vecs)
                                 scores = torch.nn.functional.softmax(scores, dim = 1)
                                 _, next_round_idxs = torch.topk(scores, int(top_k/4))
                             else:
-                                tmp_scores = self.extend_multi(mention_embeds, tmp_candidates_embed)
+                                tmp_scores = self.extend_multi(mention_embeds, tmp_candidates_embed, num_mention_vecs = self.num_mention_vecs)
                                 tmp_scores = torch.nn.functional.softmax(tmp_scores, dim = 1)
                                 scores = torch.cat([scores, tmp_scores], dim = 1)
                                 _, tmp_next_round_idxs = torch.topk(tmp_scores, int(tmp_candidates_embed.size(1)/4))
@@ -288,14 +288,14 @@ class UnifiedRetriever(nn.Module):
                         for i in range(int(num_cands/top_k)+1):
                             tmp_candidates_embed = tmp_cls_cands[:,top_k*i:min(top_k*(i+1),num_cands), :]
                             if i == 0:
-                                tmp_scores = self.extend_multi(mention_embeds, tmp_candidates_embed)
+                                tmp_scores = self.extend_multi(mention_embeds, tmp_candidates_embed, num_mention_vecs = self.num_mention_vecs)
                                 tmp_scores = torch.nn.functional.softmax(tmp_scores, dim = 1)
                                 _, tmp_next_round_idxs = torch.topk(tmp_scores, int(tmp_candidates_embed.size(1)/4))
                                 # next_round_idxs = torch.index_select(previous_round_idx, 1, next_round_idxs)
                                 next_round_idxs = torch.gather(previous_round_idxs, 1, tmp_next_round_idxs)
                                 # next_round_idxs = previous_round_idx[tmp_next_round_idxs]
                             else:
-                                tmp_scores2 = self.extend_multi(mention_embeds, tmp_candidates_embed)
+                                tmp_scores2 = self.extend_multi(mention_embeds, tmp_candidates_embed, num_mention_vecs = self.num_mention_vecs)
                                 tmp_scores2 = torch.nn.functional.softmax(tmp_scores2, dim = 1)
                                 tmp_scores = torch.cat([tmp_scores, tmp_scores2], dim = 1)
                                 _, tmp_next_round_idxs = torch.topk(tmp_scores2, int(tmp_candidates_embed.size(1)/4))
@@ -330,7 +330,6 @@ class UnifiedRetriever(nn.Module):
                                                            l_y).max(-1)[
                         0]).sum(1)
 
-                
             return scores
         else:  # train\
             B, C, L = candidate_token_ids.size() # e.g. 8, 256, 128
@@ -599,7 +598,7 @@ class extend_multi(nn.Module):
         # Process the chunk using your deep learning model
         processed_chunk = self.forward(xs, ys, dot)
         return processed_chunk
-    def forward(self, xs, ys, dot = False, args = None):
+    def forward(self, xs, ys, dot = False, args = None, num_mention_vecs = 1):
         xs = xs.to(self.device) # (batch size, 1, embed_dim)
         ys = ys.squeeze(dim = -2).to(self.device) #(batch_size, cands, embed_dim)
         if args.model_top is None and args.token_type :
@@ -617,7 +616,7 @@ class extend_multi(nn.Module):
         else:
             scores = self.linearhead(attention_result[:,args.num_mention_vecs:,:])
             scores = scores.squeeze(-1)
-        print("3", scores.shape)
+        
         return scores
     def forward_chunk(self, xs, ys, dot = False, args = None):
         xs = xs.to(self.device) # (batch size, 1, embed_dim)
@@ -638,6 +637,7 @@ class extend_multi(nn.Module):
         else:
             scores = self.linearhead(attention_result[:,args.num_mention_vecs:,:])
             scores = scores.squeeze(-1)
+        print("context", xs, "candidate", ys, "scores", scores)
         return scores
 class mlp(nn.Module):
     def __init__(self, args):
@@ -702,7 +702,7 @@ class IdentityInitializedTransformerEncoderLayer(torch.nn.Module):
             "cuda" if torch.cuda.is_available() else "cpu"
         )  
         self.args =args
-        self.encoder_layer = torch.nn.TransformerEncoderLayer(d_model, n_head)
+        self.encoder_layer = torch.nn.TransformerEncoderLayer(d_model, n_head, batch_first = True)
         if self.args.fixed_initial_weight:
             self.weight = torch.tensor([0.]).to(self.device)
         else:
