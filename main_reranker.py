@@ -37,56 +37,6 @@ def configure_optimizer(args, model, num_train_examples):
     transformer = ['extend_multi', 'mlp']
     identity_init = ['transformerencoderlayer.weight']
     optimizer_grouped_parameters = [
-<<<<<<< HEAD
-        {'params': [p for n, p in model.named_parameters()
-                    if any(nd in n for nd in transformer) and any(nd in n for nd in no_decay) and not any(nd in n for nd in identity_init)],
-         'lr': args.lr, 'weight_decay': 0.0,
-         'names': [n for n, p in model.named_parameters()
-                    if any(nd in n for nd in transformer) and any(nd in n for nd in no_decay) and not any(nd in n for nd in identity_init)]},
-        {'params': [p for n, p in model.named_parameters()
-                    if any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)],
-         'weight_decay': 0.0, 'lr': args.bert_lr,
-         'names': [n for n, p in model.named_parameters()
-                    if any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)]},
-                    if any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)],
-         'weight_decay': 0.0, 'lr': args.bert_lr,
-         'names': [n for n, p in model.named_parameters()
-                    if any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)]},
-        {'params': [p for n, p in model.named_parameters()
-                    if not any(nd in n for nd in no_decay) and any(nd in n for nd in transformer) and not any(nd in n for nd in identity_init) ],
-         'lr': args.lr, 'weight_decay': args.weight_decay,
-         'names': [n for n, p in model.named_parameters()
-                    if not any(nd in n for nd in no_decay) and any(nd in n for nd in transformer) and not any(nd in n for nd in identity_init)]},
-        {'params': [p for n, p in model.named_parameters()
-                    if not any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)],
-         'weight_decay': args.weight_decay, 'lr': args.bert_lr,
-         'names': [n for n, p in model.named_parameters()
-                    if not any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)]},
-        {'params': [p for n, p in model.named_parameters()
-                    if any(nd in n for nd in identity_init)],
-         'weight_decay': args.weight_decay, 'lr': args.weight_lr,
-         'names': [n for n, p in model.named_parameters()
-                    if any(nd in n for nd in identity_init)]}
-                    if not any(nd in n for nd in no_decay) and any(nd in n for nd in transformer) and not any(nd in n for nd in identity_init) ],
-         'lr': args.lr, 'weight_decay': args.weight_decay,
-         'names': [n for n, p in model.named_parameters()
-                    if not any(nd in n for nd in no_decay) and any(nd in n for nd in transformer) and not any(nd in n for nd in identity_init)]},
-        {'params': [p for n, p in model.named_parameters()
-                    if not any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)],
-         'weight_decay': args.weight_decay, 'lr': args.bert_lr,
-         'names': [n for n, p in model.named_parameters()
-                    if not any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)]},
-        {'params': [p for n, p in model.named_parameters()
-                    if any(nd in n for nd in identity_init)],
-         'weight_decay': args.weight_decay, 'lr': args.weight_lr,
-         'names': [n for n, p in model.named_parameters()
-                    if any(nd in n for nd in identity_init)]}
-    ]
-    for item in optimizer_grouped_parameters:
-        print(item['names'])
-    for item in optimizer_grouped_parameters:
-        print(item['names'])
-=======
     {'params': [p for n, p in model.named_parameters()
                 if not any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)],
         'weight_decay': args.weight_decay, 'lr': args.bert_lr},
@@ -97,7 +47,6 @@ def configure_optimizer(args, model, num_train_examples):
                 if any(nd in n for nd in transformer) and not any(nd in n for nd in no_decay)],
         'lr': args.lr, 'weight_decay': args.weight_decay},
     ]
->>>>>>> 68000b0f97e8e15db906a5a1b6b51885ba23641f
     optimizer = AdamW(optimizer_grouped_parameters,
                     eps=args.adam_epsilon)
     # except:
@@ -902,25 +851,25 @@ def main(args):
             model.load_state_dict(new_state_dict)
         else:
             model.load_state_dict(cpt['sd'])
-        # print('start evaluation on val set (to check whether correct model loaded)')
-        # if args.eval_method == 'micro':
-        #     val_result = micro_eval(model, loader_val, num_val_samples, args)
-        # elif args.eval_method == 'macro':
-        #     val_result = macro_eval(model, loader_val, num_val_samples, args)
-        # print(val_result)
-        # print('val acc unormalized  {:8.4f} ({}/{})|'
-        #             'val acc normalized  {:8.4f} ({}/{}) '.format(
-        #         val_result['acc_unorm'],
-        #         val_result['num_correct'],
-        #         num_val_samples,
-        #         val_result['acc_norm'],
-        #         val_result['num_correct'],
-        #         val_result['num_total_norm'],
-        #         newline=False))
-        # wandb.log({"valid/unnormalized acc (cands {})".format(str(args.C_eval)): val_result['acc_unorm'], \
-        #         "valid/normalized acc (cands {})".format(str(args.C_eval)): val_result['acc_norm'],\
-        #         "valid/micro_unnormalized_acc(cands {})".format(str(args.C_eval)): sum(val_result['num_correct'])/sum(val_result['num_total_unorm']),\
-        #         "valid/micro_normalized_acc(cands {})".format(str(args.C_eval)): sum(val_result['num_correct'])/sum(val_result['num_total_norm'])})
+        print('start evaluation on val set (to check whether correct model loaded)')
+        if args.eval_method == 'micro':
+            val_result = micro_eval(model, loader_val, num_val_samples, args)
+        elif args.eval_method == 'macro':
+            val_result = macro_eval(model, loader_val, num_val_samples, args)
+        print(val_result)
+        print('val acc unormalized  {:8.4f} ({}/{})|'
+                    'val acc normalized  {:8.4f} ({}/{}) '.format(
+                val_result['acc_unorm'],
+                val_result['num_correct'],
+                num_val_samples,
+                val_result['acc_norm'],
+                val_result['num_correct'],
+                val_result['num_total_norm'],
+                newline=False))
+        wandb.log({"valid/unnormalized acc (cands {})".format(str(args.C_eval)): val_result['acc_unorm'], \
+                "valid/normalized acc (cands {})".format(str(args.C_eval)): val_result['acc_norm'],\
+                "valid/micro_unnormalized_acc(cands {})".format(str(args.C_eval)): sum(val_result['num_correct'])/sum(val_result['num_total_unorm']),\
+                "valid/micro_normalized_acc(cands {})".format(str(args.C_eval)): sum(val_result['num_correct'])/sum(val_result['num_total_norm'])})
 
         # print('start evaluation on test set')
         # if loader_test is None:
@@ -1114,7 +1063,6 @@ if __name__ == '__main__':
                         default='base',
                         choices=['base', 'large'],
                         help='the type of encoder')
-    parser.add_argument('--num_mention_vecs', type=int, default=1,
     parser.add_argument('--num_mention_vecs', type=int, default=1,
                         help='the number of mention vectors ')
     parser.add_argument('--num_entity_vecs', type=int, default=8,

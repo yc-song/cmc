@@ -330,7 +330,6 @@ class UnifiedRetriever(nn.Module):
                                                            l_y).max(-1)[
                         0]).sum(1)
 
-                
             return scores
         else:  # train\
             B, C, L = candidate_token_ids.size() # e.g. 8, 256, 128
@@ -611,18 +610,12 @@ class extend_multi(nn.Module):
             input = torch.cat([xs, ys], dim = 1)
         attention_result = self.transformerencoder(input)
         if dot:
-<<<<<<< HEAD
-            scores = torch.bmm(attention_result[:,0,:].unsqueeze(1), attention_result[:,num_mention_vecs:,:].transpose(2,1))
-            scores = scores.squeeze(-2)
-        else:
-            scores = self.linearhead(attention_result[:,num_mention_vecs:,:])
-=======
             scores = torch.bmm(attention_result[:,0,:].unsqueeze(1), attention_result[:,args.num_mention_vecs:,:].transpose(2,1))
             scores = scores.squeeze(-2)
         else:
             scores = self.linearhead(attention_result[:,args.num_mention_vecs:,:])
->>>>>>> 68000b0f97e8e15db906a5a1b6b51885ba23641f
             scores = scores.squeeze(-1)
+        
         return scores
     def forward_chunk(self, xs, ys, dot = False, args = None):
         xs = xs.to(self.device) # (batch size, 1, embed_dim)
@@ -643,6 +636,7 @@ class extend_multi(nn.Module):
         else:
             scores = self.linearhead(attention_result[:,args.num_mention_vecs:,:])
             scores = scores.squeeze(-1)
+        print("context", xs, "candidate", ys, "scores", scores)
         return scores
 class mlp(nn.Module):
     def __init__(self, args):
@@ -707,7 +701,7 @@ class IdentityInitializedTransformerEncoderLayer(torch.nn.Module):
             "cuda" if torch.cuda.is_available() else "cpu"
         )  
         self.args =args
-        self.encoder_layer = torch.nn.TransformerEncoderLayer(d_model, n_head)
+        self.encoder_layer = torch.nn.TransformerEncoderLayer(d_model, n_head, batch_first = True)
         if self.args.fixed_initial_weight:
             self.weight = torch.tensor([0.]).to(self.device)
         else:
