@@ -32,53 +32,53 @@ def set_seed(args):
     torch.backends.cudnn.deterministic=True
 
 def configure_optimizer(args, model, num_train_examples):
-    # https://github.com/google-research/bert/blob/master/optimization.py#L25
-    no_decay = ['bias', 'LayerNorm.weight']
-    transformer = ['extend_multi', 'mlp']
-    identity_init = ['transformerencoderlayer.weight']
+    # # https://github.com/google-research/bert/blob/master/optimization.py#L25
+    # no_decay = ['bias', 'LayerNorm.weight']
+    # transformer = ['extend_multi', 'mlp']
+    # identity_init = ['transformerencoderlayer.weight']
+    # optimizer_grouped_parameters = [
+    # {'params': [p for n, p in model.named_parameters()
+    #             if not any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)],
+    #     'weight_decay': args.weight_decay, 'lr': args.bert_lr},
+    # {'params': [p for n, p in model.named_parameters()
+    #             if any(nd in n for nd in no_decay)],
+    #     'weight_decay': 0.0, 'lr': args.bert_lr},
+    # {'params': [p for n, p in model.named_parameters()
+    #             if any(nd in n for nd in transformer) and not any(nd in n for nd in no_decay)],
+    #     'lr': args.lr, 'weight_decay': args.weight_decay},
+    # ]
+    # optimizer = AdamW(optimizer_grouped_parameters,
+    #                 eps=args.adam_epsilon)
+    # # except:
     optimizer_grouped_parameters = [
-    {'params': [p for n, p in model.named_parameters()
-                if not any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)],
-        'weight_decay': args.weight_decay, 'lr': args.bert_lr},
-    {'params': [p for n, p in model.named_parameters()
-                if any(nd in n for nd in no_decay)],
-        'weight_decay': 0.0, 'lr': args.bert_lr},
-    {'params': [p for n, p in model.named_parameters()
-                if any(nd in n for nd in transformer) and not any(nd in n for nd in no_decay)],
-        'lr': args.lr, 'weight_decay': args.weight_decay},
+        {'params': [p for n, p in model.named_parameters()
+                    if any(nd in n for nd in transformer) and any(nd in n for nd in no_decay) and not any(nd in n for nd in identity_init)],
+        'lr': args.lr, 'weight_decay': 0.0,
+        'names': [n for n, p in model.named_parameters()
+                    if any(nd in n for nd in transformer) and any(nd in n for nd in no_decay) and not any(nd in n for nd in identity_init)]},
+        {'params': [p for n, p in model.named_parameters()
+                    if any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)],
+        'weight_decay': 0.0, 'lr': args.bert_lr,
+        'names': [n for n, p in model.named_parameters()
+                    if any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)]},
+        {'params': [p for n, p in model.named_parameters()
+                    if not any(nd in n for nd in no_decay) and any(nd in n for nd in transformer) and not any(nd in n for nd in identity_init) ],
+        'lr': args.lr, 'weight_decay': args.weight_decay,
+        'names': [n for n, p in model.named_parameters()
+                    if not any(nd in n for nd in no_decay) and any(nd in n for nd in transformer) and not any(nd in n for nd in identity_init)]},
+        {'params': [p for n, p in model.named_parameters()
+                    if not any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)],
+        'weight_decay': args.weight_decay, 'lr': args.bert_lr,
+        'names': [n for n, p in model.named_parameters()
+                    if not any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)]},
+        {'params': [p for n, p in model.named_parameters()
+                    if any(nd in n for nd in identity_init)],
+        'weight_decay': args.weight_decay, 'lr': args.weight_lr,
+        'names': [n for n, p in model.named_parameters()
+                    if any(nd in n for nd in identity_init)]}
     ]
     optimizer = AdamW(optimizer_grouped_parameters,
                     eps=args.adam_epsilon)
-    # except:
-    #     optimizer_grouped_parameters = [
-    #         {'params': [p for n, p in model.named_parameters()
-    #                     if any(nd in n for nd in transformer) and any(nd in n for nd in no_decay) and not any(nd in n for nd in identity_init)],
-    #         'lr': args.lr, 'weight_decay': 0.0,
-    #         'names': [n for n, p in model.named_parameters()
-    #                     if any(nd in n for nd in transformer) and any(nd in n for nd in no_decay) and not any(nd in n for nd in identity_init)]},
-    #         {'params': [p for n, p in model.named_parameters()
-    #                     if any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)],
-    #         'weight_decay': 0.0, 'lr': args.bert_lr,
-    #         'names': [n for n, p in model.named_parameters()
-    #                     if any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)]},
-    #         {'params': [p for n, p in model.named_parameters()
-    #                     if not any(nd in n for nd in no_decay) and any(nd in n for nd in transformer) and not any(nd in n for nd in identity_init) ],
-    #         'lr': args.lr, 'weight_decay': args.weight_decay,
-    #         'names': [n for n, p in model.named_parameters()
-    #                     if not any(nd in n for nd in no_decay) and any(nd in n for nd in transformer) and not any(nd in n for nd in identity_init)]},
-    #         {'params': [p for n, p in model.named_parameters()
-    #                     if not any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)],
-    #         'weight_decay': args.weight_decay, 'lr': args.bert_lr,
-    #         'names': [n for n, p in model.named_parameters()
-    #                     if not any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)]},
-    #         {'params': [p for n, p in model.named_parameters()
-    #                     if any(nd in n for nd in identity_init)],
-    #         'weight_decay': args.weight_decay, 'lr': args.weight_lr,
-    #         'names': [n for n, p in model.named_parameters()
-    #                     if any(nd in n for nd in identity_init)]}
-    #     ]
-    #     optimizer = AdamW(optimizer_grouped_parameters,
-    #                   eps=args.adam_epsilon)
 
     print(optimizer)
 
@@ -386,10 +386,10 @@ def load_model(model_path, device, eval_mode=False, dp=False, type_model='full',
 def main(args):
     set_seed(args)
     if args.resume_training:
-        run = wandb.init(project = "hard-nce-el", resume = "auto", id = args.run_id, config = args)
+        run = wandb.init(project = "hard-nce-el", resume = "must", id = args.run_id, config = args)
     else:
         run = wandb.init(project="hard-nce-el", config = args)
-    args.save_dir = '{}/{}/{}/'.format(args.save_dir, args.type_model, args.run_id)
+    args.save_dir = '{}/{}/{}/'.format(args.save_dir, args.type_model, run.id)
     if not os.path.exists(args.save_dir):
         os.makedirs(args.save_dir)
     # writer = SummaryWriter()

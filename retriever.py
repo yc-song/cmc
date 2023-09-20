@@ -428,7 +428,6 @@ class UnifiedRetriever(nn.Module):
                     candidates_embeds = self.encode(mention_token_ids, mention_masks,
                                                 candidate_token_ids,
                                                 candidate_masks)
-                    print("1", mention_embeds.shape, candidates_embeds.shape)
                     scores = self.extend_multi(mention_embeds, candidates_embeds, dot, args)
             elif self.attention_type == 'mlp_with_som':
                     mention_embeds, mention_embeds_masks, \
@@ -637,7 +636,6 @@ class extend_multi(nn.Module):
         else:
             scores = self.linearhead(attention_result[:,args.num_mention_vecs:,:])
             scores = scores.squeeze(-1)
-        print("context", xs, "candidate", ys, "scores", scores)
         return scores
 class mlp(nn.Module):
     def __init__(self, args):
