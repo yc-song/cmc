@@ -389,7 +389,7 @@ def main(args):
         run = wandb.init(project = "hard-nce-el", resume = "auto", id = args.run_id, config = args)
     else:
         run = wandb.init(project="hard-nce-el", config = args)
-    args.save_dir = '{}/{}/{}/'.format(args.save_dir, args.type_model, args.run_id)
+    args.save_dir = '{}/{}/{}/'.format(args.save_dir, args.type_model, run.id)
     if not os.path.exists(args.save_dir):
         os.makedirs(args.save_dir)
     # writer = SummaryWriter()

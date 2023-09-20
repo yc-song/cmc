@@ -636,7 +636,6 @@ class extend_multi(nn.Module):
         else:
             scores = self.linearhead(attention_result[:,args.num_mention_vecs:,:])
             scores = scores.squeeze(-1)
-        print("context", xs, "candidate", ys, "scores", scores)
         return scores
 class mlp(nn.Module):
     def __init__(self, args):
