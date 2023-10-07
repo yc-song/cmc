@@ -32,51 +32,51 @@ def set_seed(args):
     torch.backends.cudnn.deterministic=True
 
 def configure_optimizer(args, model, num_train_examples):
-    # # https://github.com/google-research/bert/blob/master/optimization.py#L25
-    # no_decay = ['bias', 'LayerNorm.weight']
-    # transformer = ['extend_multi', 'mlp']
-    # identity_init = ['transformerencoderlayer.weight']
-    # optimizer_grouped_parameters = [
-    # {'params': [p for n, p in model.named_parameters()
-    #             if not any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)],
-    #     'weight_decay': args.weight_decay, 'lr': args.bert_lr},
-    # {'params': [p for n, p in model.named_parameters()
-    #             if any(nd in n for nd in no_decay)],
-    #     'weight_decay': 0.0, 'lr': args.bert_lr},
-    # {'params': [p for n, p in model.named_parameters()
-    #             if any(nd in n for nd in transformer) and not any(nd in n for nd in no_decay)],
-    #     'lr': args.lr, 'weight_decay': args.weight_decay},
-    # ]
+    # https://github.com/google-research/bert/blob/master/optimization.py#L25
+    no_decay = ['bias', 'LayerNorm.weight']
+    transformer = ['extend_multi', 'mlp']
+    identity_init = ['transformerencoderlayer.weight']
+    optimizer_grouped_parameters = [
+    {'params': [p for n, p in model.named_parameters()
+                if not any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)],
+        'weight_decay': args.weight_decay, 'lr': args.bert_lr},
+    {'params': [p for n, p in model.named_parameters()
+                if any(nd in n for nd in no_decay)],
+        'weight_decay': 0.0, 'lr': args.bert_lr},
+    {'params': [p for n, p in model.named_parameters()
+                if any(nd in n for nd in transformer) and not any(nd in n for nd in no_decay)],
+        'lr': args.lr, 'weight_decay': args.weight_decay},
+    ]
     # optimizer = AdamW(optimizer_grouped_parameters,
     #                 eps=args.adam_epsilon)
     # # except:
-    optimizer_grouped_parameters = [
-        {'params': [p for n, p in model.named_parameters()
-                    if any(nd in n for nd in transformer) and any(nd in n for nd in no_decay) and not any(nd in n for nd in identity_init)],
-        'lr': args.lr, 'weight_decay': 0.0,
-        'names': [n for n, p in model.named_parameters()
-                    if any(nd in n for nd in transformer) and any(nd in n for nd in no_decay) and not any(nd in n for nd in identity_init)]},
-        {'params': [p for n, p in model.named_parameters()
-                    if any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)],
-        'weight_decay': 0.0, 'lr': args.bert_lr,
-        'names': [n for n, p in model.named_parameters()
-                    if any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)]},
-        {'params': [p for n, p in model.named_parameters()
-                    if not any(nd in n for nd in no_decay) and any(nd in n for nd in transformer) and not any(nd in n for nd in identity_init) ],
-        'lr': args.lr, 'weight_decay': args.weight_decay,
-        'names': [n for n, p in model.named_parameters()
-                    if not any(nd in n for nd in no_decay) and any(nd in n for nd in transformer) and not any(nd in n for nd in identity_init)]},
-        {'params': [p for n, p in model.named_parameters()
-                    if not any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)],
-        'weight_decay': args.weight_decay, 'lr': args.bert_lr,
-        'names': [n for n, p in model.named_parameters()
-                    if not any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)]},
-        {'params': [p for n, p in model.named_parameters()
-                    if any(nd in n for nd in identity_init)],
-        'weight_decay': args.weight_decay, 'lr': args.weight_lr,
-        'names': [n for n, p in model.named_parameters()
-                    if any(nd in n for nd in identity_init)]}
-    ]
+    # optimizer_grouped_parameters = [
+    #     {'params': [p for n, p in model.named_parameters()
+    #                 if any(nd in n for nd in transformer) and any(nd in n for nd in no_decay) and not any(nd in n for nd in identity_init)],
+    #     'lr': args.lr, 'weight_decay': 0.0,
+    #     'names': [n for n, p in model.named_parameters()
+    #                 if any(nd in n for nd in transformer) and any(nd in n for nd in no_decay) and not any(nd in n for nd in identity_init)]},
+    #     {'params': [p for n, p in model.named_parameters()
+    #                 if any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)],
+    #     'weight_decay': 0.0, 'lr': args.bert_lr,
+    #     'names': [n for n, p in model.named_parameters()
+    #                 if any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)]},
+    #     {'params': [p for n, p in model.named_parameters()
+    #                 if not any(nd in n for nd in no_decay) and any(nd in n for nd in transformer) and not any(nd in n for nd in identity_init) ],
+    #     'lr': args.lr, 'weight_decay': args.weight_decay,
+    #     'names': [n for n, p in model.named_parameters()
+    #                 if not any(nd in n for nd in no_decay) and any(nd in n for nd in transformer) and not any(nd in n for nd in identity_init)]},
+    #     {'params': [p for n, p in model.named_parameters()
+    #                 if not any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)],
+    #     'weight_decay': args.weight_decay, 'lr': args.bert_lr,
+    #     'names': [n for n, p in model.named_parameters()
+    #                 if not any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)]},
+    #     {'params': [p for n, p in model.named_parameters()
+    #                 if any(nd in n for nd in identity_init)],
+    #     'weight_decay': args.weight_decay, 'lr': args.weight_lr,
+    #     'names': [n for n, p in model.named_parameters()
+    #                 if any(nd in n for nd in identity_init)]}
+    # ]
     optimizer = AdamW(optimizer_grouped_parameters,
                     eps=args.adam_epsilon)
 
@@ -121,8 +121,9 @@ def micro_eval(model, loader_eval, num_total_unorm, args = None, k = 64):
                 batch[-1] = np.array(batch[-1]).T
             if debug and step > 50: break
             # try:
-            batch = tuple(batch)
-            result = model.forward(*batch, args = args)
+            batch["args"] = args
+            result = model.forward(**batch)
+            label_ids = batch["label_idx"]
             if type(result) is dict:
                 preds = result['predictions']
                 loss_total += result['loss'].sum()
@@ -132,8 +133,8 @@ def micro_eval(model, loader_eval, num_total_unorm, args = None, k = 64):
                 loss_total += result[0].sum()
                 scores = result[2]
             num_total += len(preds)
-            num_correct += (preds == 0).sum().item()
-            recall_correct += (scores.topk(k, dim=1)[1]==0).sum().item()
+            num_correct += (preds.cpu() == label_ids).sum().item()
+            recall_correct += (scores.topk(k, dim=1)[1].cpu()==label_ids.unsqueeze(-1)).sum().item()
             # except:
             #     for i in range(4):
             #         print(step, batch[i].shape)
@@ -223,7 +224,7 @@ def recall_eval(model, val_loaders, num_total_unorm, eval_mode = "micro", k = 64
             scores_tensor = torch.tensor([]).to(device)
         with torch.no_grad(): 
             for i, batch in tqdm(enumerate(val_loaders), total = len(val_loaders)):
-                top_k = model.forward(*batch, recall_eval = True, beam_ratio = args.beam_ratio, args = args).int()
+                top_k = model.forward(**batch, recall_eval = True, beam_ratio = args.beam_ratio, args = args).int()
                 preds = top_k[:, 0]
                 recall_correct += (top_k == 0).sum().item()
                 num_correct += (preds == 0).sum().item()
@@ -386,9 +387,9 @@ def load_model(model_path, device, eval_mode=False, dp=False, type_model='full',
 def main(args):
     set_seed(args)
     if args.resume_training:
-        run = wandb.init(project = "hard-nce-el", resume = "must", id = args.run_id, config = args)
+        run = wandb.init(project = "hard-nce-el", resume = "must", id = args.run_id, config = args, settings=wandb.Settings(_service_wait=300))
     else:
-        run = wandb.init(project="hard-nce-el", config = args)
+        run = wandb.init(project="hard-nce-el", config = args, settings=wandb.Settings(_service_wait=300))
     args.save_dir = '{}/{}/{}/'.format(args.save_dir, args.type_model, run.id)
     if not os.path.exists(args.save_dir):
         os.makedirs(args.save_dir)
@@ -603,7 +604,6 @@ def main(args):
         loader_train = preprocess_data(loader_train, model, args.debug)
         loader_val = preprocess_data(loader_val, model, args.debug)
         loader_test = preprocess_data(loader_test, model, args.debug)
-            
     for epoch in range(start_epoch, args.epochs + 1):
         if training_finished: break
         logger.log('\nEpoch %d' % epoch)
@@ -630,7 +630,7 @@ def main(args):
                 if args.type_model == 'extend_multi' or args.type_model == 'extend_multi_dot':
                     recall_evaluate = True
                 for i, batch in tqdm(enumerate(loader_train), total=len(loader_train)):
-                    result = model.forward(*batch, recall_eval=recall_evaluate, beam_ratio=args.beam_ratio, sampling = True)
+                    result = model.forward(**batch, recall_eval=recall_evaluate, beam_ratio=args.beam_ratio, sampling = True)
                     try:
                         scores = result[2]
                     except:
@@ -686,7 +686,7 @@ def main(args):
             if args.debug and batch_idx > 10: break
             model.train()
             # try:
-            result = model.forward(*batch, args = args)
+            result = model.forward(**batch, args = args)
 
             if type(result) is tuple:
                 loss = result[0]
@@ -832,12 +832,12 @@ def main(args):
     if training_finished:
         loader_train, loader_val, loader_test, \
         num_val_samples, num_test_samples = get_loaders(data, tokenizer, args.L,
-                                                    args.C, args.B,
-                                                    args.num_workers,
-                                                    args.inputmark,
-                                                    args.C_eval,
-                                                    use_full_dataset,
-                                                    macro_eval_mode, args = args)
+                                                        args.C, args.B,
+                                                        args.num_workers,
+                                                        args.inputmark,
+                                                        args.C_eval,
+                                                        use_full_dataset,
+                                                        macro_eval_mode, args = args)
         cpt = torch.load(os.path.join(args.save_dir,"pytorch_model.bin")) if device.type == 'cuda' \
             else torch.load(os.path.join(args.save_dir,"pytorch_model.bin") , map_location=torch.device('cpu'))
         print("checkpoint from ", cpt['epoch'])
@@ -852,10 +852,16 @@ def main(args):
         else:
             model.load_state_dict(cpt['sd'])
         print('start evaluation on val set (to check whether correct model loaded)')
-        if args.eval_method == 'micro':
-            val_result = micro_eval(model, loader_val, num_val_samples, args)
-        elif args.eval_method == 'macro':
-            val_result = macro_eval(model, loader_val, num_val_samples, args)
+        if not args.case_based:
+            if args.eval_method == 'micro':
+                val_result = micro_eval(model, loader_val, num_val_samples, args)
+            elif args.eval_method == 'macro':
+                val_result = macro_eval(model, loader_val, num_val_samples, args)
+        else:
+            if args.eval_method == 'micro':
+                val_result = micro_eval(model, loader_val, num_val_samples, args)
+            elif args.eval_method == 'macro':
+                val_result = macro_eval(model, loader_val, num_val_samples, args)
         print(val_result)
         print('val acc unormalized  {:8.4f} ({}/{})|'
                     'val acc normalized  {:8.4f} ({}/{}) '.format(
@@ -1014,6 +1020,18 @@ if __name__ == '__main__':
     parser.add_argument('--simpleoptim', action='store_true',
                         help='simple optimizer (constant schedule, '
                              'no weight decay?')
+    parser.add_argument('--case_based', action='store_true',
+                        help='simple optimizer (constant schedule, '
+                             'no weight decay?')
+    parser.add_argument('--gold_first', action='store_true',
+                        help='simple optimizer (constant schedule, '
+                             'no weight decay?')
+    parser.add_argument('--attend_to_gold', action='store_true',
+                        help='simple optimizer (constant schedule, '
+                             'no weight decay?')
+    parser.add_argument('--batch_first', action='store_false',
+                        help='simple optimizer (constant schedule, '
+                             'no weight decay?')
     parser.add_argument('--eval_method', default='macro', type=str,
                         choices=['macro', 'micro', 'skip'],
                         help='the evaluate method')
@@ -1040,6 +1058,7 @@ if __name__ == '__main__':
                                 'mixed_negative',
                                  'hard_negative',
                                  'self_negative',
+                                'random_negative',
                                  'self_fixed_negative',
                                  'self_mixed_negative'],
                         help='fixed: top k, hard: distributionally sampled k')

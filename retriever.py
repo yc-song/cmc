@@ -208,8 +208,7 @@ class UnifiedRetriever(nn.Module):
             mention_token_ids = mention_token_ids.to(self.device).long()
             mention_masks = mention_masks.to(self.device).long()
             mention_hiddens = self.mention_encoder(input_ids=mention_token_ids,
-                                                   attention_mask=mention_masks)[
-                0]
+                                                   attention_mask=mention_masks)[0]
             B = mention_token_ids.size(0)
             if self.mention_use_codes:
                 # m codes m different embeds
@@ -250,7 +249,9 @@ class UnifiedRetriever(nn.Module):
         return mention_embeds, mention_embeds_masks, candidates_embeds
 
     def forward(self, mention_token_ids, mention_masks, candidate_token_ids,
-                candidate_masks, teacher_scores = None, candidate_probs=None, recall_eval = False, top_k = 64, beam_ratio = 0.5, args = None, sampling = False):
+                candidate_masks, label_idx = None, teacher_scores = None, candidate_probs=None, recall_eval = False, top_k = 64, \
+                beam_ratio = 0.5, args = None, sampling = False, nearest_mention_token_ids = None, nearest_mention_masks = None,\
+                nearest_label_token_ids = None, nearest_label_masks = None, loader_val_cased = None):
         if self.evaluate_on:  # evaluate or get candidates
             mention_embeds, mention_embeds_masks = self.encode(
                 mention_token_ids, mention_masks, None, None)[:2]
@@ -428,7 +429,19 @@ class UnifiedRetriever(nn.Module):
                     candidates_embeds = self.encode(mention_token_ids, mention_masks,
                                                 candidate_token_ids,
                                                 candidate_masks)
-                    scores = self.extend_multi(mention_embeds, candidates_embeds, dot, args)
+                    if args.case_based: 
+                        # ToDo
+                        # make extend_multi to take nearest mention and label as input, and process them as intended.
+                        # also make self.encode to encode nearest mention and gold
+                        nearest_mention_embeds, nearest_mention_embeds_masks, \
+                        nearest_gold_embeds = self.encode(nearest_mention_token_ids.squeeze(0), nearest_mention_masks.squeeze(0),
+                                                    nearest_label_token_ids,
+                                                    nearest_label_masks)
+                        nearest_gold_embeds = nearest_gold_embeds.squeeze(0)
+                        scores = self.extend_multi(mention_embeds, candidates_embeds, dot, args, nearest_mention = nearest_mention_embeds, nearest_gold = nearest_gold_embeds)
+                    else:
+                        scores = self.extend_multi(mention_embeds, candidates_embeds, dot, args)
+
             elif self.attention_type == 'mlp_with_som':
                     mention_embeds, mention_embeds_masks, \
                     candidates_embeds = self.encode(mention_token_ids, mention_masks,
@@ -448,7 +461,10 @@ class UnifiedRetriever(nn.Module):
                 else:
                     scores = self.attention(mention_embeds, candidates_embeds)
             predicts = scores.argmax(1)
-            labels = torch.zeros(B).long().to(self.device)
+            if label_idx is None:
+                labels = torch.zeros(B).long().to(self.device)
+            else:
+                labels = label_idx.to(self.device)
             if candidate_probs is not None:  # logits adjustment
                 candidate_probs = candidate_probs.to(self.device)
                 scores[:, 1:] -= ((C - 1) * candidate_probs).log()
@@ -589,17 +605,53 @@ class extend_multi(nn.Module):
         self.transformerencoderlayer = torch.nn.TransformerEncoderLayer(self.embed_dim, self.num_heads, batch_first = True, dim_feedforward=3072).to(self.device)
         if args.identity_bert:
             self.transformerencoderlayer = IdentityInitializedTransformerEncoderLayer(self.embed_dim, self.num_heads, args = args).to(self.device)
-
+        self.args = args
         self.transformerencoder = torch.nn.TransformerEncoder(self.transformerencoderlayer, self.num_layers).to(self.device)
         self.linearhead = torch.nn.Linear(self.embed_dim, 1).to(self.device)
         self.token_type_embeddings = nn.Embedding(2, self.embed_dim).to(self.device)
+        if self.args.case_based: 
+            assert self.args.batch_first == False
+            assert not self.args.attend_to_gold
     def process_chunk(self, xs, ys, dot):
         # Process the chunk using your deep learning model
         processed_chunk = self.forward(xs, ys, dot)
         return processed_chunk
-    def forward(self, xs, ys, dot = False, args = None, num_mention_vecs = 1):
+    def forward(self, xs, ys, dot = False, args = None, num_mention_vecs = 1, nearest_mention = None, nearest_gold = None):
         xs = xs.to(self.device) # (batch size, 1, embed_dim)
         ys = ys.squeeze(dim = -2).to(self.device) #(batch_size, cands, embed_dim)
+        if self.args.case_based:
+            scores_overall = torch.tensor([]).to(self.device)
+            for i in range(xs.size(0)):
+                xs = torch.cat([xs, nearest_mention], dim = 0)
+                nearest_gold = nearest_gold.expand(-1, args.C_eval, -1)
+                ys = torch.cat([ys, nearest_gold], dim = 0)
+                input = torch.cat([xs, ys], dim = 1)
+                attention_result = self.transformerencoder(input)
+                if dot:
+                    scores = torch.bmm(attention_result[:,0,:].unsqueeze(1), attention_result[:,args.num_mention_vecs:,:].transpose(2,1))
+                    scores = scores.squeeze(-2)
+                else:
+                    scores = self.linearhead(attention_result[:,args.num_mention_vecs:,:])
+                    scores = scores.squeeze(-1)
+                scores_overall = torch.cat([scores_overall, scores[0:1]])
+            return scores_overall
+        elif self.args.attend_to_gold:
+            scores_overall = torch.tensor([]).to(self.device)
+            for i in range(xs.size(0)):
+                nearest_gold = torch.cat((ys[:i, 0:1, :], ys[i+1:, 0:1, :]))
+                nearest_gold = nearest_gold.expand(-1, args.C_eval, -1)
+                ys_new = torch.cat([ys[i:i+1,:,:], nearest_gold], dim = 0)
+                xs_new = torch.cat([xs[i:i+1, :, :], xs[:i, :, :], xs[i+1:, :, :]])
+                input = torch.cat([xs_new, ys_new], dim = 1)
+                attention_result = self.transformerencoder(input)
+                if dot:
+                    scores = torch.bmm(attention_result[:,0,:].unsqueeze(1), attention_result[:,args.num_mention_vecs:,:].transpose(2,1))
+                    scores = scores.squeeze(-2)
+                else:
+                    scores = self.linearhead(attention_result[:,args.num_mention_vecs:,:])
+                    scores = scores.squeeze(-1)
+                scores_overall = torch.cat([scores_overall, scores[0:1]])
+            return scores_overall
         if args.model_top is None and args.token_type :
             token_type_xs = torch.zeros(xs.size(0), xs.size(1)).int().to(self.device)
             token_embedding_xs = self.token_type_embeddings(token_type_xs)
@@ -694,17 +746,18 @@ class mlp_with_som(nn.Module):
         return scores
 
 class IdentityInitializedTransformerEncoderLayer(torch.nn.Module):
-    def __init__(self, d_model, n_head, dim_feedforward=3072, dropout=0.1, activation="relu", args = None):
+    def __init__(self, d_model, n_head, dim_feedforward=None, dropout=0.1, activation="relu", args = None):
         super(IdentityInitializedTransformerEncoderLayer, self).__init__()
         self.device = torch.device(
             "cuda" if torch.cuda.is_available() else "cpu"
         )  
-        self.args =args
-        self.encoder_layer = torch.nn.TransformerEncoderLayer(d_model, n_head, batch_first = True)
+        self.args = args
+        self.encoder_layer = torch.nn.TransformerEncoderLayer(d_model, n_head, batch_first = self.args.batch_first)
         if self.args.fixed_initial_weight:
             self.weight = torch.tensor([0.]).to(self.device)
         else:
             self.weight = nn.Parameter(torch.tensor([-5.], requires_grad = True))
+            
     def forward(self,src, src_mask=None, src_key_padding_mask=None, is_causal = False):
         out1 = self.encoder_layer(src, src_mask, src_key_padding_mask) # For Lower Torch Version
         # out1 = self.encoder_layer(src, src_mask, src_key_padding_mask, is_causal) # For Higher Torch Version

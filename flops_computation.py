@@ -69,7 +69,7 @@ def load_model(model_path, device, eval_mode=False, dp=False, type_model='full')
 
 def main(args):
 
-    with get_accelerator().device(0):
+    with get_accelerator().device(0,1):
         device = torch.device('cuda')
         if args.type_bert == 'base':
             encoder = BertModel.from_pretrained('bert-base-uncased')
