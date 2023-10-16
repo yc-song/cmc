@@ -5,8 +5,7 @@ from data_retriever import ZeshelDataset, transform_entities, load_data, \
     Data
 from util import Logger
 from data_reranker import get_loaders, Logger,  load_zeshel_data
-from main_reranker import micro_eval, macro_eval
-from reranker import FullRanker
+# from main_reranker import micro_eval, macro_eval/
 
 import argparse
 import numpy as np
@@ -120,19 +119,20 @@ def count_parameters(model):
 
 def main(args):
     set_seeds(args)
+    if args.energy_model: assert args.type_model == "dual"
     if args.resume_training:
         run = wandb.init(project = "hard-nce-el", resume = "must", id = args.run_id, config = args)
     else:
         run = wandb.init(project="hard-nce-el", config = args)
 
     # configure logger
-    args.model = './models/{}/{}/'.format(args.type_model, run.id)
+    args.save_dir = '{}/{}/{}/'.format(args.save_dir, args.type_model, run.id)
     args.en_hidden_path = './data/{}/{}/'.format(args.type_model, run.id)
-    if not os.path.exists(args.model):
-        os.makedirs(args.model)
+    if not os.path.exists(args.save_dir):
+        os.makedirs(args.save_dir)
     if not os.path.exists(args.en_hidden_path):
         os.makedirs(args.en_hidden_path)
-    logger = Logger(args.model + '.log', True)
+    logger = Logger(args.save_dir + '.log', True)
     logger.log(str(args))
     # load data and initialize model and dataset
     entity_path = "./data/entities"
@@ -181,33 +181,36 @@ def main(args):
         raise ValueError('wrong encoder type')
     # encoder=MLPEncoder(args.max_len)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    if args.type_model == 'full':
-        model = FullRanker(encoder, device).to(device)
-    else:    
-        if args.type_model == 'poly':
-            attention_type = 'soft_attention'
-        elif args.type_model == 'extend_multi':
-            attention_type = 'extend_multi'
-        else:
-            attention_type = 'hard_attention'
-        if args.type_model == 'dual':
-            num_mention_vecs = 1
-            num_entity_vecs = 1
-        elif args.type_model == 'multi_vector':
-            num_mention_vecs = 1
-            num_entity_vecs = args.num_entity_vecs
-        elif args.type_model == 'extend_multi':
-            num_mention_vecs = 1
-            num_entity_vecs = 1
-        else:
-            num_mention_vecs = args.num_mention_vecs
-            num_entity_vecs = args.num_entity_vecs
-        model = UnifiedRetriever(encoder, device, num_mention_vecs, num_entity_vecs,
-                                args.mention_use_codes, args.entity_use_codes,
-                                attention_type, None, False, num_heads = args.num_heads, num_layers = args.num_layers)
+
+    if args.type_model == 'poly':
+        attention_type = 'soft_attention'
+    elif args.type_model == 'extend_multi':
+        attention_type = 'extend_multi'
+    elif args.type_model == 'extend_multi_dot':
+        attention_type = 'extend_multi_dot'
+    else:
+        attention_type = 'hard_attention'
+    if args.type_model == 'dual':
+        num_mention_vecs = 1
+        num_entity_vecs = 1
+    elif args.type_model == 'multi_vector':
+        num_mention_vecs = 1
+        num_entity_vecs = args.num_entity_vecs
+    elif args.type_model == 'extend_multi':
+        num_mention_vecs = 1
+        num_entity_vecs = 1
+    elif args.type_model == 'extend_multi_dot':
+        num_mention_vecs = 1
+        num_entity_vecs = 1
+    else:
+        num_mention_vecs = args.num_mention_vecs
+        num_entity_vecs = args.num_entity_vecs
+    model = UnifiedRetriever(encoder, device, num_mention_vecs, num_entity_vecs,
+                            args.mention_use_codes, args.entity_use_codes,
+                            attention_type, None, False, num_heads = args.num_heads, num_layers = args.num_layers, args = args)
     if args.resume_training:
-        cpt = torch.load(args.model+"pytorch_model.bin") if device.type == 'cuda' \
-            else torch.load(args.model+"pytorch_model.bin", map_location=torch.device('cpu'))
+        cpt = torch.load(args.save_dir+"pytorch_model.bin") if device.type == 'cuda' \
+            else torch.load(args.save_dir+"pytorch_model.bin", map_location=torch.device('cpu'))
         model.load_state_dict(cpt['sd'])
     dp = torch.cuda.device_count() > 1
     
@@ -241,17 +244,7 @@ def main(args):
     model.to(device)
     if args.retriever_path is not None:
         retriever_model.to(device)
-    use_full_dataset = (args.type_model == 'full')
-    macro_eval_mode = (args.eval_method == 'macro')
-    data = load_zeshel_data(args.data_dir, args.cands_dir, macro_eval_mode)
-    _, loader_val, loader_test, \
-    num_val_samples, num_test_samples = get_loaders(data, tokenizer, args.L,
-                                                    args.C, args.B,
-                                                    args.num_workers,
-                                                    args.inputmark,
-                                                    args.C_eval,
-                                                    use_full_dataset,
-                                                    macro_eval_mode)
+
     logger.log('transform train entities')
     # if args.debug:
     try: 
@@ -306,10 +299,9 @@ def main(args):
                 all_val_entity_token_ids, all_val_masks,
                 all_test_entity_token_ids, all_test_masks, args.max_len,
                 samples_train, samples_val, samples_test)
-    use_full_dataset = (args.type_model == 'full')
     train_en_loader, val_en_loader, test_en_loader, train_men_loader, \
     val_men_loader, test_men_loader = data.get_loaders(args.mention_bsz,
-                                                       args.entity_bsz, use_full_dataset)
+                                                       args.entity_bsz, False)
     model.train()
 
     # configure optimizer
@@ -415,14 +407,13 @@ def main(args):
             retriever_train_loader = DataLoader(train_set, args.B, shuffle=True,
                                   drop_last=False)
         logger.log("Start Training")
+
         for step, batch in tqdm(enumerate(train_loader), total = len(train_loader)):
             if args.debug and step > 10:
                 break
             model.train()
-            if args.type_model == "full":
-                loss = model(*batch)["loss"]
-            else:
-                loss = model(*batch)[0]
+
+            loss = model(*batch, args = args)[0]
 
             if len(args.gpus) > 1:
                 loss = loss.mean()
@@ -447,28 +438,28 @@ def main(args):
                                          len(train_loader), avg_loss))
                     logging_loss = tr_loss
                     wandb.log({"loss": avg_loss, "epoch": epoch})
-
-        if args.type_model != 'full' and args.type_model != 'extend_multi':
-            logger.log("get all entity hiddens")
-
-            all_val_cands_embeds = get_all_entity_hiddens(val_en_loader, model,
-                                                      args.store_en_hiddens,
-                                                      args.en_hidden_path, debug = args.debug)
-            logger.log("evaluate on val set")
-        
-            eval_result = evaluate(val_men_loader, model, all_val_cands_embeds,
-                               args.k, device, len(val_en_loader),
-                               args.store_en_hiddens, args.en_hidden_path)
-        
-            logger.log('Done with epoch {:3d} | '
-                    'validation recall {:8.4f}'
-                    '|validation accuracy {:8.4f}'.format(
-                epoch,
-                eval_result[0],
-                eval_result[1]
-            ))
-            wandb.log({"val_recall": eval_result[0], "val_accuracy": eval_result[1], "epoch": epoch})
-        
+        if args.energy_model:
+            model.attention_type="dual"
+            model.num_mention_vecs = 1
+            model.num_entity_vecs = 1
+        logger.log("get all entity hiddens")
+        all_val_cands_embeds = get_all_entity_hiddens(val_en_loader, model,
+                                                    args.store_en_hiddens,
+                                                    args.en_hidden_path, debug = args.debug)
+        logger.log("evaluate on val set")
+        eval_result = evaluate(val_men_loader, model, all_val_cands_embeds,
+                            args.k, device, len(val_en_loader),
+                            args.store_en_hiddens, args.en_hidden_path)
+    
+        logger.log('Done with epoch {:3d} | '
+                'validation recall {:8.4f}'
+                '|validation accuracy {:8.4f}'.format(
+            epoch,
+            eval_result[0],
+            eval_result[1]
+        ))
+        wandb.log({"val_recall": eval_result[0], "val_accuracy": eval_result[1], "epoch": epoch})
+    
         # model.evaluate_on = False
         # logger.log('evaluation starts')
         # if args.eval_method == 'micro':
@@ -498,7 +489,7 @@ def main(args):
                         'scheduler_sd': scheduler.state_dict(),
                         'tr_loss': tr_loss, 'step_num': step_num,
                         'logging_loss': logging_loss},
-                       os.path.join(args.model, "pytorch_model.bin"))
+                       os.path.join(args.save_dir, "pytorch_model.bin"))
 
 
         # update dataset and dataloader
@@ -509,44 +500,24 @@ def main(args):
 
     logger.log("evaluate on val set")
 
-    if args.type_model != 'full' and args.type_model != 'extend_multi':
-        all_val_cands_embeds = get_all_entity_hiddens(val_en_loader, model,
-                                                    args.store_en_hiddens,
-                                                    args.en_hidden_path, debug = args.debug)
-        eval_result = evaluate(val_men_loader, model, all_val_cands_embeds,
-                            args.k, device, len(val_en_loader),
-                            args.store_en_hiddens, args.en_hidden_path)
-    
-        logger.log('Training finished | train loss {:8.4f} | '
-                'validation recall {:8.4f}'
-                '|validation accuracy {:8.4f}'.format(
-            tr_loss / step_num,
-            eval_result[0],
-            eval_result[1]
-        ))
-        wandb.log({"val_recall": eval_result[0], "val_accuracy": eval_result[1]})
-    
-    model.evaluate_on = False
-    logger.log('evaluation starts')
-    if args.eval_method == 'micro':
-        val_result = micro_eval(model, loader_val, num_val_samples, debug = args.debug) 
-    else:
-        val_result = macro_eval(model, loader_val, num_val_samples)
-    logger.log('Done with epoch {:3d} | train loss {:8.4f} | '
-            'val acc unormalized  {:8.4f} ({}/{})|'
-            'val acc normalized  {:8.4f} ({}/{}) '.format(
-        epoch,
+    all_val_cands_embeds = get_all_entity_hiddens(val_en_loader, model,
+                                                args.store_en_hiddens,
+                                                args.en_hidden_path, debug = args.debug)
+    eval_result = evaluate(val_men_loader, model, all_val_cands_embeds,
+                        args.k, device, len(val_en_loader),
+                        args.store_en_hiddens, args.en_hidden_path)
+
+    logger.log('Training finished | train loss {:8.4f} | '
+            'validation recall {:8.4f}'
+            '|validation accuracy {:8.4f}'.format(
         tr_loss / step_num,
-        val_result['acc_unorm'],
-        val_result['num_correct'],
-        num_val_samples,
-        val_result['acc_norm'],
-        val_result['num_correct'],
-        val_result['num_total_norm'],
-        newline=False))
-    wandb.log({"unnormalized accuracy": val_result['acc_unorm'] , "normalized acc": val_result['acc_norm'], "epoch": epoch})
-    package = torch.load(os.path.join(args.model, "pytorch_model.bin")) if device.type == 'cuda' \
-        else torch.load(os.path.join(args.model, "pytorch_model.bin"), map_location=torch.device('cpu'))
+        eval_result[0],
+        eval_result[1]
+    ))
+    wandb.log({"val_recall": eval_result[0], "val_accuracy": eval_result[1]})
+
+    package = torch.load(os.path.join(args.save_dir, "pytorch_model.bin")) if device.type == 'cuda' \
+        else torch.load(os.path.join(args.save_dir, "pytorch_model.bin"), map_location=torch.device('cpu'))
     new_state_dict = package['sd']
     # encoder=MLPEncoder(args.max_len)
     if args.pre_model == 'Bert':
@@ -568,16 +539,15 @@ def main(args):
     print("***get_all_entity_hiddens***")
 
     print("***test_result***")
-    if args.type_model != 'full' and args.type_model != 'extend_multi':
-        all_test_cands_embeds = get_all_entity_hiddens(test_en_loader, model,
-                                                   args.store_en_hiddens,
-                                                   args.en_hidden_path)
-        test_result = evaluate(test_men_loader, model, all_test_cands_embeds,
-                            args.k, device, len(test_en_loader),
-                            args.store_en_hiddens, args.en_hidden_path)
-        logger.log(' test recall@{:d} : {:8.4f}'
-                '| test accuracy : {:8.4f}'.format(args.k, test_result[0],
-                                                    test_result[1]))
+    all_test_cands_embeds = get_all_entity_hiddens(test_en_loader, model,
+                                                args.store_en_hiddens,
+                                                args.en_hidden_path)
+    test_result = evaluate(test_men_loader, model, all_test_cands_embeds,
+                        args.k, device, len(test_en_loader),
+                        args.store_en_hiddens, args.en_hidden_path)
+    logger.log(' test recall@{:d} : {:8.4f}'
+            '| test accuracy : {:8.4f}'.format(args.k, test_result[0],
+                                                test_result[1]))
     if args.eval_method == 'micro':
         test_result = micro_eval(model, loader_test, num_test_samples)
     else:
@@ -624,6 +594,8 @@ if __name__ == '__main__':
                         help='the  data directory')
     parser.add_argument('--L', type=int, default=256,
                         help='max length of joint input [%(default)d]')
+    parser.add_argument('--save_dir', type = str, default = '/shared/s3/lab07/jongsong/hard-nce-el_garage/models',
+                        help='debugging mode')
     parser.add_argument('--C', type=int, default=64,
                         help='max number of candidates [%(default)d]')
     parser.add_argument('--C_eval', type=int, default=64,
@@ -641,6 +613,8 @@ if __name__ == '__main__':
                         help='the batch size')
     parser.add_argument('--lr', type=float, default=2e-5,
                         help='the learning rate')
+    parser.add_argument('--bert_lr', type=float, default=1e-5,
+                        help='the batch size')
     parser.add_argument('--epochs', type=int, default=3,
                         help='the number of training epochs')
     parser.add_argument('--k', type=int, default=64,
@@ -660,6 +634,10 @@ if __name__ == '__main__':
                         help='random seed [%(default)d]')
     parser.add_argument('--num_workers', type=int, default=0,
                         help='num workers [%(default)d]')
+    parser.add_argument('--distill', action='store_true',
+                        help='getting score distribution for distillation purpose')
+    parser.add_argument('--distill_training', action='store_true',
+                        help='training smaller model from crossencoder scores')
     parser.add_argument('--simpleoptim', action='store_true',
                         help='simple optimizer (constant schedule, '
                              'no weight decay?')
@@ -667,7 +645,7 @@ if __name__ == '__main__':
                         help='gradient clipping [%(default)g]')
     parser.add_argument('--logging_steps', type=int, default=1000,
                         help='num logging steps [%(default)d]')
-    parser.add_argument('--gpus', default='', type=str,
+    parser.add_argument('--gpus', default='0,1', type=str,
                         help='GPUs separated by comma [%(default)s]')
     parser.add_argument('--eval_criterion', type=str, default='recall',
                         choices=['recall', 'accuracy'],
@@ -683,10 +661,15 @@ if __name__ == '__main__':
     parser.add_argument('--smoothing_value', default=1, type=float,
                         help=' smoothing factor when sampling negatives '
                              'according to model distribution')
-    parser.add_argument('--eval_batchsize', type=int, default=512,
+    parser.add_argument('--eval_batch_size', type=int, default=512,
                         help='the batch size')
     parser.add_argument('--mention_bsz', type=int, default=512,
                         help='the batch size')
+    parser.add_argument('--anncur', action='store_true', help = "load anncur ckpt")
+    parser.add_argument('--identity_bert', action = 'store_true',
+                        help='assign same query and key matrix')
+    parser.add_argument('--fixed_initial_weight', action='store_true',
+                        help='fixed weight for identity weight')
     parser.add_argument('--entity_bsz', type=int, default=512,
                         help='the batch size')
     parser.add_argument('--exclude_golds', action='store_true',
@@ -698,8 +681,17 @@ if __name__ == '__main__':
                                  'multi_vector',
                                  'poly',
                                  'extend_multi',
+                                 'extend_multi_dot',
                                  'full'],
                         help='the type of model')
+    parser.add_argument('--token_type', action='store_false', help = "no token type id when specified")
+    parser.add_argument('--energy_model', action='store_true',
+                        help='regularize by bi-encoder objective')
+    parser.add_argument('--model_top', type=str,
+                        help='when loading top model path')
+    parser.add_argument('--attend_to_gold', action='store_true',
+                        help='simple optimizer (constant schedule, '
+                             'no weight decay?')
     parser.add_argument('--num_heads', type=int, default=2,
                         help='the number of multi-head attention in extend_multi ')
     parser.add_argument('--num_layers', type=int, default=2,
@@ -716,6 +708,15 @@ if __name__ == '__main__':
                         help='all entity hidden states path')
     parser.add_argument('--store_en_hiddens', action='store_true',
                         help='store entity hiddens?')
+    parser.add_argument('--batch_first', action='store_false',
+                        help='simple optimizer (constant schedule, '
+                             'no weight decay?')
+    parser.add_argument('--case_based', action='store_true',
+                        help='simple optimizer (constant schedule, '
+                             'no weight decay?')
+    parser.add_argument('--gold_first', action='store_true',
+                        help='simple optimizer (constant schedule, '
+                             'no weight decay?')
     args = parser.parse_args()
     # Set environment variables before all else.
     os.environ['CUDA_VISIBLE_DEVICES'] = args.gpus  # Sets torch.cuda behavior

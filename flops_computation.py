@@ -104,10 +104,10 @@ def main(args):
                                 args.mention_use_codes, args.entity_use_codes,
                                 attention_type, None, False, args, num_heads = args.num_heads, num_layers = args.num_layers)
         if args.type_model != "full":
-            batch = {"mention_token_ids": torch.randint(1,3, (1, 128)),\
-            "mention_masks": torch.randint(1,3, (1, 128)),\
-            "candidate_token_ids": torch.randint(1,3, (1, 256, 128)),\
-            "candidate_masks": torch.randint(1,3, (1, 256, 128)),\
+            batch = {"mention_token_ids": torch.randint(1,3, (4, 128)),\
+            "mention_masks": torch.randint(1,3, (4, 128)),\
+            "candidate_token_ids": torch.randint(1,3, (4, 64, 128)),\
+            "candidate_masks": torch.randint(1,3, (4, 64, 128)),\
             "args": args}
         else:
             batch = {
@@ -194,6 +194,15 @@ if __name__ == '__main__':
     parser.add_argument('--eval_method', default='macro', type=str,
                         choices=['macro', 'micro', 'skip'],
                         help='the evaluate method')
+    parser.add_argument('--case_based', action='store_true',
+                        help='simple optimizer (constant schedule, '
+                             'no weight decay?')
+    parser.add_argument('--gold_first', action='store_true',
+                        help='simple optimizer (constant schedule, '
+                             'no weight decay?')
+    parser.add_argument('--attend_to_gold', action='store_true',
+                        help='simple optimizer (constant schedule, '
+                             'no weight decay?')
     parser.add_argument('--type_model', type=str,
                         default='full',
                         choices=['dual',
@@ -240,6 +249,9 @@ if __name__ == '__main__':
                         default='base',
                         choices=['base', 'large'],
                         help='the type of encoder')
+    parser.add_argument('--batch_first', action='store_false',
+                        help='simple optimizer (constant schedule, '
+                             'no weight decay?')
     parser.add_argument('--num_mention_vecs', type=int, default=8,
                         help='the number of mention vectors ')
     parser.add_argument('--num_entity_vecs', type=int, default=8,

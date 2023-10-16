@@ -171,6 +171,7 @@ class BasicDataset(Dataset):
                 return xs_output[:self.max_num_candidates], label_idx
 
             elif self.args.gold_first:
+                random.shuffle(xs)
                 xs = [y] + [x for x in xs if x != y]  # Target index always 0
                 label_idx = 0
             return xs[:self.max_num_candidates], label_idx
@@ -283,8 +284,8 @@ class UnifiedDataset(BasicDataset):
         # print("Question: {}".format(mention_token))
         # print("Answer:")
         if self.is_training and self.args.distill_training:
-            return {"mention_token_ids": ention_token_ids,"mention_masks": mention_masks, "candidates_token_ids": candidates_token_ids, \
-                "candidates_masks": candidates_masks, "label_idx": torch.tensor(candidates["scores"]), "teacher_scores":label_ids}
+            return {"mention_token_ids": mention_token_ids,"mention_masks": mention_masks, "candidate_token_ids": candidates_token_ids, \
+                "candidate_masks": candidates_masks, "label_idx": label_ids, "teacher_scores":torch.tensor(candidates["scores"])}
         elif self.case_based:
             nearest_mentions = candidates['nearest_mentions']
             nearest_mention_token_ids = torch.tensor([])

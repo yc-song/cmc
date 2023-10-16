@@ -110,6 +110,7 @@ class SoftAttention(nn.Module):
 
 def distillation_loss(student_outputs, teacher_outputs, labels, alpha = 0.5, temperature = 1, valid = False):
     if teacher_outputs is not None:
+        teacher_outputs = teacher_outputs[:,:student_outputs.size(1)]
         teacher_loss = nn.KLDivLoss(reduction='batchmean')(nn.functional.log_softmax(student_outputs/temperature, dim=1),
                              nn.functional.softmax(teacher_outputs/temperature, dim=1))
         # print(student_outputs, nn.functional.log_softmax(student_outputs, dim=1))
@@ -120,6 +121,8 @@ def distillation_loss(student_outputs, teacher_outputs, labels, alpha = 0.5, tem
         )  
         teacher_loss = torch.tensor([0.]).to(device)
     student_loss = nn.CrossEntropyLoss()(student_outputs, labels)
+
+
     loss = alpha*student_loss + (1-alpha)*teacher_loss
     return loss, student_loss, teacher_loss
 
@@ -334,6 +337,10 @@ class UnifiedRetriever(nn.Module):
 
             return scores
         else:  # train\
+            if args.energy_model:
+                self.attention_type= "extend_multi_dot"
+                self.num_mention_vecs = 1
+                self.num_entity_vecs = 1
             B, C, L = candidate_token_ids.size() # e.g. 8, 256, 128
             # B x m x d
             #  get  embeds
@@ -472,11 +479,18 @@ class UnifiedRetriever(nn.Module):
             if args.distill_training:
                 loss, student_loss, teacher_loss = distillation_loss(scores, teacher_scores, labels)
                 return loss, predicts, scores, student_loss, teacher_loss
-
+            elif args.energy_model:
+                candidates_embeds = candidates_embeds.squeeze(-2)
+                retriever_scores = torch.bmm(mention_embeds, candidates_embeds.transpose(2,1)).squeeze(1)
+                retriever_loss = self.loss_fct(retriever_scores, labels)
+                reranker_scores = scores
+                reranker_loss = self.loss_fct(reranker_scores, labels)
+                loss = retriever_loss + reranker_loss
+                retriever_predicts = retriever_scores.argmax(1)
+                return loss, predicts, scores, retriever_loss, reranker_loss, retriever_predicts, retriever_scores
             else:
                 loss = self.loss_fct(scores, labels)
                 return loss, predicts, scores
-
 # class FrozenRetriever(UnifiedRetriever):
 #     def __init__(self, encoder, device, num_codes_mention, num_codes_entity,
 #                  mention_use_codes, entity_use_codes, attention_type,
@@ -641,12 +655,10 @@ class extend_multi(nn.Module):
             for i in range(xs.size(0)):
                 nearest_gold = torch.cat((ys[:i, 0:1, :], ys[i+1:, 0:1, :]))
                 nearest_gold = nearest_gold.expand(-1, args.C_eval, -1)
-
                 ys_new = torch.cat([ys[i:i+1,:,:], nearest_gold], dim = 0)
                 xs_new = torch.cat([xs[i:i+1, :, :], xs[:i, :, :], xs[i+1:, :, :]])
                 input = torch.cat([xs_new, ys_new], dim = 1)
                 attention_result = self.transformerencoder(input)
-                
                 if dot:
                     scores = torch.bmm(attention_result[:,0,:].unsqueeze(1), attention_result[:,args.num_mention_vecs:,:].transpose(2,1))
                     scores = scores.squeeze(-2)
@@ -689,6 +701,7 @@ class extend_multi(nn.Module):
         if dot:
             scores = torch.bmm(attention_result[:,0,:].unsqueeze(1), attention_result[:,args.num_mention_vecs:,:].transpose(2,1))
             scores = scores.squeeze(-2)
+
         else:
             scores = self.linearhead(attention_result[:,args.num_mention_vecs:,:])
             scores = scores.squeeze(-1)
