@@ -2,7 +2,7 @@ from transformers import BertConfig
 import torch
 import torch.nn as nn
 import copy
-from torch.nn import CrossEntropyLoss
+from torch.nn import CrossEntropyLoss, BCELoss
 import torch.nn.functional as F
 import math
 from torch.utils.data import DataLoader
@@ -135,6 +135,7 @@ class UnifiedRetriever(nn.Module):
         self.entity_encoder = copy.deepcopy(encoder)
         self.device = device
         self.loss_fct = CrossEntropyLoss()
+
         self.num_mention_vecs = num_codes_mention
         self.num_entity_vecs = num_codes_entity
         self.evaluate_on = evaluate_on
@@ -640,10 +641,12 @@ class extend_multi(nn.Module):
             for i in range(xs.size(0)):
                 nearest_gold = torch.cat((ys[:i, 0:1, :], ys[i+1:, 0:1, :]))
                 nearest_gold = nearest_gold.expand(-1, args.C_eval, -1)
+
                 ys_new = torch.cat([ys[i:i+1,:,:], nearest_gold], dim = 0)
                 xs_new = torch.cat([xs[i:i+1, :, :], xs[:i, :, :], xs[i+1:, :, :]])
                 input = torch.cat([xs_new, ys_new], dim = 1)
                 attention_result = self.transformerencoder(input)
+                
                 if dot:
                     scores = torch.bmm(attention_result[:,0,:].unsqueeze(1), attention_result[:,args.num_mention_vecs:,:].transpose(2,1))
                     scores = scores.squeeze(-2)
@@ -651,6 +654,28 @@ class extend_multi(nn.Module):
                     scores = self.linearhead(attention_result[:,args.num_mention_vecs:,:])
                     scores = scores.squeeze(-1)
                 scores_overall = torch.cat([scores_overall, scores[0:1]])
+
+            return scores_overall
+        elif self.args.attend_to_itself:
+            scores_overall = torch.tensor([]).to(self.device)
+            for i in range(xs.size(0)):
+                xs_new = xs[i:i+1,:,:]
+                xs_new = xs_new.expand(xs.size(0), -1, -1)
+                ys_new = ys[i:i+1,:,:]
+                ys_new = ys_new.expand(ys.size(0), -1, -1)
+                print(xs_new, xs_new.shape, ys_new, ys_new.shape)
+
+                input = torch.cat([xs_new, ys_new], dim = 1)
+                attention_result = self.transformerencoder(input)
+                
+                if dot:
+                    scores = torch.bmm(attention_result[:,0,:].unsqueeze(1), attention_result[:,args.num_mention_vecs:,:].transpose(2,1))
+                    scores = scores.squeeze(-2)
+                else:
+                    scores = self.linearhead(attention_result[:,args.num_mention_vecs:,:])
+                    scores = scores.squeeze(-1)
+                scores_overall = torch.cat([scores_overall, scores[0:1]])
+
             return scores_overall
         if args.model_top is None and args.token_type :
             token_type_xs = torch.zeros(xs.size(0), xs.size(1)).int().to(self.device)
@@ -667,7 +692,6 @@ class extend_multi(nn.Module):
         else:
             scores = self.linearhead(attention_result[:,args.num_mention_vecs:,:])
             scores = scores.squeeze(-1)
-        
         return scores
     def forward_chunk(self, xs, ys, dot = False, args = None):
         xs = xs.to(self.device) # (batch size, 1, embed_dim)

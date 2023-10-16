@@ -1029,6 +1029,9 @@ if __name__ == '__main__':
     parser.add_argument('--attend_to_gold', action='store_true',
                         help='simple optimizer (constant schedule, '
                              'no weight decay?')
+    parser.add_argument('--attend_to_itself', action='store_true',
+                        help='simple optimizer (constant schedule, '
+                             'no weight decay?')
     parser.add_argument('--batch_first', action='store_false',
                         help='simple optimizer (constant schedule, '
                              'no weight decay?')
@@ -1111,6 +1114,8 @@ if __name__ == '__main__':
     parser.add_argument('--val_random_shuffle', action = 'store_true',
                         help='training only one epoch')
     parser.add_argument('--distill', action='store_true',
+                        help='getting score distribution for distillation purpose')
+    parser.add_argument('--BCELoss', action='store_true',
                         help='getting score distribution for distillation purpose')
     parser.add_argument('--distill_training', action='store_true',
                         help='training smaller model from crossencoder scores')
