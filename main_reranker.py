@@ -8,7 +8,8 @@ from data_reranker import get_loaders, load_zeshel_data, Logger, preprocess_data
 from datetime import datetime
 from reranker import FullRanker
 from retriever import UnifiedRetriever
-from data_retriever import get_all_entity_hiddens
+from main_retriever import evaluate
+from data_retriever import get_all_entity_hiddens, Data
 from transformers import BertTokenizer, BertModel, \
     AdamW, get_linear_schedule_with_warmup, get_constant_schedule
 from tqdm import tqdm
@@ -106,7 +107,7 @@ def configure_optimizer_simple(args, model, num_train_examples):
     return optimizer, scheduler, num_train_steps, num_warmup_steps
 
 
-def micro_eval(model, loader_eval, num_total_unorm, args = None, k = 64):
+def micro_eval(model, loader_eval, num_total_unorm, args = None, k=4):
     model.eval()
     debug = args.debug
     num_total = 0
@@ -576,7 +577,7 @@ def main(args):
     step_num = 0
     trigger_times = 0 # Overfitting
     tr_loss, logging_loss = 0.0, 0.0
-    if args.distill_training:
+    if args.distill_training or args.regularization:
         student_tr_loss = 0.
         teacher_tr_loss = 0.
         student_logging_loss = 0.
@@ -604,6 +605,7 @@ def main(args):
         loader_train = preprocess_data(loader_train, model, args.debug)
         loader_val = preprocess_data(loader_val, model, args.debug)
         loader_test = preprocess_data(loader_test, model, args.debug)
+
     for epoch in range(start_epoch, args.epochs + 1):
         if training_finished: break
         logger.log('\nEpoch %d' % epoch)
@@ -694,7 +696,7 @@ def main(args):
             elif type(result) is dict:
                 loss = result['loss']
                 scores = result['scores']
-            if args.distill_training:
+            if args.distill_training or args.regularization:
                 student_loss = result[3].mean()
                 teacher_loss = result[4].mean()
                 student_tr_loss += student_loss.item()
@@ -734,7 +736,7 @@ def main(args):
                     wandb.log({"average loss": avg_loss, \
                     "learning_rate": optimizer.param_groups[0]['lr'], \
                     "epoch": epoch})
-                    if args.distill_training:
+                    if args.distill_training or args.regularization:
                         avg_teacher_loss = (teacher_tr_loss-teacher_logging_loss)/args.logging_steps
                         avg_student_loss = (student_tr_loss-student_logging_loss)/args.logging_steps
                         wandb.log({"average teacher loss": avg_teacher_loss, \
@@ -824,6 +826,55 @@ def main(args):
             trigger_times += 1
 
         wandb.log({"epoch": epoch, "best acc": best_val_perf})
+        if args.energy_model:
+            logger.log('retriever performance test')
+            logger.log('loading datasets')
+            entity_path = "./data/entities"
+            samples_train = torch.load(entity_path+"/samples_train.pt")
+            samples_heldout_train_seen = torch.load(entity_path+"/samples_heldout_train_seen.pt")
+            samples_heldout_train_unseen = torch.load(entity_path+"/samples_heldout_train_unseen.pt")
+            samples_val = torch.load(entity_path+"/samples_val.pt")
+            samples_test = torch.load(entity_path+"/samples_test.pt")
+            train_doc = torch.load(entity_path+"/train_doc.pt")
+            heldout_train_doc = torch.load(entity_path+"/heldout_train_doc.pt")
+            val_doc = torch.load(entity_path+"/val_doc.pt")
+            test_doc = torch.load(entity_path+"/test_doc.pt")
+            logger.log('loading train entities')
+            all_train_entity_token_ids = torch.load(entity_path+"/all_train_entity_token_ids.pt")
+            all_train_masks = torch.load(entity_path+"/all_train_masks.pt")
+
+            logger.log('loading val and test entities')
+            all_val_entity_token_ids = torch.load(entity_path+"/all_val_entity_token_ids.pt")
+            all_val_masks = torch.load(entity_path+"/all_val_masks.pt")
+            all_test_entity_token_ids = torch.load(entity_path+"/all_test_entity_token_ids.pt")
+            all_test_masks = torch.load(entity_path+"/all_test_masks.pt")
+
+            data = Data(train_doc, val_doc, test_doc, tokenizer,
+            all_train_entity_token_ids, all_train_masks,
+            all_val_entity_token_ids, all_val_masks,
+            all_test_entity_token_ids, all_test_masks, args.max_len,
+            samples_train, samples_val, samples_test)
+            _, val_en_loader, _, _, \
+            val_men_loader, _ = data.get_loaders(args.mention_bsz, args.entity_bsz, False)
+            model.attention_type = "hard_attention"
+            model.num_mention_vecs = 1
+            model.num_entity_vecs = 1
+            model.evaluate_on = True
+            all_val_cands_embeds = get_all_entity_hiddens(val_en_loader, model,
+                                                args.store_en_hiddens,
+                                                    args.en_hidden_path, debug = args.debug)
+            eval_result = evaluate(val_men_loader, model, all_val_cands_embeds,
+                            args.k, device, len(val_en_loader),
+                            args.store_en_hiddens, args.en_hidden_path)
+
+            logger.log(
+                'validation recall {:8.4f}'
+                '|validation accuracy {:8.4f}'.format(
+                eval_result[0],
+                eval_result[1]
+                ))
+            wandb.log({"retriever/val_recall": eval_result[0], "retriever/val_accuracy": eval_result[1]})
+
         if trigger_times > 5: break
         if epoch >= args.epochs: training_finished = True
         if args.training_one_epoch:
@@ -1015,6 +1066,8 @@ if __name__ == '__main__':
                         help='random seed [%(default)d]')
     parser.add_argument('--num_workers', type=int, default=4,
                         help='num workers [%(default)d]')
+    parser.add_argument('--k', type=int, default=64,
+                        help='recall@k when evaluate')
     parser.add_argument('--gpus', type=str, default='0,1',
                         help='GPUs separated by comma [%(default)s]')
     parser.add_argument('--simpleoptim', action='store_true',
@@ -1062,6 +1115,9 @@ if __name__ == '__main__':
                                  'self_fixed_negative',
                                  'self_mixed_negative'],
                         help='fixed: top k, hard: distributionally sampled k')
+    parser.add_argument('--mention_bsz', type=int, default=512,
+                        help='the batch size')
+
     parser.add_argument('--run_id', type = str,
                         help='run id when resuming the run')
     parser.add_argument('--training_finished', action = 'store_true',
@@ -1114,12 +1170,19 @@ if __name__ == '__main__':
                         help='getting score distribution for distillation purpose')
     parser.add_argument('--distill_training', action='store_true',
                         help='training smaller model from crossencoder scores')
+    parser.add_argument('--energy_model', action='store_true',
+                        help='regularize by bi-encoder objective')
+    parser.add_argument('--regularization', action='store_true',
+                        help='regularize by bi-encoder score distribution')
     parser.add_argument('--bert_lr', type=float, default=1e-5,
                         help='the batch size')
     parser.add_argument('--weight_lr', type=float, default=1e-2,
                         help='the batch size')
     parser.add_argument('--num_sampled', type=int, default=256,
                         help='the batch size')
+    parser.add_argument('--max_len', type=int, default=128,
+                        help='max length of the mention input '
+                            'and the entity input')
     parser.add_argument('--final_k', type=int, default=64,
                         help='the batch size')
     parser.add_argument('--mlp_layers', type=str, default="1536",
