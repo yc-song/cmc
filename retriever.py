@@ -108,17 +108,17 @@ class SoftAttention(nn.Module):
             bsz, C, l_y).sum(-1)
         return scores
 
-def distillation_loss(student_outputs, teacher_outputs, labels, alpha = 0.5, temperature = 1, valid = False):
+def distillation_loss(student_outputs, teacher_outputs, labels, alpha = 0.8, temperature = 1, valid = False):
+    device = torch.device(
+            "cuda" if torch.cuda.is_available() else "cpu"
+        )  
     if teacher_outputs is not None:
-        teacher_outputs = teacher_outputs[:,:student_outputs.size(1)]
+        teacher_outputs = teacher_outputs[:,:student_outputs.size(1)].to(device)
         teacher_loss = nn.KLDivLoss(reduction='batchmean')(nn.functional.log_softmax(student_outputs/temperature, dim=1),
                              nn.functional.softmax(teacher_outputs/temperature, dim=1))
         # print(student_outputs, nn.functional.log_softmax(student_outputs, dim=1))
         # print(teacher_outputs, nn.functional.softmax(teacher_outputs, dim=1))
     else: 
-        device = torch.device(
-            "cuda" if torch.cuda.is_available() else "cpu"
-        )  
         teacher_loss = torch.tensor([0.]).to(device)
     student_loss = nn.CrossEntropyLoss()(student_outputs, labels)
 
