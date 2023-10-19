@@ -10,13 +10,13 @@
 #SBATCH --partition=P2
 
 
-iterations=4 # 총 몇 번이나 연속으로 돌릴 것인지
+iterations=3 # 총 몇 번이나 연속으로 돌릴 것인지
 # jobid=$(sbatch --parsable run.sh)
 
 # jobid=$(sbatch --parsable reranker_extend.sh)
-jobid=33774
+jobid=46766
 for((i=0; i<$iterations; i++)); do           
     dependency="afterany:${jobid}"
     echo "dependency: $dependency"
-    jobid=$(sbatch --parsable --dependency=$dependency retriever_extend.sh)
+    jobid=$(sbatch --parsable --dependency=$dependency reranker_extend.sh)
 done

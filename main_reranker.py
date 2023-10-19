@@ -148,6 +148,8 @@ def micro_eval(model, loader_eval, num_total_unorm, args = None, k=4):
                     candidate['candidates'] = list(batch[4][i])
                     candidate['scores'] = scores[i].tolist()
                     cands.append(candidate)
+            if args.test_at_first:
+                print(batch, scores)
         if args.distill:
             with open(os.path.join(args.save_dir, 'candidates_train_distillation.json'), 'w') as f:
                 for item in cands:
@@ -605,7 +607,6 @@ def main(args):
         loader_train = preprocess_data(loader_train, model, args.debug)
         loader_val = preprocess_data(loader_val, model, args.debug)
         loader_test = preprocess_data(loader_test, model, args.debug)
-
     for epoch in range(start_epoch, args.epochs + 1):
         if training_finished: break
         logger.log('\nEpoch %d' % epoch)
@@ -682,6 +683,12 @@ def main(args):
         #     newline=False))
         # wandb.log({"unnormalized acc": val_result['acc_unorm'], "normalized acc": val_result['acc_norm']
         #     ,"val_loss": val_result['val_loss'], "epoch": epoch})
+        if args.test_at_first:
+            if args.eval_method == 'micro':
+                val_result = micro_eval(model, loader_val, num_val_samples, args)
+            elif args.eval_method == 'macro':
+                val_result = macro_eval(model, loader_val, num_val_samples, args)
+
         print('Begin Training')
   
         for batch_idx, batch in tqdm(enumerate(loader_train), total = len(loader_train)):  # Shuffled every epoch
@@ -881,6 +888,55 @@ def main(args):
             break
         
     if training_finished:
+        if args.energy_model:
+            logger.log('retriever performance test')
+            logger.log('loading datasets')
+            entity_path = "./data/entities"
+            samples_train = torch.load(entity_path+"/samples_train.pt")
+            samples_heldout_train_seen = torch.load(entity_path+"/samples_heldout_train_seen.pt")
+            samples_heldout_train_unseen = torch.load(entity_path+"/samples_heldout_train_unseen.pt")
+            samples_val = torch.load(entity_path+"/samples_val.pt")
+            samples_test = torch.load(entity_path+"/samples_test.pt")
+            train_doc = torch.load(entity_path+"/train_doc.pt")
+            heldout_train_doc = torch.load(entity_path+"/heldout_train_doc.pt")
+            val_doc = torch.load(entity_path+"/val_doc.pt")
+            test_doc = torch.load(entity_path+"/test_doc.pt")
+            logger.log('loading train entities')
+            all_train_entity_token_ids = torch.load(entity_path+"/all_train_entity_token_ids.pt")
+            all_train_masks = torch.load(entity_path+"/all_train_masks.pt")
+
+            logger.log('loading val and test entities')
+            all_val_entity_token_ids = torch.load(entity_path+"/all_val_entity_token_ids.pt")
+            all_val_masks = torch.load(entity_path+"/all_val_masks.pt")
+            all_test_entity_token_ids = torch.load(entity_path+"/all_test_entity_token_ids.pt")
+            all_test_masks = torch.load(entity_path+"/all_test_masks.pt")
+
+            data = Data(train_doc, val_doc, test_doc, tokenizer,
+            all_train_entity_token_ids, all_train_masks,
+            all_val_entity_token_ids, all_val_masks,
+            all_test_entity_token_ids, all_test_masks, args.max_len,
+            samples_train, samples_val, samples_test)
+            _, val_en_loader, _, _, \
+            val_men_loader, _ = data.get_loaders(args.mention_bsz, args.entity_bsz, False)
+            model.attention_type = "hard_attention"
+            model.num_mention_vecs = 1
+            model.num_entity_vecs = 1
+            model.evaluate_on = True
+            all_val_cands_embeds = get_all_entity_hiddens(val_en_loader, model,
+                                                args.store_en_hiddens,
+                                                    args.en_hidden_path, debug = args.debug)
+            eval_result = evaluate(val_men_loader, model, all_val_cands_embeds,
+                            args.k, device, len(val_en_loader),
+                            args.store_en_hiddens, args.en_hidden_path)
+
+            logger.log(
+                'validation recall {:8.4f}'
+                '|validation accuracy {:8.4f}'.format(
+                eval_result[0],
+                eval_result[1]
+                ))
+            wandb.log({"retriever/val_recall": eval_result[0], "retriever/val_accuracy": eval_result[1]})
+
         loader_train, loader_val, loader_test, \
         num_val_samples, num_test_samples = get_loaders(data, tokenizer, args.L,
                                                         args.C, args.B,
@@ -928,73 +984,73 @@ def main(args):
                 "valid/micro_unnormalized_acc(cands {})".format(str(args.C_eval)): sum(val_result['num_correct'])/sum(val_result['num_total_unorm']),\
                 "valid/micro_normalized_acc(cands {})".format(str(args.C_eval)): sum(val_result['num_correct'])/sum(val_result['num_total_norm'])})
 
-        # print('start evaluation on test set')
-        # if loader_test is None:
-        #     _, _, loader_test, \
-        #     _, num_test_samples = get_loaders(data, tokenizer, args.L,
-        #                                                     args.C, args.B,
-        #                                                     args.num_workers,
-        #                                                     args.inputmark,
-        #                                                     args.C_eval,
-        #                                                     use_full_dataset,
-        #                                                     macro_eval_mode, args = args)
-        # if args.eval_method == 'micro':
-        #     test_result = micro_eval(model, loader_test, num_test_samples, args)
-        # elif args.eval_method == 'macro':
-        #     test_result = macro_eval(model, loader_test, num_test_samples, args)
+        print('start evaluation on test set')
+        if loader_test is None:
+            _, _, loader_test, \
+            _, num_test_samples = get_loaders(data, tokenizer, args.L,
+                                                            args.C, args.B,
+                                                            args.num_workers,
+                                                            args.inputmark,
+                                                            args.C_eval,
+                                                            use_full_dataset,
+                                                            macro_eval_mode, args = args)
+        if args.eval_method == 'micro':
+            test_result = micro_eval(model, loader_test, num_test_samples, args)
+        elif args.eval_method == 'macro':
+            test_result = macro_eval(model, loader_test, num_test_samples, args)
 
-        # logger.log('\nDone training | training time {:s} | '
-        #         'test acc unormalized {:8.4f} ({}/{})|'
-        #         'test acc normalized {:8.4f} ({}/{})'.format(str(
-        # datetime.now() - start_time),
-        # test_result['acc_unorm'],
-        # test_result['num_correct'],
-        # num_test_samples,
-        # test_result['acc_norm'],
-        # test_result['num_correct'],
-        # test_result['num_total_norm']))
+        logger.log('\nDone training | training time {:s} | '
+                'test acc unormalized {:8.4f} ({}/{})|'
+                'test acc normalized {:8.4f} ({}/{})'.format(str(
+        datetime.now() - start_time),
+        test_result['acc_unorm'],
+        test_result['num_correct'],
+        num_test_samples,
+        test_result['acc_norm'],
+        test_result['num_correct'],
+        test_result['num_total_norm']))
 
-        # wandb.log({"test_unnormalized acc": test_result['acc_unorm'], "test_normalized acc": test_result['acc_norm']})
+        wandb.log({"test_unnormalized acc": test_result['acc_unorm'], "test_normalized acc": test_result['acc_norm']})
 
-        # print('start evaluation on >64 candidates')
-        # C_eval_list = [128,256,512]
-        # for C_eval_elem in C_eval_list:
-        #     print("C_eval", C_eval_elem)
-        #     args.C_eval = C_eval_elem
-        #     loader_train, loader_val, loader_test, \
-        #     num_val_samples, num_test_samples = get_loaders(data, tokenizer, args.L,
-        #                                                 args.C, args.B,
-        #                                                 args.num_workers,
-        #                                                 args.inputmark,
-        #                                                 args.C_eval,
-        #                                                 use_full_dataset,
-        #                                                 macro_eval_mode, args = args)
-        #     if args.distill:
-        #         train_result = micro_eval(model, loader_train, num_val_samples, args, mode = "train")
-        #         print(train_result)
-        #     if args.eval_method == 'micro':
-        #         val_result = micro_eval(model, loader_val, num_val_samples, args)
-        #     elif args.eval_method == 'macro':
-        #         val_result = macro_eval(model, loader_val, num_val_samples, args)
-        #     print('C_eval: {}'.format(C_eval_elem))
-        #     print('val acc unormalized  {:8.4f} ({}/{})|'
-        #             'val acc normalized  {:8.4f} ({}/{})|'
-        #             'val recall {:8.4f} ({}/{}) '.format(
-        #         val_result['acc_unorm'],
-        #         val_result['num_correct'],
-        #         num_val_samples,
-        #         val_result['acc_norm'],
-        #         val_result['num_correct'],
-        #         val_result['num_total_norm'],
-        #         val_result['recall'],
-        #         val_result['recall_correct'],
-        #         num_val_samples,
-        #         newline=False))
-        #     wandb.log({"valid/unnormalized acc (cands {})".format(str(C_eval_elem)): val_result['acc_unorm'], \
-        #         "valid/normalized acc (cands {})".format(str(C_eval_elem)): val_result['acc_norm'],\
-        #         "valid/micro_unnormalized_acc(cands {})".format(str(C_eval_elem)): sum(val_result['num_correct'])/sum(val_result['num_total_unorm']),\
-        #         "valid/micro_normalized_acc(cands {})".format(str(C_eval_elem)): sum(val_result['num_correct'])/sum(val_result['num_total_norm']),
-        #         "valid/recall(cands {})".format(str(C_eval_elem)): val_result['recall']})
+        print('start evaluation on >64 candidates')
+        C_eval_list = [128,256,512]
+        for C_eval_elem in C_eval_list:
+            print("C_eval", C_eval_elem)
+            args.C_eval = C_eval_elem
+            loader_train, loader_val, loader_test, \
+            num_val_samples, num_test_samples = get_loaders(data, tokenizer, args.L,
+                                                        args.C, args.B,
+                                                        args.num_workers,
+                                                        args.inputmark,
+                                                        args.C_eval,
+                                                        use_full_dataset,
+                                                        macro_eval_mode, args = args)
+            if args.distill:
+                train_result = micro_eval(model, loader_train, num_val_samples, args, mode = "train")
+                print(train_result)
+            if args.eval_method == 'micro':
+                val_result = micro_eval(model, loader_val, num_val_samples, args)
+            elif args.eval_method == 'macro':
+                val_result = macro_eval(model, loader_val, num_val_samples, args)
+            print('C_eval: {}'.format(C_eval_elem))
+            print('val acc unormalized  {:8.4f} ({}/{})|'
+                    'val acc normalized  {:8.4f} ({}/{})|'
+                    'val recall {:8.4f} ({}/{}) '.format(
+                val_result['acc_unorm'],
+                val_result['num_correct'],
+                num_val_samples,
+                val_result['acc_norm'],
+                val_result['num_correct'],
+                val_result['num_total_norm'],
+                val_result['recall'],
+                val_result['recall_correct'],
+                num_val_samples,
+                newline=False))
+            wandb.log({"valid/unnormalized acc (cands {})".format(str(C_eval_elem)): val_result['acc_unorm'], \
+                "valid/normalized acc (cands {})".format(str(C_eval_elem)): val_result['acc_norm'],\
+                "valid/micro_unnormalized_acc(cands {})".format(str(C_eval_elem)): sum(val_result['num_correct'])/sum(val_result['num_total_unorm']),\
+                "valid/micro_normalized_acc(cands {})".format(str(C_eval_elem)): sum(val_result['num_correct'])/sum(val_result['num_total_norm']),
+                "valid/recall(cands {})".format(str(C_eval_elem)): val_result['recall']})
         if args.type_model != "full":
             print('recall eval')
             args.C_eval = 1024
@@ -1043,6 +1099,8 @@ if __name__ == '__main__':
     parser.add_argument('--eval_batch_size', type=int, default=8,
                         help='evaluation batch size [%(default)d]')
 
+    parser.add_argument('--alpha', type=float, default=0.5,
+                        help='coefficient for multi-loss')
     parser.add_argument('--lr', type=float, default=2e-5,
                         help='initial learning rate [%(default)g]')
     parser.add_argument('--warmup_proportion', type=float, default=0.1,
@@ -1077,6 +1135,12 @@ if __name__ == '__main__':
                         help='simple optimizer (constant schedule, '
                              'no weight decay?')
     parser.add_argument('--gold_first', action='store_true',
+                        help='simple optimizer (constant schedule, '
+                             'no weight decay?')
+    parser.add_argument('--test_at_first', action='store_true',
+                        help='simple optimizer (constant schedule, '
+                             'no weight decay?')
+    parser.add_argument('--order_changed', action='store_true',
                         help='simple optimizer (constant schedule, '
                              'no weight decay?')
     parser.add_argument('--attend_to_gold', action='store_true',
