@@ -171,7 +171,6 @@ class BasicDataset(Dataset):
                 return xs_output[:self.max_num_candidates], label_idx
 
             elif self.args.gold_first:
-                random.shuffle(xs)
                 xs = [y] + [x for x in xs if x != y]  # Target index always 0
                 label_idx = 0
             return xs[:self.max_num_candidates], label_idx

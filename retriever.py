@@ -109,6 +109,7 @@ class SoftAttention(nn.Module):
         return scores
 
 def distillation_loss(student_outputs, teacher_outputs, labels, alpha = 0.5, temperature = 1, valid = False):
+    assert 0<=alpha and alpha<=1
     if teacher_outputs is not None:
         teacher_outputs = teacher_outputs[:,:student_outputs.size(1)]
         teacher_loss = nn.KLDivLoss(reduction='batchmean')(nn.functional.log_softmax(student_outputs/temperature, dim=1),
@@ -476,7 +477,7 @@ class UnifiedRetriever(nn.Module):
                 candidate_probs = candidate_probs.to(self.device)
                 scores[:, 1:] -= ((C - 1) * candidate_probs).log()
             if args.distill_training:
-                loss, student_loss, teacher_loss = distillation_loss(scores, teacher_scores, labels)
+                loss, student_loss, teacher_loss = distillation_loss(scores, teacher_scores, labels, args.alpha)
                 return loss, predicts, scores, student_loss, teacher_loss
             elif args.energy_model:
                 candidates_embeds = candidates_embeds.squeeze(-2)
@@ -669,6 +670,26 @@ class extend_multi(nn.Module):
                 scores_overall = torch.cat([scores_overall, scores[0:1]])
 
             return scores_overall
+        elif self.args.order_changed:
+            scores_overall = torch.tensor([]).to(self.device)
+            for i in range(xs.size(0)):
+                xs_new = torch.cat([xs[i:i+1, :, :], xs[:i, :, :], xs[i+1:, :, :]])
+                ys_new = torch.cat([ys[i:i+1, :, :], ys[:i, :, :], ys[i+1:, :, :]])
+                temp = ys_new[0,0,:].clone()
+                ys_new[0,0,:] = ys_new[0,-1,:]
+                ys_new[0,-1,:] = temp
+                input = torch.cat([xs_new, ys_new], dim = 1)
+                attention_result = self.transformerencoder(input)
+                
+                if dot:
+                    scores = torch.bmm(attention_result[:,0,:].unsqueeze(1), attention_result[:,args.num_mention_vecs:,:].transpose(2,1))
+                    scores = scores.squeeze(-2)
+                else:
+                    scores = self.linearhead(attention_result[:,args.num_mention_vecs:,:])
+                    scores = scores.squeeze(-1)
+                scores_overall = torch.cat([scores_overall, scores[0:1]])                
+
+            return scores_overall            
         if args.model_top is None and args.token_type :
             token_type_xs = torch.zeros(xs.size(0), xs.size(1)).int().to(self.device)
             token_embedding_xs = self.token_type_embeddings(token_type_xs)
