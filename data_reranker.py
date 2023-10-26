@@ -28,10 +28,16 @@ class BasicDataset(Dataset):
         self.indicate_mention_boundaries = indicate_mention_boundaries
         self.MENTION_START = '[unused0]'
         self.MENTION_END = '[unused1]'
+        self.args = args
         self.samples = self.cull_samples(samples)
         if args.case_based:
             self.samples_case_based = samples 
-        self.args = args
+        # ToDo: cull_samples에서 return되는 타입 파악.
+        # 아니면 그냥 예외처리 (16개만)
+        if args.nearest:
+            self.mention_ids = dict()
+            for item in self.samples[0]:
+                self.mention_ids[item['mention_id']]=item
 
     def __len__(self):
         return len(self.samples[0])
@@ -51,18 +57,21 @@ class BasicDataset(Dataset):
         if self.is_training:
             # At training time we can include target if not already included.
             if not y in xs:
-                xs.append(y)
+                xs = [y] + [x for x in xs if x != y] 
+                label_idx = 0
             if not self_negs_again:
                 # At first, training set == entire set
                 if args.type_cands == 'self_negative' or args.type_cands == "self_fixed_negative"\
                 or args.type_cands == "self_mixed_negative":
-                    return xs[:args.num_sampled]
+                    label_idx = xs.index(y)
+                    return xs[:args.num_sampled], label_idx
                 elif args.type_cands == 'fixed_negative':
                     pass
                 elif args.type_cands == 'random_negative':
-                    xs = xs[:self.max_num_candidates]
-                    random.shuffle(xs)
-                    label_idx = xs.index(y)
+                        xs = xs[:self.max_num_candidates]
+                        random.shuffle(xs)
+                        label_idx = xs.index(y)
+
                 elif args.type_cands == 'mixed_negative':
                     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
                     num_fixed = int(self.max_num_candidates * args.cands_ratio)
@@ -121,6 +130,11 @@ class BasicDataset(Dataset):
                     hard_cands = torch.tensor([num_fixed]) + distribution_sample(probs, num_hards, device).squeeze(0)
                     hard_xs = xs[hard_cands.squeeze(0)]
                     xs = np.concatenate((fixed_xs, hard_xs))
+            if args.nearest:
+                xs_nearest = candidates['nearest_candidates']
+                m_nearest = candidates['nearest_mentions']
+
+                return xs[:self.max_num_candidates], label_idx, xs_nearest[:self.max_num_candidates], m_nearest[:self.max_num_candidates]           
             return xs[:self.max_num_candidates], label_idx
         else:
             # At test time we assume candidates already include target.
@@ -181,13 +195,21 @@ class BasicDataset(Dataset):
 
     def cull_samples(self, samples):
         self.num_samples_original = len(samples[0])
-        # if self.is_training:
-        #     return samples
-        # else:
-        mentions = [mc for mc in samples[0] if mc['label_document_id'] in
-                    samples[1][mc['mention_id']]['candidates'][
-                    :self.max_num_candidates]]
-        return mentions, samples[1]
+        if self.args.nearest:
+            if self.is_training:
+                mentions = [mc for mc in samples[0]]
+                return mentions, samples[1]
+
+            else:
+                mentions = [mc for mc in samples[0] if mc['label_document_id'] in
+                            samples[1][mc['mention_id']]['candidates'][
+                            :self.max_num_candidates]]
+                return mentions, samples[1]
+        else: 
+            mentions = [mc for mc in samples[0] if mc['label_document_id'] in
+                            samples[1][mc['mention_id']]['candidates'][
+                            :self.max_num_candidates]]
+            return mentions, samples[1]
 
     def get_mention_window(self, mention):
         # Get "enough" context from space-tokenized text.
@@ -254,8 +276,46 @@ class UnifiedDataset(BasicDataset):
         mention_token_ids = torch.tensor(mention_encoded_dict['input_ids'])
         mention_masks = torch.tensor(mention_encoded_dict['attention_mask'])
 
+        if self.args.nearest: 
+            candidate_document_ids, label_ids, nearest_document_ids, nearest_mention_ids = self.prepare_candidates(mention, candidates, self.args, self.self_negs_again)
+            nearest_token_ids = torch.zeros((len(nearest_document_ids),len(nearest_document_ids[0]),
+                                            self.max_len))
+            nearest_masks = torch.zeros((len(nearest_document_ids),len(nearest_document_ids[0]),
+                                            self.max_len))
+            nearest_tokens = [[None for x in range(len(nearest_document_ids[0]))] for y in range(len(nearest_document_ids))]
+            for i in range(len(nearest_document_ids)):
+                for j in range(len(nearest_document_ids[0])):
 
-        candidate_document_ids, label_ids = self.prepare_candidates(mention, candidates, self.args, self.self_negs_again)
+                    
+                    candidate_window, candidate_token = self.get_candidate_prefix(nearest_document_ids[i][j])
+                    candidate_dict = self.tokenizer.encode_plus(candidate_window,
+                                                                add_special_tokens=True,
+                                                                max_length=self.max_len,
+                                                                pad_to_max_length=True,
+                                                                truncation=True)
+                    nearest_token_ids[i][j] = torch.tensor(candidate_dict['input_ids'])
+                    nearest_masks[i][j] = torch.tensor(candidate_dict['attention_mask'])
+                    nearest_tokens[i][j] = candidate_token
+            nearest_mention_token_ids = torch.zeros((len(nearest_mention_ids), self.max_len))
+            nearest_mention_masks = torch.zeros((len(nearest_mention_ids), self.max_len))
+            nearest_mention_tokens =  [None]*len(nearest_mention_ids)
+
+
+            for i, mention_id in enumerate(nearest_mention_ids):
+                nearest_mention= self.mention_ids[mention_id]
+                mention_window = self.get_mention_window(nearest_mention)[0]
+                nearest_mention_tokens[i]  = self.documents[nearest_mention['context_document_id']]['text']
+                mention_encoded_dict = self.tokenizer.encode_plus(mention_window,
+                                                                add_special_tokens=True,
+                                                                max_length=self.max_len,
+                                                                pad_to_max_length=True,
+                                                                truncation=True)
+                nearest_mention_token_ids[i] = torch.tensor(mention_encoded_dict['input_ids'])
+                nearest_mention_masks[i] = torch.tensor(mention_encoded_dict['attention_mask'])
+
+        else:
+            candidate_document_ids, label_ids = self.prepare_candidates(mention, candidates, self.args, self.self_negs_again)
+
         candidates_token_ids = torch.zeros((len(candidate_document_ids),
                                             self.max_len))
         candidates_masks = torch.zeros((len(candidate_document_ids),
@@ -282,9 +342,17 @@ class UnifiedDataset(BasicDataset):
         #     print("Document {}: {}".format(i, elem))
         # print("Question: {}".format(mention_token))
         # print("Answer:")
+
         if self.is_training and self.args.distill_training:
-            return {"mention_token_ids": mention_token_ids,"mention_masks": mention_masks, "candidate_token_ids": candidates_token_ids, \
+            if self.args.nearest:
+                return {"mention_token_ids": mention_token_ids,"mention_masks": mention_masks, "candidate_token_ids": candidates_token_ids, \
+                "candidate_masks": candidates_masks, "label_idx": label_ids, "teacher_scores":torch.tensor(candidates["scores"]),\
+                "nearest_candidate_token_ids": nearest_token_ids, "nearest_candidate_masks": nearest_masks,\
+                "nearest_mention_token_ids": nearest_mention_token_ids, "nearest_mention_masks": nearest_mention_masks}
+            else:
+                return {"mention_token_ids": mention_token_ids,"mention_masks": mention_masks, "candidate_token_ids": candidates_token_ids, \
                 "candidate_masks": candidates_masks, "label_idx": label_ids, "teacher_scores":torch.tensor(candidates["scores"])}
+
         elif self.case_based:
             nearest_mentions = candidates['nearest_mentions']
             nearest_mention_token_ids = torch.tensor([])
@@ -318,7 +386,13 @@ class UnifiedDataset(BasicDataset):
                 "nearest_mention_token_ids": nearest_mention_token_ids, "nearest_mention_masks": nearest_mention_masks, \
                 "nearest_label_token_ids": label_token_ids, "nearest_label_masks": label_masks}
         else:
-            return {"mention_token_ids": mention_token_ids, "mention_masks": mention_masks, "candidate_token_ids": candidates_token_ids, \
+            if self.args.nearest:
+                return {"mention_token_ids": mention_token_ids, "mention_masks": mention_masks, "candidate_token_ids": candidates_token_ids, \
+                "candidate_masks": candidates_masks, "label_idx": label_ids,\
+                "nearest_candidate_token_ids": nearest_token_ids, "nearest_candidate_masks": nearest_masks,\
+                "nearest_mention_token_ids": nearest_mention_token_ids, "nearest_mention_masks": nearest_mention_masks}
+            else:
+                return {"mention_token_ids": mention_token_ids, "mention_masks": mention_masks, "candidate_token_ids": candidates_token_ids, \
                 "candidate_masks": candidates_masks, "label_idx": label_ids}
 
 class FullDataset(BasicDataset):
@@ -437,7 +511,7 @@ def get_loaders(data, tokenizer, max_len, max_num_candidates, batch_size,
             val_num_samples, test_num_samples)
 
 
-def load_zeshel_data(data_dir, cands_dir, macro_eval=True, debug = False, scores = None):
+def load_zeshel_data(data_dir, cands_dir, macro_eval=True, debug = False, scores = None, nearest = False):
     """
 
     :param data_dir: train_data_dir if args.train else eval_data_dir
@@ -467,7 +541,7 @@ def load_zeshel_data(data_dir, cands_dir, macro_eval=True, debug = False, scores
                 domains.add(field['corpus'])
         return list(domains)
 
-    def load_mention_candidates_pairs(part, domain=None, in_domain=False, debug = False, scores = None):
+    def load_mention_candidates_pairs(part, domain=None, in_domain=False, debug = False, scores = None, nearest = False):
         mentions = []
         with open(os.path.join(men_path, '%s.json' % part)) as f:
             for i, line in enumerate(f):
@@ -489,10 +563,27 @@ def load_zeshel_data(data_dir, cands_dir, macro_eval=True, debug = False, scores
                     field['scores'] = scores[i]
 
                 candidates[field['mention_id']] = field
+        if nearest:
+            with open(os.path.join(cands_dir,
+                               'entities_%s.json' % part)) as f:
+                nearest_candidates = dict()
+                for i, line in enumerate(f):
+                    field = json.loads(line)
+                    nearest_candidates[field['entity_id']] = field['nearest_entities']
+            with open(os.path.join(cands_dir,
+                               'mentions_%s.json' % part)) as f:
+                for i, line in enumerate(f):
+                    field = json.loads(line)
+                    candidates[field['mention_id']]['nearest_mentions'] = field['nearest_mentions']
+                    for i, candidate in enumerate(candidates[field['mention_id']]['candidates']):
+                        if i == 0: 
+                            candidates[field['mention_id']]['nearest_candidates'] = [[None] for y in range(len(candidates[field['mention_id']]['candidates']))]
+                        candidates[field['mention_id']]['nearest_candidates'][i] = nearest_candidates[candidate]
         return mentions, candidates
+    
 
     print('start getting train pairs')
-    samples_train = load_mention_candidates_pairs('train', debug = debug, scores = scores)
+    samples_train = load_mention_candidates_pairs('train', debug = debug, scores = scores, nearest = nearest)
     print('start getting val and test pairs')
     if macro_eval:
         if scores is None:
@@ -503,11 +594,11 @@ def load_zeshel_data(data_dir, cands_dir, macro_eval=True, debug = False, scores
             samples_test = []
             print('start getting val pairs')
             for val_domain in val_domains:
-                pair = load_mention_candidates_pairs('val', val_domain, True, debug)
+                pair = load_mention_candidates_pairs('val', val_domain, True, debug, nearest = nearest)
                 samples_val.append(pair)
             print('start getting test pairs')
             for test_domain in test_domains:
-                pair = load_mention_candidates_pairs('test', test_domain, True, debug)
+                pair = load_mention_candidates_pairs('test', test_domain, True, debug, nearest = nearest)
                 samples_test.append(pair)
         else:
             samples_val = None

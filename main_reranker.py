@@ -9,6 +9,7 @@ from datetime import datetime
 from reranker import FullRanker
 from retriever import UnifiedRetriever
 from main_retriever import evaluate
+from scipy.stats import rankdata
 from data_retriever import get_all_entity_hiddens, Data
 from transformers import BertTokenizer, BertModel, \
     AdamW, get_linear_schedule_with_warmup, get_constant_schedule
@@ -107,13 +108,22 @@ def configure_optimizer_simple(args, model, num_train_examples):
     return optimizer, scheduler, num_train_steps, num_warmup_steps
 
 
-def micro_eval(model, loader_eval, num_total_unorm, args = None, k=4):
+def micro_eval(model, loader_eval, num_total_unorm, args = None, k=4, mode = None):
+    if args.store_reranker_score: assert mode is not None
+
     model.eval()
     debug = args.debug
     num_total = 0
     num_correct = 0
     loss_total = 0
     recall_correct = 0
+    mrr_total = 0
+    if args.store_reranker_score:
+        cands = []
+        with open(os.path.join(args.cands_dir, 'candidates_%s.json' % mode), 'r') as f:
+            for line in f:
+                cands.append(json.loads(line))
+
     if args.distill: cands = []
     with torch.no_grad():
         for step, batch in tqdm(enumerate(loader_eval), total = len(loader_eval)):
@@ -122,8 +132,8 @@ def micro_eval(model, loader_eval, num_total_unorm, args = None, k=4):
                 batch[-1] = np.array(batch[-1]).T
             if debug and step > 50: break
             # try:
-            batch["args"] = args
-            result = model.forward(**batch)
+            # batch["args"] = args
+            result = model.forward(**batch, args = args)
             label_ids = batch["label_idx"]
             if type(result) is dict:
                 preds = result['predictions']
@@ -133,9 +143,22 @@ def micro_eval(model, loader_eval, num_total_unorm, args = None, k=4):
                 preds = result[1]
                 loss_total += result[0].sum()
                 scores = result[2]
+            if args.store_reranker_score:
+                for i in range(scores.size(0)):
+                    cands[step*scores.size(0)+i]['reranker_scores'] = scores[i].tolist()
+            # if args.debug:
+            #     scores = torch.zeros_like(scores)
+            #     scores[:, 0]=1
+            #     preds = torch.zeros_like(scores)
+            #     label_ids = torch.zeros_like(label_ids).int()
             num_total += len(preds)
             num_correct += (preds.cpu() == label_ids).sum().item()
             recall_correct += (scores.topk(k, dim=1)[1].cpu()==label_ids.unsqueeze(-1)).sum().item()
+            # getting mrr
+            # after ranking scores, finding out the rank of lables
+            idx_array = rankdata(-scores.cpu().detach().numpy(), axis = 1, method = 'min')
+            rank = np.take_along_axis(idx_array, label_ids[:, None].cpu().detach().numpy(), axis=1)
+            mrr_total += np.sum(1/rank)
             # except:
             #     for i in range(4):
             #         print(step, batch[i].shape)
@@ -151,21 +174,29 @@ def micro_eval(model, loader_eval, num_total_unorm, args = None, k=4):
             if args.test_at_first:
                 print(batch, scores)
         if args.distill:
-            with open(os.path.join(args.save_dir, 'candidates_train_distillation.json'), 'w') as f:
+            with open(os.path.join(args.cands_dir, 'candidates_train_distillation.json'), 'w') as f:
                 for item in cands:
                     f.write('%s\n' % json.dumps(item))
+    if args.store_reranker_score:
+        with open(os.path.join(args.cands_dir, 'candidates_%s_w_reranker_score.json' % mode), 'w') as f:
+            for item in cands:
+                f.write('%s\n' % json.dumps(item))
     loss_total /= len(loader_eval)
     model.train()
     acc_norm = num_correct / num_total * 100
+    if args.debug: num_total_unorm = num_total
+    print(num_total_unorm)
     acc_unorm = num_correct / num_total_unorm * 100
     recall = recall_correct / num_total_unorm * 100
+    mrr = mrr_total / num_total_unorm * 100
     return {'acc_norm': acc_norm, 'acc_unorm': acc_unorm,
             'num_correct': num_correct,
             'num_total_norm': num_total,
             'num_total_unorm': num_total_unorm,
             'val_loss': loss_total,
             "recall": recall,
-            "recall_correct": recall_correct}
+            "recall_correct": recall_correct,
+            'mrr': mrr}
 
 
 def macro_eval(model, val_loaders, num_total_unorm, args = None):
@@ -177,6 +208,8 @@ def macro_eval(model, val_loaders, num_total_unorm, args = None):
     num_total_norm = []
     loss_total = 0
     recall = 0
+    mrr_total = 0
+    mrr_list = []
     recall_correct_list = []
     for i in tqdm(range(len(val_loaders))):
         val_loader = val_loaders[i]
@@ -190,10 +223,14 @@ def macro_eval(model, val_loaders, num_total_unorm, args = None):
         num_total_norm.append(micro_results['num_total_norm'])
         recall += micro_results['recall']
         recall_correct_list.append(micro_results['recall_correct'])
+        mrr_total += micro_results['mrr']
+        mrr_list.append(micro_results['mrr'])
     acc_norm /= len(val_loaders)
     acc_unorm /= len(val_loaders)
     loss_total /= len(val_loaders)
     recall /= len(val_loaders)
+    mrr_total /= len(val_loaders)
+
     model.train()
     return {'acc_norm': acc_norm, 'acc_unorm': acc_unorm,
             'num_correct': num_correct_list,
@@ -201,7 +238,9 @@ def macro_eval(model, val_loaders, num_total_unorm, args = None):
             'num_total_unorm': num_total_unorm,
             'val_loss': loss_total,
             "recall": recall,
-            "recall_correct": recall_correct_list}
+            "recall_correct": recall_correct_list,
+            "mrr": mrr_total,
+            "mrr_correct": mrr_list}
 
 def recall_eval(model, val_loaders, num_total_unorm, eval_mode = "micro", k = 64, all_candidates_embeds = None,  args = None):
 
@@ -487,7 +526,7 @@ def main(args):
                 else torch.load(os.path.join(args.save_dir,each_file_name) , map_location=torch.device('cpu'))
                 count+=1
                 print(os.path.join(args.save_dir,each_file_name))
-        model.load_state_dict(cpt['sd'])
+        model.load_state_dict(cpt['sd'], strict = False)
     dp = torch.cuda.device_count() > 1
     if dp:
         logger.log('Data parallel across %d GPUs: %s' %
@@ -500,7 +539,7 @@ def main(args):
         tokenizer = BertTokenizer.from_pretrained('bert-large-uncased')
     use_full_dataset = (args.type_model == 'full')
     macro_eval_mode = (args.eval_method == 'macro')
-    data = load_zeshel_data(args.data, args.cands_dir, macro_eval_mode, args.debug)
+    data = load_zeshel_data(args.data, args.cands_dir, macro_eval_mode, args.debug, nearest = args.nearest)
     loader_test = None
     if args.simpleoptim:
         optimizer, scheduler, num_train_steps, num_warmup_steps \
@@ -612,7 +651,7 @@ def main(args):
         logger.log('\nEpoch %d' % epoch)
 
         if not args.freeze_bert:
-            data = load_zeshel_data(args.data, args.cands_dir, macro_eval_mode, args.debug)
+            data = load_zeshel_data(args.data, args.cands_dir, macro_eval_mode, args.debug, nearest=args.nearest)
 
             loader_train, loader_val, loader_test, \
             num_val_samples, num_test_samples = get_loaders(data, tokenizer, args.L,
@@ -633,7 +672,7 @@ def main(args):
                 if args.type_model == 'extend_multi' or args.type_model == 'extend_multi_dot':
                     recall_evaluate = True
                 for i, batch in tqdm(enumerate(loader_train), total=len(loader_train)):
-                    result = model.forward(**batch, recall_eval=recall_evaluate, beam_ratio=args.beam_ratio, sampling = True)
+                    result = model.forward(**batch, recall_eval=recall_evaluate, beam_ratio=args.beam_ratio, sampling = True, args = args)
                     try:
                         scores = result[2]
                     except:
@@ -648,7 +687,7 @@ def main(args):
             #         score = model.forward(*batch, recall_eval=True, beam_ratio=args.beam_ratio, args=args)[2]
             #         scores = torch.cat((scores, score), dim = 0)
             # print("spot 2")/
-            data = load_zeshel_data(args.data, args.cands_dir, macro_eval_mode, args.debug, scores = scores_tensor)
+            data = load_zeshel_data(args.data, args.cands_dir, macro_eval_mode, args.debug, scores = scores_tensor, nearest=args.nearest)
 
             loader_train, _, _, \
             _, _ = get_loaders(data, tokenizer, args.L,
@@ -833,7 +872,7 @@ def main(args):
             trigger_times += 1
 
         wandb.log({"epoch": epoch, "best acc": best_val_perf})
-        if args.energy_model:
+        if args.type_model=="dual":
             logger.log('retriever performance test')
             logger.log('loading datasets')
             entity_path = "./data/entities"
@@ -888,7 +927,7 @@ def main(args):
             break
         
     if training_finished:
-        if args.energy_model:
+        if args.type_model=="dual":
             logger.log('retriever performance test')
             logger.log('loading datasets')
             entity_path = "./data/entities"
@@ -958,6 +997,10 @@ def main(args):
             model.load_state_dict(new_state_dict)
         else:
             model.load_state_dict(cpt['sd'])
+        if args.store_reranker_score:
+            micro_eval(model, loader_train, num_val_samples, args, mode = 'train')
+
+        
         print('start evaluation on val set (to check whether correct model loaded)')
         if not args.case_based:
             if args.eval_method == 'micro':
@@ -1146,6 +1189,8 @@ if __name__ == '__main__':
     parser.add_argument('--attend_to_gold', action='store_true',
                         help='simple optimizer (constant schedule, '
                              'no weight decay?')
+    parser.add_argument('--nearest', action='store_true',
+                        help='vertical interaction w/ nearest neighbors')
     parser.add_argument('--batch_first', action='store_false',
                         help='simple optimizer (constant schedule, '
                              'no weight decay?')
@@ -1164,6 +1209,8 @@ if __name__ == '__main__':
                                  'mlp_with_som'],
                         help='the type of model')
     parser.add_argument('--debug', action = 'store_true',
+                        help='debugging mode')
+    parser.add_argument('--store_reranker_score', action = 'store_true',
                         help='debugging mode')
     parser.add_argument('--save_dir', type = str, default = '/shared/s3/lab07/jongsong/hard-nce-el_garage/models',
                         help='debugging mode')
@@ -1272,5 +1319,5 @@ if __name__ == '__main__':
 
     # Set environment variables before all else.
     os.environ['CUDA_VISIBLE_DEVICES'] = args.gpus  # Sets torch.cuda behavior
-
+    if args.nearest: assert args.batch_first == False and args.type_cands == "fixed_negative"
     main(args)
