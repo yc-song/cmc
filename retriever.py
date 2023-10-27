@@ -108,22 +108,39 @@ class SoftAttention(nn.Module):
             bsz, C, l_y).sum(-1)
         return scores
 
+<<<<<<< HEAD
 def distillation_loss(student_outputs, teacher_outputs, labels, alpha = 0.8, temperature = 1, valid = False):
     device = torch.device(
             "cuda" if torch.cuda.is_available() else "cpu"
         )  
     assert 0<=alpha and alpha<=1
+=======
+# Distillation loss function 
+def distillation_loss(student_outputs, teacher_outputs, labels, alpha = 0.5, temperature = 1, valid = False):
+    ## Inputs
+    # student_outputs (torch.tensor): score distribution from the model trained
+    # teacher_outputs (torch.tensor): score distribution from the teacher model
+    # labels (torch.tensor): gold for given instance
+    # alpha (float): weight b/w two loss terms
+    # temperature (flost): softmac temperature
+    ## Outputs
+    # loss (torch.tensor): convex combination of two losses (student and teacher loss)
+    # student_loss (torch.tensor): Cross-entropy from student model
+    # teacher_loss (torch.tensor): KL-divergence b/w student and teacher model's score distribution
+
+    assert 0<=alpha and alpha<=1 # Weight should exist at [0,1]
+    # Teacher loss is obtained by KL divergence
+>>>>>>> faf1a097e6eef3225baa68f9ce317e5dab3a7a7e
     if teacher_outputs is not None:
         teacher_outputs = teacher_outputs[:,:student_outputs.size(1)].to(device)
         teacher_loss = nn.KLDivLoss(reduction='batchmean')(nn.functional.log_softmax(student_outputs/temperature, dim=1),
                              nn.functional.softmax(teacher_outputs/temperature, dim=1))
-        # print(student_outputs, nn.functional.log_softmax(student_outputs, dim=1))
-        # print(teacher_outputs, nn.functional.softmax(teacher_outputs, dim=1))
     else: 
         teacher_loss = torch.tensor([0.]).to(device)
+    # Student loss is calculated by cross-entropy loss
     student_loss = nn.CrossEntropyLoss()(student_outputs, labels)
 
-
+    # Weighted sum of teacher and student loss
     loss = alpha*student_loss + (1-alpha)*teacher_loss
     return loss, student_loss, teacher_loss
 
@@ -143,6 +160,7 @@ class UnifiedRetriever(nn.Module):
         self.num_mention_vecs = num_codes_mention
         self.num_entity_vecs = num_codes_entity
         self.evaluate_on = evaluate_on
+        self.embed_dim = None
         if self.mention_use_codes:
             self.embed_dim = BertConfig().hidden_size
             mention_codes = nn.Embedding(self.num_mention_vecs,
@@ -164,14 +182,37 @@ class UnifiedRetriever(nn.Module):
         else:
             self.attention = HardAttention()
         self.candidates_embeds = candidates_embeds
-        self.extend_multi = extend_multi(num_heads, num_layers, args)
+        # self.extend_multi = extend_multi(num_heads, num_layers, args)
         if args.type_model == 'mlp':
             self.mlp = mlp(args)
         if args.type_model == 'mlp_with_som':
             self.mlp_with_som = mlp_with_som(args)
-
+        self.num_heads = num_heads
+        self.num_layers = num_layers
+        # define transformer encoder
+        if self.embed_dim is None: self.embed_dim = 768
+        self.transformerencoderlayer = torch.nn.TransformerEncoderLayer(self.embed_dim, self.num_heads, batch_first = True, dim_feedforward=3072).to(self.device)
+        if args.identity_bert:
+            self.transformerencoderlayer = IdentityInitializedTransformerEncoderLayer(self.embed_dim, self.num_heads, args = args).to(self.device)
+        self.args = args
+        self.transformerencoder = torch.nn.TransformerEncoder(self.transformerencoderlayer, self.num_layers).to(self.device)
+        self.linearhead = torch.nn.Linear(self.embed_dim, 1).to(self.device)
+        self.token_type_embeddings = nn.Embedding(2, self.embed_dim).to(self.device)
+        if self.args.case_based: 
+            assert self.args.batch_first == False
+            assert not self.args.attend_to_gold
+    # Get embedding of mention and candidate
     def encode(self, mention_token_ids, mention_masks, candidate_token_ids,
                candidate_masks, entity_token_ids=None, entity_masks=None, too_large = False, entity_bsz=64):
+        ## Input
+        # mention_token_ids (torch.tensor): mention token ids by tokenizer
+        # mention_masks (torch.tensor): 0 for meaningless tokens
+        # candida_token_ids (torch.tensor): candidate token ids by tokenizer
+        # mention_masks (torch.tensor): 0 for meaningless tokens
+        ## Output
+        # mention_embeds (torch.tensor): mention embedding
+        # mention_embeds_masks (torch.tensor): 0 for meaningless tokens
+        # candidates_embeds (torch.tensor): candidate embedding
         candidates_embeds = None
         mention_embeds = None
         mention_embeds_masks = None
@@ -258,7 +299,21 @@ class UnifiedRetriever(nn.Module):
                 beam_ratio = 0.5, args = None, sampling = False, nearest_mention_token_ids = None, nearest_mention_masks = None,\
                 nearest_label_token_ids = None, nearest_label_masks = None, loader_val_cased = None,\
                 nearest_candidate_token_ids = None, nearest_candidate_masks = None):
-        if self.evaluate_on:  # evaluate or get candidates
+        ## Input
+        # mention_token_ids (torch.tensor): mention token ids by tokenizer
+        # mention_masks (torch.tensor): 0 for meaningless tokens
+        # candida_token_ids (torch.tensor): candidate token ids by tokenizer
+        # mention_masks (torch.tensor): 0 for meaningless tokens
+        # label_idx (torch.tensor): gold for given instance
+        # teacher_scores (torch.tensor): score distribution from the teacher model
+        ## Output
+        # loss (torch.tensor): loss for training
+        # predicts (torch.tensor): prediction for given instance
+        # scores (torch.tensor): score distribution for given instance
+        # student_loss (torch.tensor): Cross-entropy from student model
+        # teacher_loss (torch.tensor): KL-divergence b/w student and teacher model's score distribution
+
+        if self.evaluate_on:  # This option is not used for extend_multi models
             mention_embeds, mention_embeds_masks = self.encode(
                 mention_token_ids, mention_masks, None, None)[:2]
             bsz, l_x, mention_dim = mention_embeds.size()
@@ -354,7 +409,7 @@ class UnifiedRetriever(nn.Module):
                     dot = False
                 # if recall_eval is True, # of candidates is same as args.num_eval_cands
                 # else, # of candidates is same as args.num_training_cands
-
+                # Deprecated
                 if recall_eval:
                     round = 1
                     mention_embeds, mention_embeds_masks, \
@@ -381,11 +436,12 @@ class UnifiedRetriever(nn.Module):
                     candidates_advanced = torch.gather(candidates_advanced, 1, candidates_advanced_idxs.unsqueeze(2).unsqueeze(3).expand(-1, -1, 1, candidates_embeds.size(-1))) 
                     return candidates_advanced[:,:,0,-1]
                 else:
-
+                    # Get embeddings
                     mention_embeds, mention_embeds_masks, \
                     candidates_embeds = self.encode(mention_token_ids, mention_masks,
                                                 candidate_token_ids,
                                                 candidate_masks)
+                    # Deprecated
                     if args.case_based: 
                         # ToDo
                         # make extend_multi to take nearest mention and label as input, and process them as intended.
@@ -400,17 +456,22 @@ class UnifiedRetriever(nn.Module):
                         # mention: (B, N, D) 
                         # entity: (B, C, N, D) -> (B, C*N, D)
                         nearest_candidate_token_ids = nearest_candidate_token_ids[:,:,:3,:]
+                        nearest_candidate_masks = nearest_candidate_masks[:,:,:3,:]
                         nearest_mention_token_ids = nearest_mention_token_ids[:,:3,:]
-                        nearest_candidate_token_ids = nearest_candidate_token_ids.reshape(B, -1, L)
-                        nearest_candidate_masks = nearest_candidate_token_ids.reshape(B, -1, nearest_candidate_token_ids.size(-1))
-                        nearest_mention_embeds, nearest_mention_embeds_masks, \
-                        nearest_candidates_embeds = self.encode(nearest_mention_token_ids, nearest_mention_masks,
-                                                    nearest_candidate_token_ids,
-                                                    nearest_candidate_masks)
-                        nearest_candidates_embeds = nearest_candidates_embeds.reshape(B, C, -1, nearest_candidates_embeds.size(-1))
-                        scores = self.extend_multi(mention_embeds, candidates_embeds, dot, args, nearest_mention = nearest_mention_embeds, nearest_gold = nearest_gold_embeds)
+                        nearest_mention_masks = nearest_mention_masks[:,:3,:]
+                        # nearest_candidate_token_ids = nearest_candidate_token_ids.reshape(B, -1, L)
+                        # nearest_candidate_masks = nearest_candidate_token_ids.reshape(B, -1, nearest_candidate_token_ids.size(-1))
+                        # nearest_mention_embeds, nearest_mention_embeds_masks, \
+                        # nearest_candidates_embeds = self.encode(nearest_mention_token_ids, nearest_mention_masks,
+                        #                             nearest_candidate_token_ids,
+                        #                             nearest_candidate_masks)
+                        # nearest_candidates_embeds = nearest_candidates_embeds.reshape(B, C, -1, nearest_candidates_embeds.size(-1))
+                        scores = self.extend_multi(mention_embeds, candidates_embeds, self, dot, args, \
+                        nearest_mention_token_ids = nearest_mention_token_ids, nearest_mention_masks = nearest_mention_masks, \
+                        nearest_candidate_token_ids = nearest_candidate_token_ids, nearest_candidate_masks = nearest_candidate_masks)
 
                     else:
+                        # Take embeddings as input for extend_multi model
                         scores = self.extend_multi(mention_embeds, candidates_embeds, dot, args)
 
             elif self.attention_type == 'mlp_with_som':
@@ -454,37 +515,11 @@ class UnifiedRetriever(nn.Module):
             else:
                 loss = self.loss_fct(scores, labels)
                 return loss, predicts, scores
-
-class extend_multi(nn.Module):
-    def __init__(self, num_heads, num_layers, args):
-        super().__init__()
-        self.device = torch.device(
-            "cuda" if torch.cuda.is_available() else "cpu"
-        )
-        self.num_heads = num_heads
-        self.num_layers = num_layers
-        self.embed_dim = 768
-        # if args.anncur:
-            # self.transformerencoderlayer = IdentityInitializedTransformerEncoderLayer(self.embed_dim, self.num_heads).to(self.device)
-        # else:
-        # ToDo: modify dim_feedforward argument of self.transformerencoderlayer
-        self.transformerencoderlayer = torch.nn.TransformerEncoderLayer(self.embed_dim, self.num_heads, batch_first = True, dim_feedforward=3072).to(self.device)
-        if args.identity_bert:
-            self.transformerencoderlayer = IdentityInitializedTransformerEncoderLayer(self.embed_dim, self.num_heads, args = args).to(self.device)
-        self.args = args
-        self.transformerencoder = torch.nn.TransformerEncoder(self.transformerencoderlayer, self.num_layers).to(self.device)
-        self.linearhead = torch.nn.Linear(self.embed_dim, 1).to(self.device)
-        self.token_type_embeddings = nn.Embedding(2, self.embed_dim).to(self.device)
-        if self.args.case_based: 
-            assert self.args.batch_first == False
-            assert not self.args.attend_to_gold
-    def process_chunk(self, xs, ys, dot):
-        # Process the chunk using your deep learning model
-        processed_chunk = self.forward(xs, ys, dot)
-        return processed_chunk
-    def forward(self, xs, ys, dot = False, args = None, num_mention_vecs = 1, nearest_mention = None, nearest_gold = None):
+    def extend_multi(self, xs, ys, dot = False, args = None, num_mention_vecs = 1, nearest_mention = None, nearest_gold = None,\
+     nearest_mention_token_ids = None, nearest_mention_masks = None, nearest_candidate_token_ids = None, nearest_candidate_masks = None):
         xs = xs.to(self.device) # (batch size, 1, embed_dim)
         ys = ys.squeeze(dim = -2).to(self.device) #(batch_size, cands, embed_dim)
+        # Deprecated
         if self.args.case_based:
             scores_overall = torch.tensor([]).to(self.device)
             for i in range(xs.size(0)):
@@ -501,6 +536,152 @@ class extend_multi(nn.Module):
                     scores = scores.squeeze(-1)
                 scores_overall = torch.cat([scores_overall, scores[0:1]])
             return scores_overall
+        # Deprecated
+        elif self.args.attend_to_gold:
+            scores_overall = torch.tensor([]).to(self.device)
+            for i in range(xs.size(0)):
+                nearest_gold = torch.cat((ys[:i, 0:1, :], ys[i+1:, 0:1, :]))
+                nearest_gold = nearest_gold.expand(-1, args.C_eval, -1)
+
+                ys_new = torch.cat([ys[i:i+1,:,:], nearest_gold], dim = 0)
+                xs_new = torch.cat([xs[i:i+1, :, :], xs[:i, :, :], xs[i+1:, :, :]])
+                input = torch.cat([xs_new, ys_new], dim = 1)
+                attention_result = self.transformerencoder(input)
+                
+                if dot:
+                    scores = torch.bmm(attention_result[:,0,:].unsqueeze(1), attention_result[:,args.num_mention_vecs:,:].transpose(2,1))
+                    scores = scores.squeeze(-2)
+                else:
+                    scores = self.linearhead(attention_result[:,args.num_mention_vecs:,:])
+                    scores = scores.squeeze(-1)
+                scores_overall = torch.cat([scores_overall, scores[0:1]])
+
+            return scores_overall
+        # Deprecated
+        elif self.args.order_changed:
+            scores_overall = torch.tensor([]).to(self.device)
+            for i in range(xs.size(0)):
+                xs_new = torch.cat([xs[i:i+1, :, :], xs[:i, :, :], xs[i+1:, :, :]])
+                ys_new = torch.cat([ys[i:i+1, :, :], ys[:i, :, :], ys[i+1:, :, :]])
+                temp = ys_new[0,0,:].clone()
+                ys_new[0,0,:] = ys_new[0,16,:]
+                ys_new[0,16,:] = temp
+                input = torch.cat([xs_new, ys_new], dim = 1)
+                attention_result = self.transformerencoder(input)
+                
+                if dot:
+                    scores = torch.bmm(attention_result[:,0,:].unsqueeze(1), attention_result[:,args.num_mention_vecs:,:].transpose(2,1))
+                    scores = scores.squeeze(-2)
+                else:
+                    scores = self.linearhead(attention_result[:,args.num_mention_vecs:,:])
+                    scores = scores.squeeze(-1)
+                scores_overall = torch.cat([scores_overall, scores[0:1]])                
+
+            return scores_overall  
+         
+        elif self.args.nearest:
+            scores_overall = torch.tensor([]).to(self.device)
+            for i in range(xs.size(0)):
+                # for B times
+                # taking (N, 1, D) + (N, C, D) pair as the input
+                # nearest_mention_token_ids: (N, L)
+                # nearest_mention_token_ids: (C, N, L)
+                print("-1", nearest_mention_token_ids[i].shape, nearest_mention_masks[i].shape)
+                print("0", nearest_candidate_token_ids[i].shape, nearest_candidate_masks[i].shape)
+                nearest_mention_embeds, nearest_mention_embeds_masks, \
+                nearest_candidates_embeds = self.encode(nearest_mention_token_ids[i], nearest_mention_masks[i],
+                                            nearest_candidate_token_ids[i],
+                                            nearest_candidate_masks[i])                
+                print("1", xs[i].shape)
+                print("2", nearest_mention_embeds.shape)
+                print("3", ys[i].shape)
+                print("4", nearest_candidates_embeds.shape)
+
+                xs_new = torch.cat((xs[i].unsqueeze(-2), nearest_mention_embeds.squeeze(-2)), dim = 0)
+                nearest_candidates_embeds = nearest_candidates_embeds.transpose(1,0)
+                ys_new = torch.cat((ys[i], nearest_candidates_embeds), dim = 0)
+                print("5", xs_new.shape)
+                print("6", ys_new.shape)
+                input = torch.cat([xs_new, ys_new], dim = 1)
+                attention_result = self.transformerencoder(input)
+                
+                if dot:
+                    scores = torch.bmm(attention_result[:,0,:].unsqueeze(1), attention_result[:,args.num_mention_vecs:,:].transpose(2,1))
+                    scores = scores.squeeze(-2)
+                else:
+                    scores = self.linearhead(attention_result[:,args.num_mention_vecs:,:])
+                    scores = scores.squeeze(-1)
+                scores_overall = torch.cat([scores_overall, scores[0:1]])                
+
+            return scores_overall      
+        # Dprecated                  
+        if self.args.model_top is None and self.args.token_type :
+            token_type_xs = torch.zeros(xs.size(0), xs.size(1)).int().to(self.device)
+            token_embedding_xs = self.token_type_embeddings(token_type_xs)
+            token_type_ys = torch.ones(ys.size(0), ys.size(1)).int().to(self.device)
+            token_embedding_ys = self.token_type_embeddings(token_type_ys)
+            input = torch.cat([xs + token_embedding_xs, ys + token_embedding_ys], dim = 1)
+        else:
+            input = torch.cat([xs, ys], dim = 1) # concatenate mention and entity embeddings
+        # Take concatenated tensor as the input for transformer encoder
+        attention_result = self.transformerencoder(input)
+        # Get score from dot product
+        if dot:
+            scores = torch.bmm(attention_result[:,0,:].unsqueeze(1), attention_result[:,self.args.num_mention_vecs:,:].transpose(2,1))
+            scores = scores.squeeze(-2)
+        # Get score distribution from linear head
+        else:
+            scores = self.linearhead(attention_result[:,self.args.num_mention_vecs:,:])
+            scores = scores.squeeze(-1)
+        
+        return scores
+
+class extend_multi(nn.Module):
+    def __init__(self, num_heads, num_layers, args):
+        super().__init__()
+        self.device = torch.device(
+            "cuda" if torch.cuda.is_available() else "cpu"
+        )
+        self.num_heads = num_heads
+        self.num_layers = num_layers
+        self.embed_dim = 768
+        # define transformer encoder
+        self.transformerencoderlayer = torch.nn.TransformerEncoderLayer(self.embed_dim, self.num_heads, batch_first = True, dim_feedforward=3072).to(self.device)
+        if args.identity_bert:
+            self.transformerencoderlayer = IdentityInitializedTransformerEncoderLayer(self.embed_dim, self.num_heads, args = args).to(self.device)
+        self.args = args
+        self.transformerencoder = torch.nn.TransformerEncoder(self.transformerencoderlayer, self.num_layers).to(self.device)
+        self.linearhead = torch.nn.Linear(self.embed_dim, 1).to(self.device)
+        self.token_type_embeddings = nn.Embedding(2, self.embed_dim).to(self.device)
+        if self.args.case_based: 
+            assert self.args.batch_first == False
+            assert not self.args.attend_to_gold
+    def process_chunk(self, xs, ys, dot):
+        # Process the chunk using your deep learning model
+        processed_chunk = self.forward(xs, ys, dot)
+        return processed_chunk
+    def forward(self, xs, ys, unifiedretriever = None, dot = False, args = None, num_mention_vecs = 1, nearest_mention = None, nearest_gold = None,\
+     nearest_mention_token_ids = None, nearest_mention_masks = None, nearest_candidate_token_ids = None, nearest_candidate_masks = None):
+        xs = xs.to(self.device) # (batch size, 1, embed_dim)
+        ys = ys.squeeze(dim = -2).to(self.device) #(batch_size, cands, embed_dim)
+        # Deprecated
+        if self.args.case_based:
+            scores_overall = torch.tensor([]).to(self.device)
+            for i in range(xs.size(0)):
+                xs = torch.cat([xs, nearest_mention], dim = 0)
+                nearest_gold = nearest_gold.expand(-1, args.C_eval, -1)
+                ys = torch.cat([ys, nearest_gold], dim = 0)
+                input = torch.cat([xs, ys], dim = 1)
+                attention_result = self.transformerencoder(input)
+                if dot:
+                    scores = torch.bmm(attention_result[:,0,:].unsqueeze(1), attention_result[:,args.num_mention_vecs:,:].transpose(2,1))
+                    scores = scores.squeeze(-2)
+                else:
+                    scores = self.linearhead(attention_result[:,args.num_mention_vecs:,:])
+                    scores = scores.squeeze(-1)
+                scores_overall = torch.cat([scores_overall, scores[0:1]])
+            return scores_overall
+        # Deprecated
         elif self.args.attend_to_gold:
             scores_overall = torch.tensor([]).to(self.device)
             for i in range(xs.size(0)):
@@ -540,6 +721,7 @@ class extend_multi(nn.Module):
                 scores_overall = torch.cat([scores_overall, scores[0:1]])
 
             return scores_overall
+        # Deprecated
         elif self.args.order_changed:
             scores_overall = torch.tensor([]).to(self.device)
             for i in range(xs.size(0)):
@@ -559,16 +741,31 @@ class extend_multi(nn.Module):
                     scores = scores.squeeze(-1)
                 scores_overall = torch.cat([scores_overall, scores[0:1]])                
 
-            return scores_overall   
+            return scores_overall  
+         
         elif self.args.nearest:
             scores_overall = torch.tensor([]).to(self.device)
             for i in range(xs.size(0)):
                 # for B times
                 # taking (N, 1, D) + (N, C, D) pair as the input
-                xs_new = xs[i,:,:].unsqueeze(-2)
-                print(xs_new.shape)
-                ys_new = ys[i,:,:].transpose(1,0)
-                print(ys_new.shape)
+                # nearest_mention_token_ids: (N, L)
+                # nearest_mention_token_ids: (C, N, L)
+                print("-1", nearest_mention_token_ids[i].shape, nearest_mention_masks[i].shape)
+                print("0", nearest_candidate_token_ids[i].shape, nearest_candidate_masks[i].shape)
+                nearest_mention_embeds, nearest_mention_embeds_masks, \
+                nearest_candidates_embeds = unifiedretriever.encode(nearest_mention_token_ids[i], nearest_mention_masks[i],
+                                            nearest_candidate_token_ids[i],
+                                            nearest_candidate_masks[i])                
+                print("1", xs[i].shape)
+                print("2", nearest_mention_embeds.shape)
+                print("3", ys[i].shape)
+                print("4", nearest_candidates_embeds.shape)
+
+                xs_new = torch.cat((xs[i].unsqueeze(-2), nearest_mention_embeds.squeeze(-2)), dim = 0)
+                nearest_candidates_embeds = nearest_candidates_embeds.transpose(1,0)
+                ys_new = torch.cat((ys[i], nearest_candidates_embeds), dim = 0)
+                print("5", xs_new.shape)
+                print("6", ys_new.shape)
                 input = torch.cat([xs_new, ys_new], dim = 1)
                 attention_result = self.transformerencoder(input)
                 
@@ -580,22 +777,25 @@ class extend_multi(nn.Module):
                     scores = scores.squeeze(-1)
                 scores_overall = torch.cat([scores_overall, scores[0:1]])                
 
-            return scores_overall                        
-        if args.model_top is None and args.token_type :
+            return scores_overall      
+        # Dprecated                  
+        if self.args.model_top is None and self.args.token_type :
             token_type_xs = torch.zeros(xs.size(0), xs.size(1)).int().to(self.device)
             token_embedding_xs = self.token_type_embeddings(token_type_xs)
             token_type_ys = torch.ones(ys.size(0), ys.size(1)).int().to(self.device)
             token_embedding_ys = self.token_type_embeddings(token_type_ys)
             input = torch.cat([xs + token_embedding_xs, ys + token_embedding_ys], dim = 1)
         else:
-            input = torch.cat([xs, ys], dim = 1)
+            input = torch.cat([xs, ys], dim = 1) # concatenate mention and entity embeddings
+        # Take concatenated tensor as the input for transformer encoder
         attention_result = self.transformerencoder(input)
+        # Get score from dot product
         if dot:
-            scores = torch.bmm(attention_result[:,0,:].unsqueeze(1), attention_result[:,args.num_mention_vecs:,:].transpose(2,1))
+            scores = torch.bmm(attention_result[:,0,:].unsqueeze(1), attention_result[:,self.args.num_mention_vecs:,:].transpose(2,1))
             scores = scores.squeeze(-2)
-
+        # Get score distribution from linear head
         else:
-            scores = self.linearhead(attention_result[:,args.num_mention_vecs:,:])
+            scores = self.linearhead(attention_result[:,self.args.num_mention_vecs:,:])
             scores = scores.squeeze(-1)
         return scores
     def forward_chunk(self, xs, ys, dot = False, args = None):
