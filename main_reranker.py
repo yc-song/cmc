@@ -108,7 +108,7 @@ def configure_optimizer_simple(args, model, num_train_examples):
     return optimizer, scheduler, num_train_steps, num_warmup_steps
 
 
-def micro_eval(model, loader_eval, num_total_unorm, args = None, k=4, mode = None):
+def micro_eval(model, loader_eval, num_total_unorm, args = None, k=64, mode = None):
     if args.store_reranker_score: assert mode is not None
 
     model.eval()
@@ -1195,7 +1195,7 @@ if __name__ == '__main__':
     parser.add_argument('--batch_first', action='store_false',
                         help='simple optimizer (constant schedule, '
                              'no weight decay?')
-   parser.add_argument('--nearest', action='store_true',
+    parser.add_argument('--nearest', action='store_true',
                         help='vertical interaction w/ nearest neighbors')
     parser.add_argument('--eval_method', default='macro', type=str,
                         choices=['macro', 'micro', 'skip'],
