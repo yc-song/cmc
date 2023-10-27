@@ -691,8 +691,8 @@ def main(args):
                     pass
                 scores_tensor = torch.tensor([]).to(device)
                 recall_evaluate = False
-                if args.type_model == 'extend_multi' or args.type_model == 'extend_multi_dot':
-                    recall_evaluate = True
+                # if args.type_model == 'extend_multi' or args.type_model == 'extend_multi_dot':
+                    # recall_evaluate = True
                 for i, batch in tqdm(enumerate(loader_train), total=len(loader_train)):
                     result = model.forward(**batch, recall_eval=recall_evaluate, beam_ratio=args.beam_ratio, sampling = True, args = args)
                     try:
@@ -1135,7 +1135,7 @@ if __name__ == '__main__':
                         help='init (default if 0) [%(default)g]')
     parser.add_argument('--seed', type=int, default=42,
                         help='random seed [%(default)d]')
-    parser.add_argument('--num_workers', type=int, default=4,
+    parser.add_argument('--num_workers', type=int, default=2,
                         help='num workers [%(default)d]')
     parser.add_argument('--k', type=int, default=64,
                         help='recall@k when evaluate')
@@ -1259,8 +1259,8 @@ if __name__ == '__main__':
                         help='the batch size')
     parser.add_argument('--weight_lr', type=float, default=1e-2,
                         help='the batch size')
-    parser.add_argument('--num_sampled', type=int, default=256,
-                        help='the batch size')
+    parser.add_argument('--num_sampled', type=int, default=1024,
+                        help='train set candidates to get distribution from')
     parser.add_argument('--max_len', type=int, default=128,
                         help='max length of the mention input '
                             'and the entity input')

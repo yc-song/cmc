@@ -108,8 +108,8 @@ class BasicDataset(Dataset):
                     # Later, training set is obtained by hard negs mining
                     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
                     num_hards = len(xs)
-                    # scores = candidates['scores'].clone().detach()
-                    scores = torch.tensor(candidates['scores'], dtype = float)
+                    scores = candidates['self_scores'].clone().detach()
+                    # scores = torch.tensor(candidates['self_scores'], dtype = float).clone().detach()
                     probs = scores.softmax(dim=0).unsqueeze(0)
                     hard_cands = distribution_sample(probs, self.max_num_candidates,
                                                         device)
@@ -351,7 +351,7 @@ class UnifiedDataset(BasicDataset):
                 "nearest_mention_token_ids": nearest_mention_token_ids, "nearest_mention_masks": nearest_mention_masks}
             else:
                 return {"mention_token_ids": mention_token_ids,"mention_masks": mention_masks, "candidate_token_ids": candidates_token_ids, \
-                "candidate_masks": candidates_masks, "label_idx": label_ids, "teacher_scores":torch.tensor(candidates["scores"])}
+                "candidate_masks": candidates_masks, "label_idx": label_ids, "teacher_scores":torch.tensor(candidates["scores"]).clone().detach()}
 
         elif self.case_based:
             nearest_mentions = candidates['nearest_mentions']
@@ -506,9 +506,8 @@ def get_loaders(data, tokenizer, max_len, max_num_candidates, batch_size,
         else:
             loader_val, val_num_samples = help_loader(samples_val)
             loader_test, test_num_samples = help_loader(samples_test)
-            
-        return (loader_train, loader_val, loader_test,
-            val_num_samples, test_num_samples)
+    return (loader_train, loader_val, loader_test,
+        val_num_samples, test_num_samples)
 
 
 def load_zeshel_data(data_dir, cands_dir, macro_eval=True, debug = False, scores = None, nearest = False):
@@ -559,9 +558,15 @@ def load_zeshel_data(data_dir, cands_dir, macro_eval=True, debug = False, scores
                                'candidates_%s.json' % part)) as f:
             for i, line in enumerate(f):
                 field = json.loads(line)
-                if scores is not None:
-                    field['scores'] = scores[i]
-
+                if debug:
+                    try:
+                        if scores is not None:
+                            field['self_scores'] = scores[i]
+                    except:
+                        pass
+                else:
+                    if scores is not None:
+                        field['self_scores'] = scores[i]
                 candidates[field['mention_id']] = field
         if nearest:
             with open(os.path.join(cands_dir,
