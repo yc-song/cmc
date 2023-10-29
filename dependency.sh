@@ -7,7 +7,8 @@
 #SBATCH -e ./slurm_output/%x_%j.err
 #SBATCH --mem=8000MB
 #SBATCH --cpus-per-task=1
-#SBATCH --partition=P2
+#SBATCH --partition=cas_v100_2
+#SBATCH --comment=pytorch
 
 
 iterations=4 # 총 몇 번이나 연속으로 돌릴 것인지

@@ -111,9 +111,9 @@ def main(args):
             "args": args}
         else:
             batch = {
-                "encoded_pairs":torch.randint(1,3, (4, 32, 256)),\
-                "type_marks":torch.randint(0,2, (4,32, 256)),\
-                "input_lens": torch.randint(0,2, (4, 128)),
+                "encoded_pairs":torch.randint(1,3, (2, 128, 256)),\
+                "type_marks":torch.randint(0,2, (2,128, 256)),\
+                "input_lens": torch.randint(0,2, (2, 128)),
                 "args": args}
 
         model = model.to(device)
@@ -151,7 +151,18 @@ if __name__ == '__main__':
                         help='assign same query and key matrix')
     parser.add_argument('--eval_batch_size', type=int, default=8,
                         help='evaluation batch size [%(default)d]')
-
+    parser.add_argument('--case_based', action='store_true',
+                        help='simple optimizer (constant schedule, '
+                             'no weight decay?')
+    parser.add_argument('--gold_first', action='store_true',
+                        help='simple optimizer (constant schedule, '
+                             'no weight decay?')
+    parser.add_argument('--attend_to_gold', action='store_true',
+                        help='simple optimizer (constant schedule, '
+                             'no weight decay?')
+    parser.add_argument('--batch_first', action='store_false',
+                        help='simple optimizer (constant schedule, '
+                             'no weight decay?')
     parser.add_argument('--lr', type=float, default=2e-5,
                         help='initial learning rate [%(default)g]')
     parser.add_argument('--warmup_proportion', type=float, default=0.1,

@@ -540,7 +540,18 @@ def main(args):
                 else torch.load(os.path.join(args.save_dir,each_file_name) , map_location=torch.device('cpu'))
                 count+=1
                 print(os.path.join(args.save_dir,each_file_name))
-        model.load_state_dict(cpt['sd'], strict = False)
+        
+        try:
+            model.load_state_dict(cpt['sd'])
+        except: 
+            new_state_dict = cpt['sd']
+            modified_state_dict = OrderedDict()
+            # Change dict keys for loading model parameter
+            for k, v in new_state_dict.items():
+                if k.startswith('extend_multi'):
+                    k = k.replace('extend_multi.', 'extend_multi_')
+                modified_state_dict[k] = v
+            model.load_state_dict(modified_state_dict)            
     # Variables for parallel computing
     dp = torch.cuda.device_count() > 1
     if dp:
@@ -1182,11 +1193,14 @@ if __name__ == '__main__':
     parser.add_argument('--attend_to_gold', action='store_true',
                         help='simple optimizer (constant schedule, '
                              'no weight decay?')
-    parser.add_argument('--nearest', action='store_true',
-                        help='vertical interaction w/ nearest neighbors')
+    parser.add_argument('--attend_to_itself', action='store_true',
+                        help='simple optimizer (constant schedule, '
+                             'no weight decay?')
     parser.add_argument('--batch_first', action='store_false',
                         help='simple optimizer (constant schedule, '
                              'no weight decay?')
+    parser.add_argument('--nearest', action='store_true',
+                        help='vertical interaction w/ nearest neighbors')
     parser.add_argument('--eval_method', default='macro', type=str,
                         choices=['macro', 'micro', 'skip'],
                         help='the evaluate method')
@@ -1271,6 +1285,8 @@ if __name__ == '__main__':
     parser.add_argument('--val_random_shuffle', action = 'store_true',
                         help='training only one epoch')
     parser.add_argument('--distill', action='store_true',
+                        help='getting score distribution for distillation purpose')
+    parser.add_argument('--BCELoss', action='store_true',
                         help='getting score distribution for distillation purpose')
     parser.add_argument('--distill_training', action='store_true',
                         help='training smaller model from crossencoder scores')
