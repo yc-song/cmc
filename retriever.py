@@ -416,16 +416,16 @@ class UnifiedRetriever(nn.Module):
                     # Expand these indices to match the shape of the original tensor
                     candidates_embeds = torch.cat((candidates_embeds, i_indices, j_indices), dim=-1) #(B, C_eval, 1, embed_dim) e.g. (2, 1024, 1, 768)
                     candidates_reshaped = candidates_embeds.reshape(-1, top_k, 1, candidates_embeds.size(-1))
-                    scores_round_0 = self.extend_multi.forward_chunk(mention_embeds, candidates_reshaped[:,:,:,:-2], dot = dot, args = args)  # (B*16, top_k)
+                    scores_round_0 = self.forward_chunk(mention_embeds, candidates_reshaped[:,:,:,:-2], dot = dot, args = args)  # (B*16, top_k)
                     candidates_advanced_idxs = torch.topk(scores_round_0, int(top_k*beam_ratio))[1]
                     candidates_advanced = torch.gather(candidates_reshaped, 1, candidates_advanced_idxs.unsqueeze(2).unsqueeze(3).expand(-1, -1, 1, candidates_embeds.size(-1))) 
                     while torch.numel(candidates_advanced_idxs)//B > top_k:
                         candidates_advanced = candidates_advanced.reshape(-1, top_k, 1, candidates_advanced.size(-1))
-                        scores = self.extend_multi.forward_chunk(mention_embeds, candidates_advanced[:,:,:,:-2], dot = dot, args = args)
+                        scores = self.forward_chunk(mention_embeds, candidates_advanced[:,:,:,:-2], dot = dot, args = args)
                         candidates_advanced_idxs = torch.topk(scores, int(top_k*beam_ratio))[1]
                         candidates_advanced = torch.gather(candidates_advanced, 1, candidates_advanced_idxs.unsqueeze(2).unsqueeze(3).expand(-1, -1, 1, candidates_embeds.size(-1))) 
                     candidates_advanced = candidates_advanced.reshape(-1, top_k, 1, candidates_advanced.size(-1))
-                    scores = self.extend_multi.forward_chunk(mention_embeds, candidates_advanced[:,:,:,:-2], dot = dot, args = args)
+                    scores = self.forward_chunk(mention_embeds, candidates_advanced[:,:,:,:-2], dot = dot, args = args)
                     candidates_advanced_idxs = torch.argsort(scores, descending = True)
                     candidates_advanced = torch.gather(candidates_advanced, 1, candidates_advanced_idxs.unsqueeze(2).unsqueeze(3).expand(-1, -1, 1, candidates_embeds.size(-1))) 
                     return candidates_advanced[:,:,0,-1]
@@ -629,7 +629,26 @@ class UnifiedRetriever(nn.Module):
             scores = scores.squeeze(-1)
         
         return scores
-
+    def forward_chunk(self, xs, ys, dot = False, args = None):
+        xs = xs.to(self.device) # (batch size, 1, embed_dim)
+        ys = ys.squeeze(dim = -2).to(self.device) #(batch_size, cands, embed_dim)
+        xs = xs.repeat_interleave(int(ys.size(0)//xs.size(0)), dim=0)
+        if args.token_type:
+            token_type_xs = torch.zeros(xs.size(0), xs.size(1)).int().to(self.device)
+            token_embedding_xs = self.token_type_embeddings(token_type_xs)
+            token_type_ys = torch.ones(ys.size(0), ys.size(1)).int().to(self.device)
+            token_embedding_ys = self.token_type_embeddings(token_type_ys)
+            input = torch.cat([xs + token_embedding_xs, ys + token_embedding_ys], dim = 1)
+        else:
+            input = torch.cat([xs, ys], dim = 1)
+        attention_result = self.transformerencoder(input)
+        if dot:
+            scores = torch.bmm(attention_result[:,0,:].unsqueeze(1), attention_result[:,args.num_mention_vecs:,:].transpose(2,1))
+            scores = scores.squeeze(-2)
+        else:
+            scores = self.linearhead(attention_result[:,args.num_mention_vecs:,:])
+            scores = scores.squeeze(-1)
+        return scores
 class extend_multi(nn.Module):
     def __init__(self, num_heads, num_layers, args):
         super().__init__()

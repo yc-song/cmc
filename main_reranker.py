@@ -49,36 +49,36 @@ def configure_optimizer(args, model, num_train_examples):
                 if any(nd in n for nd in transformer) and not any(nd in n for nd in no_decay)],
         'lr': args.lr, 'weight_decay': args.weight_decay},
     ]
-    # optimizer = AdamW(optimizer_grouped_parameters,
-    #                 eps=args.adam_epsilon)
-    # # except:
-    # optimizer_grouped_parameters = [
-    #     {'params': [p for n, p in model.named_parameters()
-    #                 if any(nd in n for nd in transformer) and any(nd in n for nd in no_decay) and not any(nd in n for nd in identity_init)],
-    #     'lr': args.lr, 'weight_decay': 0.0,
-    #     'names': [n for n, p in model.named_parameters()
-    #                 if any(nd in n for nd in transformer) and any(nd in n for nd in no_decay) and not any(nd in n for nd in identity_init)]},
-    #     {'params': [p for n, p in model.named_parameters()
-    #                 if any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)],
-    #     'weight_decay': 0.0, 'lr': args.bert_lr,
-    #     'names': [n for n, p in model.named_parameters()
-    #                 if any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)]},
-    #     {'params': [p for n, p in model.named_parameters()
-    #                 if not any(nd in n for nd in no_decay) and any(nd in n for nd in transformer) and not any(nd in n for nd in identity_init) ],
-    #     'lr': args.lr, 'weight_decay': args.weight_decay,
-    #     'names': [n for n, p in model.named_parameters()
-    #                 if not any(nd in n for nd in no_decay) and any(nd in n for nd in transformer) and not any(nd in n for nd in identity_init)]},
-    #     {'params': [p for n, p in model.named_parameters()
-    #                 if not any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)],
-    #     'weight_decay': args.weight_decay, 'lr': args.bert_lr,
-    #     'names': [n for n, p in model.named_parameters()
-    #                 if not any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)]},
-    #     {'params': [p for n, p in model.named_parameters()
-    #                 if any(nd in n for nd in identity_init)],
-    #     'weight_decay': args.weight_decay, 'lr': args.weight_lr,
-    #     'names': [n for n, p in model.named_parameters()
-    #                 if any(nd in n for nd in identity_init)]}
-    # ]
+    optimizer = AdamW(optimizer_grouped_parameters,
+                    eps=args.adam_epsilon)
+    # except:
+    optimizer_grouped_parameters = [
+        {'params': [p for n, p in model.named_parameters()
+                    if any(nd in n for nd in transformer) and any(nd in n for nd in no_decay) and not any(nd in n for nd in identity_init)],
+        'lr': args.lr, 'weight_decay': 0.0,
+        'names': [n for n, p in model.named_parameters()
+                    if any(nd in n for nd in transformer) and any(nd in n for nd in no_decay) and not any(nd in n for nd in identity_init)]},
+        {'params': [p for n, p in model.named_parameters()
+                    if any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)],
+        'weight_decay': 0.0, 'lr': args.bert_lr,
+        'names': [n for n, p in model.named_parameters()
+                    if any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)]},
+        {'params': [p for n, p in model.named_parameters()
+                    if not any(nd in n for nd in no_decay) and any(nd in n for nd in transformer) and not any(nd in n for nd in identity_init) ],
+        'lr': args.lr, 'weight_decay': args.weight_decay,
+        'names': [n for n, p in model.named_parameters()
+                    if not any(nd in n for nd in no_decay) and any(nd in n for nd in transformer) and not any(nd in n for nd in identity_init)]},
+        {'params': [p for n, p in model.named_parameters()
+                    if not any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)],
+        'weight_decay': args.weight_decay, 'lr': args.bert_lr,
+        'names': [n for n, p in model.named_parameters()
+                    if not any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)]},
+        {'params': [p for n, p in model.named_parameters()
+                    if any(nd in n for nd in identity_init)],
+        'weight_decay': args.weight_decay, 'lr': args.weight_lr,
+        'names': [n for n, p in model.named_parameters()
+                    if any(nd in n for nd in identity_init)]}
+    ]
     optimizer = AdamW(optimizer_grouped_parameters,
                     eps=args.adam_epsilon)
 
@@ -563,7 +563,7 @@ def main(args):
     else:
         optimizer, scheduler, num_train_steps, num_warmup_steps \
             = configure_optimizer(args, model, len(data[1][0]))
-    if args.resume_training:
+    if args.resume_training and not args.training_finished:
         try:
             optimizer.load_state_dict(cpt['opt_sd'])
         except: 
@@ -691,8 +691,9 @@ def main(args):
                     pass
                 scores_tensor = torch.tensor([]).to(device)
                 recall_evaluate = False
+                model.evaluate_on = False
                 # if args.type_model == 'extend_multi' or args.type_model == 'extend_multi_dot':
-                    # recall_evaluate = True
+                #     recall_evaluate = True
                 for i, batch in tqdm(enumerate(loader_train), total=len(loader_train)):
                     result = model.forward(**batch, recall_eval=recall_evaluate, beam_ratio=args.beam_ratio, sampling = True, args = args)
                     try:
@@ -700,7 +701,6 @@ def main(args):
                     except:
                         scores = result['scores']
                     scores_tensor = torch.cat([scores_tensor, scores], dim=0)
-
             data = load_zeshel_data(args.data, args.cands_dir, macro_eval_mode, args.debug, scores = scores_tensor, nearest=args.nearest)
             # Getting new train dataloader
             loader_train, _, _, \
@@ -964,9 +964,32 @@ def main(args):
             for k, v in state_dict.items():
                 name = 'module.' + k  # remove `module.`
                 new_state_dict[name] = v
-            model.load_state_dict(new_state_dict)
+            try:
+                model.load_state_dict(new_state_dict)
+            except:
+                new_state_dict = cpt['sd']
+                modified_state_dict = OrderedDict()
+                # Change dict keys for loading model parameter
+                for k, v in new_state_dict.items():
+                    if 'extend_multi.' in k:
+                        name = k.replace('extend_multi.', 'module.')
+                        print(name)
+                    else:
+                        name = 'module.' + k
+                    modified_state_dict[name] = v
+                model.load_state_dict(modified_state_dict)
         else:
-            model.load_state_dict(cpt['sd'])
+            try:
+                model.load_state_dict(cpt['sd'])
+            except:
+                new_state_dict = cpt['sd']
+                modified_state_dict = OrderedDict()
+                # Change dict keys for loading model parameter
+                for k, v in new_state_dict.items():
+                    if 'extend_multi.' in k:
+                        k = k.replace('extend_multi.', '')
+                    modified_state_dict[k] = v
+                model.load_state_dict(modified_state_dict)
         if args.store_reranker_score:
             micro_eval(model, loader_train, num_val_samples, args, mode = 'train')
 
