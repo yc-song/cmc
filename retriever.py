@@ -108,13 +108,6 @@ class SoftAttention(nn.Module):
             bsz, C, l_y).sum(-1)
         return scores
 
-<<<<<<< HEAD
-def distillation_loss(student_outputs, teacher_outputs, labels, alpha = 0.8, temperature = 1, valid = False):
-    device = torch.device(
-            "cuda" if torch.cuda.is_available() else "cpu"
-        )  
-    assert 0<=alpha and alpha<=1
-=======
 # Distillation loss function 
 def distillation_loss(student_outputs, teacher_outputs, labels, alpha = 0.5, temperature = 1, valid = False):
     ## Inputs
@@ -130,7 +123,9 @@ def distillation_loss(student_outputs, teacher_outputs, labels, alpha = 0.5, tem
 
     assert 0<=alpha and alpha<=1 # Weight should exist at [0,1]
     # Teacher loss is obtained by KL divergence
->>>>>>> faf1a097e6eef3225baa68f9ce317e5dab3a7a7e
+    device = torch.device(
+            "cuda" if torch.cuda.is_available() else "cpu"
+        )
     if teacher_outputs is not None:
         teacher_outputs = teacher_outputs[:,:student_outputs.size(1)].to(device)
         teacher_loss = nn.KLDivLoss(reduction='batchmean')(nn.functional.log_softmax(student_outputs/temperature, dim=1),
@@ -191,13 +186,13 @@ class UnifiedRetriever(nn.Module):
         self.num_layers = num_layers
         # define transformer encoder
         if self.embed_dim is None: self.embed_dim = 768
-        self.transformerencoderlayer = torch.nn.TransformerEncoderLayer(self.embed_dim, self.num_heads, batch_first = True, dim_feedforward=3072).to(self.device)
+        self.extend_multi_transformerencoderlayer = torch.nn.TransformerEncoderLayer(self.embed_dim, self.num_heads, batch_first = True, dim_feedforward=3072).to(self.device)
         if args.identity_bert:
-            self.transformerencoderlayer = IdentityInitializedTransformerEncoderLayer(self.embed_dim, self.num_heads, args = args).to(self.device)
+            self.extend_multi_transformerencoderlayer = IdentityInitializedTransformerEncoderLayer(self.embed_dim, self.num_heads, args = args).to(self.device)
         self.args = args
-        self.transformerencoder = torch.nn.TransformerEncoder(self.transformerencoderlayer, self.num_layers).to(self.device)
-        self.linearhead = torch.nn.Linear(self.embed_dim, 1).to(self.device)
-        self.token_type_embeddings = nn.Embedding(2, self.embed_dim).to(self.device)
+        self.extend_multi_transformerencoder = torch.nn.TransformerEncoder(self.extend_multi_transformerencoderlayer, self.num_layers).to(self.device)
+        self.extend_multi_linearhead = torch.nn.Linear(self.embed_dim, 1).to(self.device)
+        self.extend_multi_token_type_embeddings = nn.Embedding(2, self.embed_dim).to(self.device)
         if self.args.case_based: 
             assert self.args.batch_first == False
             assert not self.args.attend_to_gold
@@ -527,12 +522,12 @@ class UnifiedRetriever(nn.Module):
                 nearest_gold = nearest_gold.expand(-1, args.C_eval, -1)
                 ys = torch.cat([ys, nearest_gold], dim = 0)
                 input = torch.cat([xs, ys], dim = 1)
-                attention_result = self.transformerencoder(input)
+                attention_result = self.extend_multi_transformerencoder(input)
                 if dot:
                     scores = torch.bmm(attention_result[:,0,:].unsqueeze(1), attention_result[:,args.num_mention_vecs:,:].transpose(2,1))
                     scores = scores.squeeze(-2)
                 else:
-                    scores = self.linearhead(attention_result[:,args.num_mention_vecs:,:])
+                    scores = self.extend_multi.linearhead(attention_result[:,args.num_mention_vecs:,:])
                     scores = scores.squeeze(-1)
                 scores_overall = torch.cat([scores_overall, scores[0:1]])
             return scores_overall
@@ -586,27 +581,26 @@ class UnifiedRetriever(nn.Module):
                 # taking (N, 1, D) + (N, C, D) pair as the input
                 # nearest_mention_token_ids: (N, L)
                 # nearest_mention_token_ids: (C, N, L)
-                print("-1", nearest_mention_token_ids[i].shape, nearest_mention_masks[i].shape)
-                print("0", nearest_candidate_token_ids[i].shape, nearest_candidate_masks[i].shape)
+                # print("-1", nearest_mention_token_ids[i].shape, nearest_mention_masks[i].shape)
+                # print("0", nearest_candidate_token_ids[i].shape, nearest_candidate_masks[i].shape)
                 nearest_mention_embeds, nearest_mention_embeds_masks, \
                 nearest_candidates_embeds = self.encode(nearest_mention_token_ids[i], nearest_mention_masks[i],
                                             nearest_candidate_token_ids[i],
                                             nearest_candidate_masks[i])                
-                print("1", xs[i].shape)
-                print("2", nearest_mention_embeds.shape)
-                print("3", ys[i].shape)
-                print("4", nearest_candidates_embeds.shape)
+                # print("1", xs[i].shape)
+                # print("2", nearest_mention_embeds.shape)
+                # print("3", ys[i].shape)
+                # print("4", nearest_candidates_embeds.shape)
 
-                xs_new = torch.cat((xs[i].unsqueeze(-2), nearest_mention_embeds.squeeze(-2)), dim = 0)
-                nearest_candidates_embeds = nearest_candidates_embeds.transpose(1,0)
-                ys_new = torch.cat((ys[i], nearest_candidates_embeds), dim = 0)
-                print("5", xs_new.shape)
-                print("6", ys_new.shape)
+                xs_new = torch.cat((xs[i], nearest_mention_embeds.squeeze(-2)), dim = 0).unsqueeze(1) # (4, 1, 768)
+                ys_new = torch.cat((ys[i].unsqueeze(-2), nearest_candidates_embeds.squeeze(2)), dim = 1).transpose(1,0) # (64, 4, 768)
+                # print("5", xs_new.shape)
+                # print("6", ys_new.shape)
                 input = torch.cat([xs_new, ys_new], dim = 1)
-                attention_result = self.transformerencoder(input)
+                attention_result = self.extend_multi_transformerencoder(input)
                 
                 if dot:
-                    scores = torch.bmm(attention_result[:,0,:].unsqueeze(1), attention_result[:,args.num_mention_vecs:,:].transpose(2,1))
+                    scores = torch.bmm(attention_result[:,0,:].unsqueeze(1), attention_result[:,1:,:].transpose(2,1))
                     scores = scores.squeeze(-2)
                 else:
                     scores = self.linearhead(attention_result[:,args.num_mention_vecs:,:])
@@ -624,7 +618,7 @@ class UnifiedRetriever(nn.Module):
         else:
             input = torch.cat([xs, ys], dim = 1) # concatenate mention and entity embeddings
         # Take concatenated tensor as the input for transformer encoder
-        attention_result = self.transformerencoder(input)
+        attention_result = self.extend_multi_transformerencoder(input)
         # Get score from dot product
         if dot:
             scores = torch.bmm(attention_result[:,0,:].unsqueeze(1), attention_result[:,self.args.num_mention_vecs:,:].transpose(2,1))
