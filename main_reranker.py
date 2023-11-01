@@ -271,10 +271,12 @@ def recall_eval(model, val_loaders, num_total_unorm, eval_mode = "micro", k = 64
         with torch.no_grad(): 
             for i, batch in tqdm(enumerate(val_loaders), total = len(val_loaders)):
                 top_k = model.forward(**batch, recall_eval = True, beam_ratio = args.beam_ratio, args = args).int()
+                # print(top_k, batch["label_idx"])
                 preds = top_k[:, 0]
-                recall_correct += (top_k == 0).sum().item()
-                num_correct += (preds == 0).sum().item()
+                recall_correct += (top_k.cpu() == batch["label_idx"].unsqueeze(-1)).sum().item() 
+                num_correct += (preds.cpu() == batch["label_idx"]).sum().item()
                 nb_samples += preds.size(0)
+                # print(recall_correct, num_correct)
             recall= recall_correct / num_total_unorm * 100
             acc_unorm = num_correct / num_total_unorm * 100
             acc_norm = num_correct / nb_samples * 100

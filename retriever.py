@@ -241,7 +241,7 @@ class UnifiedRetriever(nn.Module):
         else:
             device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
             candidates_embeds = torch.tensor([])
-            num_in_batch = 512
+            num_in_batch = 256
             for i in range(candidate_token_ids.size(1)//num_in_batch):
                 candidate_embed = candidates_encoding(candidate_token_ids[:,num_in_batch*i:num_in_batch*(i+1),:], candidate_masks[:,num_in_batch*i:num_in_batch*(i+1),:]).cpu()
                 candidates_embeds = torch.cat((candidates_embeds, candidate_embed), dim = 1)
