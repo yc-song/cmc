@@ -182,7 +182,7 @@ class BasicDataset(Dataset):
                 for i in range(num_batches):
                     xs_output.extend(xs[i::num_batches]) # spread each candidate with regular step
                 # y_original_index = xs.index(y)
-                label_index = xs_output.index(y)
+                label_idx = xs_output.index(y)
                 # if y_original_index//num_batches == 0:
                     # xs_output[0], xs_output[y_index] = xs_output[y_index], xs_output[0]
                 # else:

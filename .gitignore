@@ -139,3 +139,4 @@ dmypy.json
 .pyre/
 
 mrr.py
+data_debug/*
