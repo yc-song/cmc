@@ -56,14 +56,17 @@ class BasicDataset(Dataset):
         y = mention['label_document_id']
         if self.is_training:
             # At training time we can include target if not already included.
-            if not y in xs:
+            if not y in xs[:self.max_num_candidates]:
                 xs = [y] + [x for x in xs if x != y] 
                 label_idx = 0
             if not self_negs_again:
                 # At first, training set == entire set
                 if args.type_cands == 'self_negative' or args.type_cands == "self_fixed_negative"\
                 or args.type_cands == "self_mixed_negative":
-                    label_idx = xs.index(y)
+                    if not y in xs[:args.num_sampled]:
+                        xs = [y] + [x for x in xs if x != y] 
+                        label_idx = 0
+                    label_idx = xs[:args.num_sampled].index(y)
                     return xs[:args.num_sampled], label_idx
                 elif args.type_cands == 'fixed_negative':
                     pass
@@ -174,18 +177,17 @@ class BasicDataset(Dataset):
                 label_idx = xs.index(y)
                 return xs, label_idx
             elif self.args.val_random_shuffle:
-
-                num_batches = int(len(xs)//self.args.final_k) # 16
-                xs_output = []
+                num_batches = int(len(xs)//self.args.final_k) # Divide entire set by final number of k
+                xs_output = [] # list for final candidates
                 for i in range(num_batches):
-                    xs_output.extend(xs[i::num_batches])
-                y_original_index = xs.index(y)
-                y_index = xs_output.index(y)
-                if y_original_index//num_batches == 0:
-                    xs_output[0], xs_output[y_index] = xs_output[y_index], xs_output[0]
-                else:
-                    xs_output[(y_original_index//num_batches)], xs_output[y_index] = xs_output[y_index], xs_output[(y_original_index//num_batches)]
-                    xs_output[(y_original_index//num_batches)], xs_output[0] = xs_output[0], xs_output[(y_original_index//num_batches)]
+                    xs_output.extend(xs[i::num_batches]) # spread each candidate with regular step
+                # y_original_index = xs.index(y)
+                label_index = xs_output.index(y)
+                # if y_original_index//num_batches == 0:
+                    # xs_output[0], xs_output[y_index] = xs_output[y_index], xs_output[0]
+                # else:
+                    # xs_output[(y_original_index//num_batches)], xs_output[y_index] = xs_output[y_index], xs_output[(y_original_index//num_batches)]
+                    # xs_output[(y_original_index//num_batches)], xs_output[0] = xs_output[0], xs_output[(y_original_index//num_batches)]
                 return xs_output[:self.max_num_candidates], label_idx
 
             elif self.args.gold_first:
@@ -563,7 +565,13 @@ def load_zeshel_data(data_dir, cands_dir, macro_eval=True, debug = False, scores
             for i, line in enumerate(f):
                 field = json.loads(line)
                 if scores is not None:
-                    field['self_scores'] = scores[i]
+                    if debug:
+                        try:
+                            field['self_scores'] = scores[i]
+                        except: pass
+                    else:
+                        field['self_scores'] = scores[i]
+                    
                 candidates[field['mention_id']] = field
         if nearest:
             with open(os.path.join(cands_dir,
