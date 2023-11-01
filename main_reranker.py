@@ -548,8 +548,12 @@ def main(args):
             modified_state_dict = OrderedDict()
             # Change dict keys for loading model parameter
             for k, v in new_state_dict.items():
-                if k.startswith('extend_multi'):
-                    k = k.replace('extend_multi.', 'extend_multi_')
+                if k.startswith('transformerencoder'):
+                    k = k.replace('transformerencoder', 'extend_multi_transformerencoder')
+                elif k.startswith('linearhead'):
+                    k = k.replace('linearhead', 'extend_multi_linearhead')
+                elif k.startswith('token_type_embeddings'):
+                    k = k.replace('token_type_embeddings', 'extend_multi_token_type_embeddings')
                 modified_state_dict[k] = v
             model.load_state_dict(modified_state_dict)            
     # Variables for parallel computing
