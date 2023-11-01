@@ -241,8 +241,9 @@ class UnifiedRetriever(nn.Module):
         else:
             device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
             candidates_embeds = torch.tensor([])
-            for i in range(candidate_token_ids.size(1)//64):
-                candidate_embed = candidates_encoding(candidate_token_ids[:,64*i:64*(i+1),:], candidate_masks[:,64*i:64*(i+1),:]).cpu()
+            num_in_batch = 512
+            for i in range(candidate_token_ids.size(1)//num_in_batch):
+                candidate_embed = candidates_encoding(candidate_token_ids[:,num_in_batch*i:num_in_batch*(i+1),:], candidate_masks[:,num_in_batch*i:num_in_batch*(i+1),:]).cpu()
                 candidates_embeds = torch.cat((candidates_embeds, candidate_embed), dim = 1)
             candidates_embeds = candidates_embeds.to(device)
         if mention_token_ids is not None:
@@ -407,26 +408,27 @@ class UnifiedRetriever(nn.Module):
                 # Deprecated
                 if recall_eval:
                     round = 1
+                    args.too_large = True
                     mention_embeds, mention_embeds_masks, \
                     candidates_embeds = self.encode(mention_token_ids, mention_masks,
                                             candidate_token_ids,
                                             candidate_masks, too_large = args.too_large)
-                    # Get the indices for 0-th and 1-st dimensions
-                    i_indices = torch.arange(candidates_embeds.size(0)).view(-1, 1, 1, 1).float().expand(-1, candidates_embeds.size(1), -1, -1).to(self.device)
-                    j_indices = torch.arange(candidates_embeds.size(1)).view(1, -1, 1, 1).float().expand(candidates_embeds.size(0), -1, -1, -1).to(self.device)
+                    # Get the row and column index each 
+                    i_indices = torch.arange(candidates_embeds.size(0)).view(-1, 1, 1, 1).float().expand(-1, candidates_embeds.size(1), -1, -1).to(self.device) # row index e.g. 0~3 for batch size 4
+                    j_indices = torch.arange(candidates_embeds.size(1)).view(1, -1, 1, 1).float().expand(candidates_embeds.size(0), -1, -1, -1).to(self.device) # colum index i.e. its position inside batch
                     # Expand these indices to match the shape of the original tensor
-                    candidates_embeds = torch.cat((candidates_embeds, i_indices, j_indices), dim=-1) #(B, C_eval, 1, embed_dim) e.g. (2, 1024, 1, 768)
-                    candidates_reshaped = candidates_embeds.reshape(-1, top_k, 1, candidates_embeds.size(-1))
-                    scores_round_0 = self.extend_multi.forward_chunk(mention_embeds, candidates_reshaped[:,:,:,:-2], dot = dot, args = args)  # (B*16, top_k)
+                    candidates_embeds = torch.cat((candidates_embeds, i_indices, j_indices), dim=-1) # concatenating row and column index at the end.
+                    candidates_reshaped = candidates_embeds.reshape(-1, top_k, 1, candidates_embeds.size(-1)) # For processing through the model which is optimized for # of candidates 64, reshape the input shape. 
+                    scores_round_0 = self.forward_chunk(mention_embeds, candidates_reshaped[:,:,:,:-2], dot = dot, args = args)  # (B*16, top_k)
                     candidates_advanced_idxs = torch.topk(scores_round_0, int(top_k*beam_ratio))[1]
                     candidates_advanced = torch.gather(candidates_reshaped, 1, candidates_advanced_idxs.unsqueeze(2).unsqueeze(3).expand(-1, -1, 1, candidates_embeds.size(-1))) 
                     while torch.numel(candidates_advanced_idxs)//B > top_k:
                         candidates_advanced = candidates_advanced.reshape(-1, top_k, 1, candidates_advanced.size(-1))
-                        scores = self.extend_multi.forward_chunk(mention_embeds, candidates_advanced[:,:,:,:-2], dot = dot, args = args)
+                        scores = self.forward_chunk(mention_embeds, candidates_advanced[:,:,:,:-2], dot = dot, args = args)
                         candidates_advanced_idxs = torch.topk(scores, int(top_k*beam_ratio))[1]
                         candidates_advanced = torch.gather(candidates_advanced, 1, candidates_advanced_idxs.unsqueeze(2).unsqueeze(3).expand(-1, -1, 1, candidates_embeds.size(-1))) 
                     candidates_advanced = candidates_advanced.reshape(-1, top_k, 1, candidates_advanced.size(-1))
-                    scores = self.extend_multi.forward_chunk(mention_embeds, candidates_advanced[:,:,:,:-2], dot = dot, args = args)
+                    scores = self.forward_chunk(mention_embeds, candidates_advanced[:,:,:,:-2], dot = dot, args = args)
                     candidates_advanced_idxs = torch.argsort(scores, descending = True)
                     candidates_advanced = torch.gather(candidates_advanced, 1, candidates_advanced_idxs.unsqueeze(2).unsqueeze(3).expand(-1, -1, 1, candidates_embeds.size(-1))) 
                     return candidates_advanced[:,:,0,-1]
@@ -629,7 +631,26 @@ class UnifiedRetriever(nn.Module):
             scores = scores.squeeze(-1)
         
         return scores
-
+    def forward_chunk(self, xs, ys, dot = False, args = None):
+        xs = xs.to(self.device) # (batch size, 1, embed_dim)
+        ys = ys.squeeze(dim = -2).to(self.device) #(batch_size, cands, embed_dim)
+        xs = xs.repeat_interleave(int(ys.size(0)//xs.size(0)), dim=0)
+        if args.token_type:
+            token_type_xs = torch.zeros(xs.size(0), xs.size(1)).int().to(self.device)
+            token_embedding_xs = self.token_type_embeddings(token_type_xs)
+            token_type_ys = torch.ones(ys.size(0), ys.size(1)).int().to(self.device)
+            token_embedding_ys = self.token_type_embeddings(token_type_ys)
+            input = torch.cat([xs + token_embedding_xs, ys + token_embedding_ys], dim = 1)
+        else:
+            input = torch.cat([xs, ys], dim = 1)
+        attention_result = self.extend_multi_transformerencoder(input)
+        if dot:
+            scores = torch.bmm(attention_result[:,0,:].unsqueeze(1), attention_result[:,args.num_mention_vecs:,:].transpose(2,1))
+            scores = scores.squeeze(-2)
+        else:
+            scores = self.linearhead(attention_result[:,args.num_mention_vecs:,:])
+            scores = scores.squeeze(-1)
+        return scores
 class extend_multi(nn.Module):
     def __init__(self, num_heads, num_layers, args):
         super().__init__()

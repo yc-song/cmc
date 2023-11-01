@@ -25,7 +25,7 @@ self_negative_methods=[
     'self_mixed_negative',
     'self_negative'
 ]
-
+depth = [2,4,8,16,32,64]
 def set_seed(args):
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -51,34 +51,34 @@ def configure_optimizer(args, model, num_train_examples):
     ]
     optimizer = AdamW(optimizer_grouped_parameters,
                     eps=args.adam_epsilon)
-    # # except:
-    # optimizer_grouped_parameters = [
-    #     {'params': [p for n, p in model.named_parameters()
-    #                 if any(nd in n for nd in transformer) and any(nd in n for nd in no_decay) and not any(nd in n for nd in identity_init)],
-    #     'lr': args.lr, 'weight_decay': 0.0,
-    #     'names': [n for n, p in model.named_parameters()
-    #                 if any(nd in n for nd in transformer) and any(nd in n for nd in no_decay) and not any(nd in n for nd in identity_init)]},
-    #     {'params': [p for n, p in model.named_parameters()
-    #                 if any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)],
-    #     'weight_decay': 0.0, 'lr': args.bert_lr,
-    #     'names': [n for n, p in model.named_parameters()
-    #                 if any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)]},
-    #     {'params': [p for n, p in model.named_parameters()
-    #                 if not any(nd in n for nd in no_decay) and any(nd in n for nd in transformer) and not any(nd in n for nd in identity_init) ],
-    #     'lr': args.lr, 'weight_decay': args.weight_decay,
-    #     'names': [n for n, p in model.named_parameters()
-    #                 if not any(nd in n for nd in no_decay) and any(nd in n for nd in transformer) and not any(nd in n for nd in identity_init)]},
-    #     {'params': [p for n, p in model.named_parameters()
-    #                 if not any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)],
-    #     'weight_decay': args.weight_decay, 'lr': args.bert_lr,
-    #     'names': [n for n, p in model.named_parameters()
-    #                 if not any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)]},
-    #     {'params': [p for n, p in model.named_parameters()
-    #                 if any(nd in n for nd in identity_init)],
-    #     'weight_decay': args.weight_decay, 'lr': args.weight_lr,
-    #     'names': [n for n, p in model.named_parameters()
-    #                 if any(nd in n for nd in identity_init)]}
-    # ]
+    # except:
+    optimizer_grouped_parameters = [
+        {'params': [p for n, p in model.named_parameters()
+                    if any(nd in n for nd in transformer) and any(nd in n for nd in no_decay) and not any(nd in n for nd in identity_init)],
+        'lr': args.lr, 'weight_decay': 0.0,
+        'names': [n for n, p in model.named_parameters()
+                    if any(nd in n for nd in transformer) and any(nd in n for nd in no_decay) and not any(nd in n for nd in identity_init)]},
+        {'params': [p for n, p in model.named_parameters()
+                    if any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)],
+        'weight_decay': 0.0, 'lr': args.bert_lr,
+        'names': [n for n, p in model.named_parameters()
+                    if any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)]},
+        {'params': [p for n, p in model.named_parameters()
+                    if not any(nd in n for nd in no_decay) and any(nd in n for nd in transformer) and not any(nd in n for nd in identity_init) ],
+        'lr': args.lr, 'weight_decay': args.weight_decay,
+        'names': [n for n, p in model.named_parameters()
+                    if not any(nd in n for nd in no_decay) and any(nd in n for nd in transformer) and not any(nd in n for nd in identity_init)]},
+        {'params': [p for n, p in model.named_parameters()
+                    if not any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)],
+        'weight_decay': args.weight_decay, 'lr': args.bert_lr,
+        'names': [n for n, p in model.named_parameters()
+                    if not any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)]},
+        {'params': [p for n, p in model.named_parameters()
+                    if any(nd in n for nd in identity_init)],
+        'weight_decay': args.weight_decay, 'lr': args.weight_lr,
+        'names': [n for n, p in model.named_parameters()
+                    if any(nd in n for nd in identity_init)]}
+    ]
     optimizer = AdamW(optimizer_grouped_parameters,
                     eps=args.adam_epsilon)
 
@@ -108,7 +108,7 @@ def configure_optimizer_simple(args, model, num_train_examples):
     return optimizer, scheduler, num_train_steps, num_warmup_steps
 
 
-def micro_eval(model, loader_eval, num_total_unorm, args = None, k=64, mode = None):
+def micro_eval(model, loader_eval, num_total_unorm, args = None, mode = None):
     if args.store_reranker_score: assert mode is not None
 
     model.eval()
@@ -116,7 +116,7 @@ def micro_eval(model, loader_eval, num_total_unorm, args = None, k=64, mode = No
     num_total = 0
     num_correct = 0
     loss_total = 0
-    recall_correct = 0
+    recall_correct_list = [0]*len(depth)
     mrr_total = 0
     if args.store_reranker_score:
         cands = []
@@ -153,7 +153,9 @@ def micro_eval(model, loader_eval, num_total_unorm, args = None, k=64, mode = No
             #     label_ids = torch.zeros_like(label_ids).int()
             num_total += len(preds)
             num_correct += (preds.cpu() == label_ids).sum().item()
-            recall_correct += (scores.topk(k, dim=1)[1].cpu()==label_ids.unsqueeze(-1)).sum().item()
+            for k in range(len(depth)):
+                recall_correct_list[k] += (scores.topk(depth[k], dim=1)[1].cpu()==label_ids.unsqueeze(-1)).sum().item()
+            # recall_correct += (scores.topk(k, dim=1)[1].cpu()==label_ids.unsqueeze(-1)).sum().item()
             # getting mrr
             # after ranking scores, finding out the rank of lables
             idx_array = rankdata(-scores.cpu().detach().numpy(), axis = 1, method = 'min')
@@ -187,15 +189,14 @@ def micro_eval(model, loader_eval, num_total_unorm, args = None, k=64, mode = No
     if args.debug: num_total_unorm = num_total
     print(num_total_unorm)
     acc_unorm = num_correct / num_total_unorm * 100
-    recall = recall_correct / num_total_unorm * 100
-    mrr = mrr_total / num_total_unorm * 100
+    recall_correct_list = [item / num_total_unorm * 100 for item in recall_correct_list]
+    mrr = mrr_total / num_total * 100
     return {'acc_norm': acc_norm, 'acc_unorm': acc_unorm,
             'num_correct': num_correct,
             'num_total_norm': num_total,
             'num_total_unorm': num_total_unorm,
             'val_loss': loss_total,
-            "recall": recall,
-            "recall_correct": recall_correct,
+            "recall": recall_correct_list,
             'mrr': mrr}
 
 
@@ -207,7 +208,7 @@ def macro_eval(model, val_loaders, num_total_unorm, args = None):
     num_correct_list = []
     num_total_norm = []
     loss_total = 0
-    recall = 0
+    recall = [0]*len(depth)
     mrr_total = 0
     mrr_list = []
     recall_correct_list = []
@@ -221,14 +222,17 @@ def macro_eval(model, val_loaders, num_total_unorm, args = None):
         loss_total += micro_results['val_loss']
         num_correct_list.append(micro_results['num_correct'])
         num_total_norm.append(micro_results['num_total_norm'])
-        recall += micro_results['recall']
-        recall_correct_list.append(micro_results['recall_correct'])
+        for k in range(len(depth)):
+            recall[k] += micro_results['recall'][k] 
+        print(recall)
+        recall_correct_list.append(micro_results['recall'])
         mrr_total += micro_results['mrr']
         mrr_list.append(micro_results['mrr'])
     acc_norm /= len(val_loaders)
     acc_unorm /= len(val_loaders)
     loss_total /= len(val_loaders)
-    recall /= len(val_loaders)
+    for i in range(len(recall)):
+        recall[i] /= len(val_loaders)
     mrr_total /= len(val_loaders)
 
     model.train()
@@ -579,44 +583,43 @@ def main(args):
         optimizer, scheduler, num_train_steps, num_warmup_steps \
             = configure_optimizer(args, model, len(data[1][0]))
     if args.resume_training and not args.training_finished:
-        # try:
-    
-        optimizer.load_state_dict(cpt['opt_sd'])
-        # except: 
-        #     no_decay = ['bias', 'LayerNorm.weight']
-        #     transformer = ['extend_multi', 'mlp']
-        #     identity_init = ['transformerencoderlayer.weight']
-        #     optimizer_grouped_parameters = [
-        #     {'params': [p for n, p in model.named_parameters()
-        #                 if any(nd in n for nd in transformer) and any(nd in n for nd in no_decay) and not any(nd in n for nd in identity_init)],
-        #     'lr': args.lr, 'weight_decay': 0.0,
-        #     'names': [n for n, p in model.named_parameters()
-        #                 if any(nd in n for nd in transformer) and any(nd in n for nd in no_decay) and not any(nd in n for nd in identity_init)]},
-        #     {'params': [p for n, p in model.named_parameters()
-        #                 if any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)],
-        #     'weight_decay': 0.0, 'lr': args.bert_lr,
-        #     'names': [n for n, p in model.named_parameters()
-        #                 if any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)]},
-        #     {'params': [p for n, p in model.named_parameters()
-        #                 if not any(nd in n for nd in no_decay) and any(nd in n for nd in transformer) and not any(nd in n for nd in identity_init) ],
-        #     'lr': args.lr, 'weight_decay': args.weight_decay,
-        #     'names': [n for n, p in model.named_parameters()
-        #                 if not any(nd in n for nd in no_decay) and any(nd in n for nd in transformer) and not any(nd in n for nd in identity_init)]},
-        #     {'params': [p for n, p in model.named_parameters()
-        #                 if not any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)],
-        #     'weight_decay': args.weight_decay, 'lr': args.bert_lr,
-        #     'names': [n for n, p in model.named_parameters()
-        #                 if not any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)]},
-        #     {'params': [p for n, p in model.named_parameters()
-        #                 if any(nd in n for nd in identity_init)],
-        #     'weight_decay': args.weight_decay, 'lr': args.weight_lr,
-        #     'names': [n for n, p in model.named_parameters()
-        #                 if any(nd in n for nd in identity_init)]}
-        #     ]
-        #     optimizer = AdamW(optimizer_grouped_parameters,
-        #               eps=args.adam_epsilon)
-        #     optimizer.load_state_dict(cpt['opt_sd'])
-        #     print(optimizer)    
+        try:
+            optimizer.load_state_dict(cpt['opt_sd'])
+        except: 
+            no_decay = ['bias', 'LayerNorm.weight']
+            transformer = ['extend_multi', 'mlp']
+            identity_init = ['transformerencoderlayer.weight']
+            optimizer_grouped_parameters = [
+            {'params': [p for n, p in model.named_parameters()
+                        if any(nd in n for nd in transformer) and any(nd in n for nd in no_decay) and not any(nd in n for nd in identity_init)],
+            'lr': args.lr, 'weight_decay': 0.0,
+            'names': [n for n, p in model.named_parameters()
+                        if any(nd in n for nd in transformer) and any(nd in n for nd in no_decay) and not any(nd in n for nd in identity_init)]},
+            {'params': [p for n, p in model.named_parameters()
+                        if any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)],
+            'weight_decay': 0.0, 'lr': args.bert_lr,
+            'names': [n for n, p in model.named_parameters()
+                        if any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)]},
+            {'params': [p for n, p in model.named_parameters()
+                        if not any(nd in n for nd in no_decay) and any(nd in n for nd in transformer) and not any(nd in n for nd in identity_init) ],
+            'lr': args.lr, 'weight_decay': args.weight_decay,
+            'names': [n for n, p in model.named_parameters()
+                        if not any(nd in n for nd in no_decay) and any(nd in n for nd in transformer) and not any(nd in n for nd in identity_init)]},
+            {'params': [p for n, p in model.named_parameters()
+                        if not any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)],
+            'weight_decay': args.weight_decay, 'lr': args.bert_lr,
+            'names': [n for n, p in model.named_parameters()
+                        if not any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)]},
+            {'params': [p for n, p in model.named_parameters()
+                        if any(nd in n for nd in identity_init)],
+            'weight_decay': args.weight_decay, 'lr': args.weight_lr,
+            'names': [n for n, p in model.named_parameters()
+                        if any(nd in n for nd in identity_init)]}
+            ]
+            optimizer = AdamW(optimizer_grouped_parameters,
+                      eps=args.adam_epsilon)
+            optimizer.load_state_dict(cpt['opt_sd'])
+            print(optimizer)    
         scheduler.load_state_dict(cpt['scheduler_sd'])
         if device.type == 'cuda':
             for state in optimizer.state.values():
@@ -707,8 +710,9 @@ def main(args):
                     pass
                 scores_tensor = torch.tensor([]).to(device)
                 recall_evaluate = False
+                model.evaluate_on = False
                 # if args.type_model == 'extend_multi' or args.type_model == 'extend_multi_dot':
-                    # recall_evaluate = True
+                #     recall_evaluate = True
                 for i, batch in tqdm(enumerate(loader_train), total=len(loader_train)):
                     result = model.forward(**batch, recall_eval=recall_evaluate, beam_ratio=args.beam_ratio, sampling = True, args = args)
                     try:
@@ -716,7 +720,6 @@ def main(args):
                     except:
                         scores = result['scores']
                     scores_tensor = torch.cat([scores_tensor, scores], dim=0)
-
             data = load_zeshel_data(args.data, args.cands_dir, macro_eval_mode, args.debug, scores = scores_tensor, nearest=args.nearest)
             # Getting new train dataloader
             loader_train, _, _, \
@@ -961,7 +964,27 @@ def main(args):
                 eval_result[1]
                 ))
             wandb.log({"retriever/val_recall": eval_result[0], "retriever/val_accuracy": eval_result[1]})
+        if args.type_model != "full":
+            print('recall eval')
+            args.C_eval = 1024
+            args.val_random_shuffle =True
+            loader_train, loader_val, loader_test, \
+            num_val_samples, num_test_samples = get_loaders(data, tokenizer, args.L,
+                                                        args.C, args.B,
+                                                        args.num_workers,
+                                                        args.inputmark,
+                                                        args.C_eval,
+                                                        use_full_dataset,
+                                                        macro_eval_mode, args = args)
 
+            beam_list = [0.0625, 0.25, 0.5]
+            for beam in beam_list:
+                args.beam_ratio = beam
+                recall_result = recall_eval(model, loader_val, num_val_samples, eval_mode=args.eval_method, args=args)
+                print(beam, recall_result)
+                wandb_log = {"valid(tournament, beam {})/unnormalized acc".format(str(beam)): recall_result['acc_unorm'], \
+                "valid(tournament, beam {})/recall".format(str(beam)): recall_result['recall']}
+                wandb.log(wandb_log)
         loader_train, loader_val, loader_test, \
         num_val_samples, num_test_samples = get_loaders(data, tokenizer, args.L,
                                                         args.C, args.B,
@@ -981,32 +1004,33 @@ def main(args):
                 name = 'module.' + k  # remove `module.`
                 new_state_dict[name] = v
             try:
-                model.load_state_dict(cpt['sd'])
-            except: 
+                model.load_state_dict(new_state_dict)
+            except:
                 new_state_dict = cpt['sd']
                 modified_state_dict = OrderedDict()
                 # Change dict keys for loading model parameter
                 for k, v in new_state_dict.items():
-                    if k.startswith('extend_multi'):
-                        k = k.replace('extend_multi.', 'extend_multi_')
-                    modified_state_dict[k] = v
-                model.load_state_dict(modified_state_dict)   
+                    if 'extend_multi.' in k:
+                        name = k.replace('extend_multi.', 'module.extend_multi_')
+                    else:
+                        name = 'module.' + k
+                    modified_state_dict[name] = v
+                model.load_state_dict(modified_state_dict)
         else:
             try:
                 model.load_state_dict(cpt['sd'])
-            except: 
+            except:
                 new_state_dict = cpt['sd']
                 modified_state_dict = OrderedDict()
                 # Change dict keys for loading model parameter
                 for k, v in new_state_dict.items():
-                    if k.startswith('extend_multi'):
+                    if 'extend_multi.' in k:
                         k = k.replace('extend_multi.', 'extend_multi_')
                     modified_state_dict[k] = v
-                model.load_state_dict(modified_state_dict)   
+                model.load_state_dict(modified_state_dict)
         if args.store_reranker_score:
             micro_eval(model, loader_train, num_val_samples, args, mode = 'train')
 
-        
         print('start evaluation on val set (to check whether correct model loaded)')
         if not args.case_based:
             if args.eval_method == 'micro':
@@ -1028,10 +1052,15 @@ def main(args):
                 val_result['num_correct'],
                 val_result['num_total_norm'],
                 newline=False))
-        wandb.log({"valid/unnormalized acc (cands {})".format(str(args.C_eval)): val_result['acc_unorm'], \
-                "valid/normalized acc (cands {})".format(str(args.C_eval)): val_result['acc_norm'],\
-                "valid/micro_unnormalized_acc(cands {})".format(str(args.C_eval)): sum(val_result['num_correct'])/sum(val_result['num_total_unorm']),\
-                "valid/micro_normalized_acc(cands {})".format(str(args.C_eval)): sum(val_result['num_correct'])/sum(val_result['num_total_norm'])})
+        wandb_log = {"valid(cands {})/unnormalized acc".format(str(args.C_eval)): val_result['acc_unorm'], \
+                "valid(cands {})/normalized acc".format(str(args.C_eval)): val_result['acc_norm'],\
+                "valid(cands {})/micro_unnormalized_acc".format(str(args.C_eval)): sum(val_result['num_correct'])/sum(val_result['num_total_unorm']),\
+                "valid(cands {})/micro_normalized_acc".format(str(args.C_eval)): sum(val_result['num_correct'])/sum(val_result['num_total_norm']),\
+                "valid(cands {})/mrr".format(str(args.C_eval)): val_result['mrr']}
+        for i in range(len(depth)):
+            wandb_log["valid(cands {})/recall@{}".format(str(args.C_eval), depth[i])] = val_result['recall'][i]
+        print(wandb_log)
+        wandb.log(wandb_log)
 
         print('start evaluation on test set')
         if loader_test is None:
@@ -1082,42 +1111,26 @@ def main(args):
             elif args.eval_method == 'macro':
                 val_result = macro_eval(model, loader_val, num_val_samples, args)
             print('C_eval: {}'.format(C_eval_elem))
+            print(val_result)
             print('val acc unormalized  {:8.4f} ({}/{})|'
-                    'val acc normalized  {:8.4f} ({}/{})|'
-                    'val recall {:8.4f} ({}/{}) '.format(
+                    'val acc normalized  {:8.4f} ({}/{})|'.format(
                 val_result['acc_unorm'],
                 val_result['num_correct'],
                 num_val_samples,
                 val_result['acc_norm'],
                 val_result['num_correct'],
                 val_result['num_total_norm'],
-                val_result['recall'],
-                val_result['recall_correct'],
-                num_val_samples,
                 newline=False))
-            wandb.log({"valid/unnormalized acc (cands {})".format(str(C_eval_elem)): val_result['acc_unorm'], \
-                "valid/normalized acc (cands {})".format(str(C_eval_elem)): val_result['acc_norm'],\
-                "valid/micro_unnormalized_acc(cands {})".format(str(C_eval_elem)): sum(val_result['num_correct'])/sum(val_result['num_total_unorm']),\
-                "valid/micro_normalized_acc(cands {})".format(str(C_eval_elem)): sum(val_result['num_correct'])/sum(val_result['num_total_norm']),
-                "valid/recall(cands {})".format(str(C_eval_elem)): val_result['recall']})
-        if args.type_model != "full":
-            print('recall eval')
-            args.C_eval = 1024
-            args.val_random_shuffle =True
-            loader_train, loader_val, loader_test, \
-            num_val_samples, num_test_samples = get_loaders(data, tokenizer, args.L,
-                                                        args.C, args.B,
-                                                        args.num_workers,
-                                                        args.inputmark,
-                                                        args.C_eval,
-                                                        use_full_dataset,
-                                                        macro_eval_mode, args = args)
+            wandb_log = {"valid(cands {})/unnormalized acc".format(str(C_eval_elem)): val_result['acc_unorm'], \
+                "valid(cands {})/normalized acc".format(str(C_eval_elem)): val_result['acc_norm'],\
+                "valid(cands {})/micro_unnormalized_acc".format(str(C_eval_elem)): sum(val_result['num_correct'])/sum(val_result['num_total_unorm']),\
+                "valid(cands {})/micro_normalized_acc".format(str(C_eval_elem)): sum(val_result['num_correct'])/sum(val_result['num_total_norm']),\
+                "valid(cands {})/mrr".format(str(args.C_eval)): val_result['mrr']}
+            for i in range(len(depth)):
+                wandb_log["valid(cands {})/recall@{}".format(str(C_eval_elem), depth[i])] = val_result['recall'][i]
+            print(wandb_log)
+            wandb.log(wandb_log)
 
-            beam_list = [0.0625, 0.25, 0.5]
-            for beam in beam_list:
-                args.beam_ratio = beam
-                recall_result = recall_eval(model, loader_val, num_val_samples, eval_mode=args.eval_method, args=args)
-                print(beam, recall_result)
 
 #  writer.close()
 
