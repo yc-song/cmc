@@ -966,27 +966,7 @@ def main(args):
                 eval_result[1]
                 ))
             wandb.log({"retriever/val_recall": eval_result[0], "retriever/val_accuracy": eval_result[1]})
-        if args.type_model != "full":
-            print('recall eval')
-            args.C_eval = 1024
-            args.val_random_shuffle =True
-            loader_train, loader_val, loader_test, \
-            num_val_samples, num_test_samples = get_loaders(data, tokenizer, args.L,
-                                                        args.C, args.B,
-                                                        args.num_workers,
-                                                        args.inputmark,
-                                                        args.C_eval,
-                                                        use_full_dataset,
-                                                        macro_eval_mode, args = args)
 
-            beam_list = [0.0625, 0.25, 0.5]
-            for beam in beam_list:
-                args.beam_ratio = beam
-                recall_result = recall_eval(model, loader_val, num_val_samples, eval_mode=args.eval_method, args=args)
-                print(beam, recall_result)
-                wandb_log = {"valid(tournament, beam {})/unnormalized acc".format(str(beam)): recall_result['acc_unorm'], \
-                "valid(tournament, beam {})/recall".format(str(beam)): recall_result['recall']}
-                wandb.log(wandb_log)
         loader_train, loader_val, loader_test, \
         num_val_samples, num_test_samples = get_loaders(data, tokenizer, args.L,
                                                         args.C, args.B,
@@ -1133,7 +1113,27 @@ def main(args):
             print(wandb_log)
             wandb.log(wandb_log)
 
+        if args.type_model != "full":
+            print('recall eval')
+            args.C_eval = 1024
+            args.val_random_shuffle =True
+            loader_train, loader_val, loader_test, \
+            num_val_samples, num_test_samples = get_loaders(data, tokenizer, args.L,
+                                                        args.C, args.B,
+                                                        args.num_workers,
+                                                        args.inputmark,
+                                                        args.C_eval,
+                                                        use_full_dataset,
+                                                        macro_eval_mode, args = args)
 
+            beam_list = [0.0625, 0.25, 0.5]
+            for beam in beam_list:
+                args.beam_ratio = beam
+                recall_result = recall_eval(model, loader_val, num_val_samples, eval_mode=args.eval_method, args=args)
+                print(beam, recall_result)
+                wandb_log = {"valid(tournament, beam {})/unnormalized acc".format(str(beam)): recall_result['acc_unorm'], \
+                "valid(tournament, beam {})/recall".format(str(beam)): recall_result['recall']}
+                wandb.log(wandb_log)
 #  writer.close()
 
 
