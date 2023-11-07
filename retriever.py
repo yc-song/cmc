@@ -8,6 +8,8 @@ import math
 from torch.utils.data import DataLoader
 from torch.multiprocessing import Pool
 import wandb
+from scipy.stats import rankdata
+import numpy as np
 NEAR_INF = 1e20
 
 
@@ -109,7 +111,7 @@ class SoftAttention(nn.Module):
         return scores
 
 # Distillation loss function 
-def distillation_loss(student_outputs, teacher_outputs, labels, alpha = 0.5, temperature = 1, valid = False):
+def distillation_loss(student_outputs, teacher_outputs, labels, alpha = 0.5, temperature = 1, valid = False, mrr_penalty = False):
     ## Inputs
     # student_outputs (torch.tensor): score distribution from the model trained
     # teacher_outputs (torch.tensor): score distribution from the teacher model
@@ -134,7 +136,29 @@ def distillation_loss(student_outputs, teacher_outputs, labels, alpha = 0.5, tem
         teacher_loss = torch.tensor([0.]).to(device)
     # Student loss is calculated by cross-entropy loss
     student_loss = nn.CrossEntropyLoss()(student_outputs, labels)
-
+    if mrr_penalty:
+        # Zero tensor for hinge loss
+        zero_tensors = torch.zeros_like(labels)
+        zero_tensors = np.expand_dims(zero_tensors.cpu().detach().numpy(), axis = 1)
+        # Reranker ranking
+        idx_array_reranker = rankdata(-student_outputs.cpu().detach().numpy(), axis = 1, method = 'min')
+        rank_reranker = np.take_along_axis(idx_array_reranker, labels[:, None].cpu().detach().numpy(), axis=1)
+        # Retriever ranking
+        idx_array_retriever = rankdata(-teacher_outputs.cpu().detach().numpy(), axis = 1, method = 'min')
+        rank_retriever = np.take_along_axis(idx_array_retriever, labels[:, None].cpu().detach().numpy(), axis=1)
+        # penalty is defined as (max(0, 1/rank_retriever-1/rank_reranker))
+        print("1", student_outputs, teacher_outputs, labels)
+        penalty = np.maximum(zero_tensors, 1/rank_retriever-1/rank_reranker)
+        print("2", rank_reranker, rank_retriever)
+        penalty = torch.from_numpy(penalty).squeeze(1).to(device)
+        print("3", penalty)
+        # penalty is multiplied to loss of each element
+        # https://discuss.pytorch.org/t/weighted-cross-entropy-for-each-sample-in-batch/101358/10
+        penalty_loss = torch.nn.CrossEntropyLoss(reduction='none')(student_outputs, labels)
+        penalty_loss *= penalty
+        penalty_loss = torch.mean(penalty_loss)
+        print("4", student_loss, penalty_loss)
+        student_loss += penalty_loss
     # Weighted sum of teacher and student loss
     loss = alpha*student_loss + (1-alpha)*teacher_loss
     return loss, student_loss, teacher_loss
@@ -498,7 +522,7 @@ class UnifiedRetriever(nn.Module):
                 candidate_probs = candidate_probs.to(self.device)
                 scores[:, 1:] -= ((C - 1) * candidate_probs).log()
             if args.distill_training:
-                loss, student_loss, teacher_loss = distillation_loss(scores, teacher_scores, labels, args.alpha)
+                loss, student_loss, teacher_loss = distillation_loss(scores, teacher_scores, labels, args.alpha, mrr_penalty = args.mrr_penalty)
                 return loss, predicts, scores, student_loss, teacher_loss
             elif args.energy_model:
                 candidates_embeds = candidates_embeds.squeeze(-2)
