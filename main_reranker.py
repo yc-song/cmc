@@ -38,19 +38,19 @@ def configure_optimizer(args, model, num_train_examples):
     no_decay = ['bias', 'LayerNorm.weight']
     transformer = ['extend_multi', 'mlp']
     identity_init = ['transformerencoderlayer.weight']
-    optimizer_grouped_parameters = [
-    {'params': [p for n, p in model.named_parameters()
-                if not any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)],
-        'weight_decay': args.weight_decay, 'lr': args.bert_lr},
-    {'params': [p for n, p in model.named_parameters()
-                if any(nd in n for nd in no_decay)],
-        'weight_decay': 0.0, 'lr': args.bert_lr},
-    {'params': [p for n, p in model.named_parameters()
-                if any(nd in n for nd in transformer) and not any(nd in n for nd in no_decay)],
-        'lr': args.lr, 'weight_decay': args.weight_decay},
-    ]
-    optimizer = AdamW(optimizer_grouped_parameters,
-                    eps=args.adam_epsilon)
+    # optimizer_grouped_parameters = [
+    # {'params': [p for n, p in model.named_parameters()
+    #             if not any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)],
+    #     'weight_decay': args.weight_decay, 'lr': args.bert_lr},
+    # {'params': [p for n, p in model.named_parameters()
+    #             if any(nd in n for nd in no_decay)],
+    #     'weight_decay': 0.0, 'lr': args.bert_lr},
+    # {'params': [p for n, p in model.named_parameters()
+    #             if any(nd in n for nd in transformer) and not any(nd in n for nd in no_decay)],
+    #     'lr': args.lr, 'weight_decay': args.weight_decay},
+    # ]
+    # optimizer = AdamW(optimizer_grouped_parameters,
+    #                 eps=args.adam_epsilon)
     # except:
     optimizer_grouped_parameters = [
         {'params': [p for n, p in model.named_parameters()
@@ -78,14 +78,13 @@ def configure_optimizer(args, model, num_train_examples):
         'weight_decay': args.weight_decay, 'lr': args.weight_lr,
         'names': [n for n, p in model.named_parameters()
                     if any(nd in n for nd in identity_init)]}
-    ]
+        ]
     optimizer = AdamW(optimizer_grouped_parameters,
                     eps=args.adam_epsilon)
 
     print(optimizer)
-
     num_train_steps = int(num_train_examples / args.B /
-                          args.gradient_accumulation_steps * args.epochs)
+                            args.gradient_accumulation_steps * args.epochs)
     num_warmup_steps = int(num_train_steps * args.warmup_proportion)
     if args.lambda_scheduler:
         scheduler = LambdaLR(optimizer, lr_lambda=lambda step: 1 - step / num_train_steps)
@@ -554,12 +553,16 @@ def main(args):
             modified_state_dict = OrderedDict()
             # Change dict keys for loading model parameter
             for k, v in new_state_dict.items():
-                if k.startswith('transformerencoder'):
-                    k = k.replace('transformerencoder', 'extend_multi_transformerencoder')
-                elif k.startswith('linearhead'):
-                    k = k.replace('linearhead', 'extend_multi_linearhead')
-                elif k.startswith('token_type_embeddings'):
-                    k = k.replace('token_type_embeddings', 'extend_multi_token_type_embeddings')
+                if args.run_id=='j3bgbhma':
+                    if k.startswith('extend_multi'):
+                        k = k.replace('extend_multi.', 'extend_multi_')
+                if args.run_id=='35lamxa3' or '1dmse9gy':
+                    if k.startswith('transformerencoder'):
+                        k = k.replace('transformerencoder', 'extend_multi_transformerencoder')
+                    elif k.startswith('linearhead'):
+                        k = k.replace('linearhead', 'extend_multi_linearhead')
+                    elif k.startswith('token_type_embeddings'):
+                        k = k.replace('token_type_embeddings', 'extend_multi_token_type_embeddings')
                 modified_state_dict[k] = v
             model.load_state_dict(modified_state_dict)            
     # Variables for parallel computing
@@ -578,50 +581,53 @@ def main(args):
     data = load_zeshel_data(args.data, args.cands_dir, macro_eval_mode, args.debug, nearest = args.nearest)
     loader_test = None
     # simpleoptim: disable learning rate schduler
+    trainset_size = len(data[1][0])
+    if args.use_val_dataset:
+        trainset_size += len(data[2][0])
     if args.simpleoptim:
         optimizer, scheduler, num_train_steps, num_warmup_steps \
-            = configure_optimizer_simple(args, model, len(data[1][0]))
+            = configure_optimizer_simple(args, model, trainset_size)
     else:
         optimizer, scheduler, num_train_steps, num_warmup_steps \
-            = configure_optimizer(args, model, len(data[1][0]))
+            = configure_optimizer(args, model, trainset_size)
     if args.resume_training and not args.training_finished:
-        try:
-            optimizer.load_state_dict(cpt['opt_sd'])
-        except: 
-            no_decay = ['bias', 'LayerNorm.weight']
-            transformer = ['extend_multi', 'mlp']
-            identity_init = ['transformerencoderlayer.weight']
-            optimizer_grouped_parameters = [
-            {'params': [p for n, p in model.named_parameters()
-                        if any(nd in n for nd in transformer) and any(nd in n for nd in no_decay) and not any(nd in n for nd in identity_init)],
-            'lr': args.lr, 'weight_decay': 0.0,
-            'names': [n for n, p in model.named_parameters()
-                        if any(nd in n for nd in transformer) and any(nd in n for nd in no_decay) and not any(nd in n for nd in identity_init)]},
-            {'params': [p for n, p in model.named_parameters()
-                        if any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)],
-            'weight_decay': 0.0, 'lr': args.bert_lr,
-            'names': [n for n, p in model.named_parameters()
-                        if any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)]},
-            {'params': [p for n, p in model.named_parameters()
-                        if not any(nd in n for nd in no_decay) and any(nd in n for nd in transformer) and not any(nd in n for nd in identity_init) ],
-            'lr': args.lr, 'weight_decay': args.weight_decay,
-            'names': [n for n, p in model.named_parameters()
-                        if not any(nd in n for nd in no_decay) and any(nd in n for nd in transformer) and not any(nd in n for nd in identity_init)]},
-            {'params': [p for n, p in model.named_parameters()
-                        if not any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)],
-            'weight_decay': args.weight_decay, 'lr': args.bert_lr,
-            'names': [n for n, p in model.named_parameters()
-                        if not any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)]},
-            {'params': [p for n, p in model.named_parameters()
-                        if any(nd in n for nd in identity_init)],
-            'weight_decay': args.weight_decay, 'lr': args.weight_lr,
-            'names': [n for n, p in model.named_parameters()
-                        if any(nd in n for nd in identity_init)]}
-            ]
-            optimizer = AdamW(optimizer_grouped_parameters,
-                      eps=args.adam_epsilon)
-            optimizer.load_state_dict(cpt['opt_sd'])
-            print(optimizer)    
+        # try:
+        optimizer.load_state_dict(cpt['opt_sd'])
+        # except: 
+        # no_decay = ['bias', 'LayerNorm.weight']
+        # transformer = ['extend_multi', 'mlp']
+        # identity_init = ['transformerencoderlayer.weight']
+        # optimizer_grouped_parameters = [
+        # {'params': [p for n, p in model.named_parameters()
+        #             if any(nd in n for nd in transformer) and any(nd in n for nd in no_decay) and not any(nd in n for nd in identity_init)],
+        # 'lr': args.lr, 'weight_decay': 0.0,
+        # 'names': [n for n, p in model.named_parameters()
+        #             if any(nd in n for nd in transformer) and any(nd in n for nd in no_decay) and not any(nd in n for nd in identity_init)]},
+        # {'params': [p for n, p in model.named_parameters()
+        #             if any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)],
+        # 'weight_decay': 0.0, 'lr': args.bert_lr,
+        # 'names': [n for n, p in model.named_parameters()
+        #             if any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)]},
+        # {'params': [p for n, p in model.named_parameters()
+        #             if not any(nd in n for nd in no_decay) and any(nd in n for nd in transformer) and not any(nd in n for nd in identity_init) ],
+        # 'lr': args.lr, 'weight_decay': args.weight_decay,
+        # 'names': [n for n, p in model.named_parameters()
+        #             if not any(nd in n for nd in no_decay) and any(nd in n for nd in transformer) and not any(nd in n for nd in identity_init)]},
+        # {'params': [p for n, p in model.named_parameters()
+        #             if not any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)],
+        # 'weight_decay': args.weight_decay, 'lr': args.bert_lr,
+        # 'names': [n for n, p in model.named_parameters()
+        #             if not any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)]},
+        # {'params': [p for n, p in model.named_parameters()
+        #             if any(nd in n for nd in identity_init)],
+        # 'weight_decay': args.weight_decay, 'lr': args.weight_lr,
+        # 'names': [n for n, p in model.named_parameters()
+        #             if any(nd in n for nd in identity_init)]}
+        # ]
+        # optimizer = AdamW(optimizer_grouped_parameters,
+        #             eps=args.adam_epsilon)
+        # optimizer.load_state_dict(cpt['opt_sd'])
+            # print(optimizer)    
         scheduler.load_state_dict(cpt['scheduler_sd'])
         if device.type == 'cuda':
             for state in optimizer.state.values():
@@ -805,6 +811,74 @@ def main(args):
                         student_logging_loss = student_tr_loss
                         teacher_logging_loss = teacher_tr_loss                      
                     logging_loss = tr_loss
+        if args.use_val_dataset:
+            alpha_original = args.alpha
+            args.alpha = 0
+            for i in tqdm(range(len(loader_val))):
+                val_loader = loader_val[i]
+                for batch_idx, batch in tqdm(enumerate(val_loader), total = len(val_loader)):  # Shuffled every epoch
+                    if args.debug and batch_idx > 10: break
+                    model.train()
+                    # Forward pass
+                    result = model.forward(**batch, args = args)
+
+                    if type(result) is tuple:
+                        loss = result[0]
+                        scores = result[2]
+                    elif type(result) is dict:
+                        loss = result['loss']
+                        scores = result['scores']
+                    if args.distill_training or args.regularization:
+                        student_loss = result[3].mean()
+                        teacher_loss = result[4].mean()
+                        student_tr_loss += student_loss.item()
+                        teacher_tr_loss += teacher_loss.item()
+
+                    loss = loss.mean()  # Needed in case of dataparallel
+                    if args.fp16:
+                        with amp.scale_loss(loss, optimizer) as scaled_loss:
+                            scaled_loss.backward()
+                    else:
+                        loss.backward()
+                    tr_loss += loss.item()
+                    # except:
+                    #     for i in range(4):
+                    #         print(batch_idx, batch[i].shape)
+                    if (batch_idx + 1) % args.gradient_accumulation_steps == 0:
+                        if args.fp16:
+                            torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer),
+                                                        args.clip)
+                        else:
+                            torch.nn.utils.clip_grad_norm_(model.parameters(),
+                                                        args.clip)
+                        optimizer.step()
+                        scheduler.step()
+                        model.zero_grad()
+                        step_num += 1
+
+                        # Logging training steps
+                        if step_num % args.logging_steps == 0:
+                            avg_loss = (tr_loss - logging_loss) / args.logging_steps
+                            # writer.add_scalar('avg_loss', avg_loss, step_num)
+                            logger.log('Step {:10d}/{:d} | Epoch {:3d} | '
+                                    'Batch {:5d}/{:5d} | '
+                                    'Average Loss {:8.4f}'.format(
+                                step_num, num_train_steps, epoch,
+                                batch_idx + 1, len(loader_train), avg_loss))
+                            wandb.log({"average loss": avg_loss, \
+                            "learning_rate": optimizer.param_groups[0]['lr'], \
+                            "epoch": epoch})
+                            if args.distill_training or args.regularization:
+                                avg_teacher_loss = (teacher_tr_loss-teacher_logging_loss)/args.logging_steps
+                                avg_student_loss = (student_tr_loss-student_logging_loss)/args.logging_steps
+                                wandb.log({"average teacher loss": avg_teacher_loss, \
+                                "average student loss": avg_student_loss,\
+                                "learning_rate": optimizer.param_groups[0]['lr'], \
+                                "epoch": epoch})  
+                                student_logging_loss = student_tr_loss
+                                teacher_logging_loss = teacher_tr_loss                      
+                            logging_loss = tr_loss
+                args.alpha = alpha_original
 
 
         if args.eval_method == "skip":
@@ -966,7 +1040,6 @@ def main(args):
                 eval_result[1]
                 ))
             wandb.log({"retriever/val_recall": eval_result[0], "retriever/val_accuracy": eval_result[1]})
-
         loader_train, loader_val, loader_test, \
         num_val_samples, num_test_samples = get_loaders(data, tokenizer, args.L,
                                                         args.C, args.B,
@@ -1012,6 +1085,7 @@ def main(args):
                 model.load_state_dict(modified_state_dict)
         if args.store_reranker_score:
             micro_eval(model, loader_train, num_val_samples, args, mode = 'train')
+
 
         print('start evaluation on val set (to check whether correct model loaded)')
         if not args.case_based:
@@ -1112,6 +1186,18 @@ def main(args):
                 wandb_log["valid(cands {})/recall@{}".format(str(C_eval_elem), depth[i])] = val_result['recall'][i]
             print(wandb_log)
             wandb.log(wandb_log)
+        if args.type_model != "full":
+            print('recall eval')
+            args.C_eval = 1024
+            args.val_random_shuffle =True
+            loader_train, loader_val, loader_test, \
+            num_val_samples, num_test_samples = get_loaders(data, tokenizer, args.L,
+                                                        args.C, args.B,
+                                                        args.num_workers,
+                                                        args.inputmark,
+                                                        args.C_eval,
+                                                        use_full_dataset,
+                                                        macro_eval_mode, args = args)
 
         if args.type_model != "full":
             print('recall eval')
@@ -1218,6 +1304,8 @@ if __name__ == '__main__':
                              'no weight decay?')
     parser.add_argument('--nearest', action='store_true',
                         help='vertical interaction w/ nearest neighbors')
+    parser.add_argument('--use_val_dataset', action='store_true',
+                        help='vertical interaction w/ nearest neighbors')
     parser.add_argument('--eval_method', default='macro', type=str,
                         choices=['macro', 'micro', 'skip'],
                         help='the evaluate method')
@@ -1264,6 +1352,8 @@ if __name__ == '__main__':
     parser.add_argument('--cands_ratio', default=0.5, type=float,
                         help='ratio of sampled negatives')
     parser.add_argument('--num_heads', type=int, default=16,
+                        help='the number of multi-head attention in extend_multi ')
+    parser.add_argument('--mrr_penalty', action = 'store_true',
                         help='the number of multi-head attention in extend_multi ')
     parser.add_argument('--num_layers', type=int, default=4,
                         help='the number of atten                ion layers in extend_multi ')
@@ -1346,4 +1436,7 @@ if __name__ == '__main__':
     # Set environment variables before all else.
     os.environ['CUDA_VISIBLE_DEVICES'] = args.gpus  # Sets torch.cuda behavior
     if args.nearest: assert args.batch_first == False and args.type_cands == "fixed_negative"
+    if args.use_val_dataset: 
+        assert args.distill_training
     main(args)
+    
