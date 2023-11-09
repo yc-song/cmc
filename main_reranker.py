@@ -38,54 +38,53 @@ def configure_optimizer(args, model, num_train_examples):
     no_decay = ['bias', 'LayerNorm.weight']
     transformer = ['extend_multi', 'mlp']
     identity_init = ['transformerencoderlayer.weight']
-    optimizer_grouped_parameters = [
-    {'params': [p for n, p in model.named_parameters()
-                if not any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)],
-        'weight_decay': args.weight_decay, 'lr': args.bert_lr},
-    {'params': [p for n, p in model.named_parameters()
-                if any(nd in n for nd in no_decay)],
-        'weight_decay': 0.0, 'lr': args.bert_lr},
-    {'params': [p for n, p in model.named_parameters()
-                if any(nd in n for nd in transformer) and not any(nd in n for nd in no_decay)],
-        'lr': args.lr, 'weight_decay': args.weight_decay},
-    ]
-    optimizer = AdamW(optimizer_grouped_parameters,
-                    eps=args.adam_epsilon)
-    # except:
     # optimizer_grouped_parameters = [
-    #     {'params': [p for n, p in model.named_parameters()
-    #                 if any(nd in n for nd in transformer) and any(nd in n for nd in no_decay) and not any(nd in n for nd in identity_init)],
-    #     'lr': args.lr, 'weight_decay': 0.0,
-    #     'names': [n for n, p in model.named_parameters()
-    #                 if any(nd in n for nd in transformer) and any(nd in n for nd in no_decay) and not any(nd in n for nd in identity_init)]},
-    #     {'params': [p for n, p in model.named_parameters()
-    #                 if any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)],
-    #     'weight_decay': 0.0, 'lr': args.bert_lr,
-    #     'names': [n for n, p in model.named_parameters()
-    #                 if any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)]},
-    #     {'params': [p for n, p in model.named_parameters()
-    #                 if not any(nd in n for nd in no_decay) and any(nd in n for nd in transformer) and not any(nd in n for nd in identity_init) ],
-    #     'lr': args.lr, 'weight_decay': args.weight_decay,
-    #     'names': [n for n, p in model.named_parameters()
-    #                 if not any(nd in n for nd in no_decay) and any(nd in n for nd in transformer) and not any(nd in n for nd in identity_init)]},
-    #     {'params': [p for n, p in model.named_parameters()
-    #                 if not any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)],
-    #     'weight_decay': args.weight_decay, 'lr': args.bert_lr,
-    #     'names': [n for n, p in model.named_parameters()
-    #                 if not any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)]},
-    #     {'params': [p for n, p in model.named_parameters()
-    #                 if any(nd in n for nd in identity_init)],
-    #     'weight_decay': args.weight_decay, 'lr': args.weight_lr,
-    #     'names': [n for n, p in model.named_parameters()
-    #                 if any(nd in n for nd in identity_init)]}
+    # {'params': [p for n, p in model.named_parameters()
+    #             if not any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)],
+    #     'weight_decay': args.weight_decay, 'lr': args.bert_lr},
+    # {'params': [p for n, p in model.named_parameters()
+    #             if any(nd in n for nd in no_decay)],
+    #     'weight_decay': 0.0, 'lr': args.bert_lr},
+    # {'params': [p for n, p in model.named_parameters()
+    #             if any(nd in n for nd in transformer) and not any(nd in n for nd in no_decay)],
+    #     'lr': args.lr, 'weight_decay': args.weight_decay},
     # ]
     # optimizer = AdamW(optimizer_grouped_parameters,
     #                 eps=args.adam_epsilon)
+    # except:
+    optimizer_grouped_parameters = [
+        {'params': [p for n, p in model.named_parameters()
+                    if any(nd in n for nd in transformer) and any(nd in n for nd in no_decay) and not any(nd in n for nd in identity_init)],
+        'lr': args.lr, 'weight_decay': 0.0,
+        'names': [n for n, p in model.named_parameters()
+                    if any(nd in n for nd in transformer) and any(nd in n for nd in no_decay) and not any(nd in n for nd in identity_init)]},
+        {'params': [p for n, p in model.named_parameters()
+                    if any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)],
+        'weight_decay': 0.0, 'lr': args.bert_lr,
+        'names': [n for n, p in model.named_parameters()
+                    if any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)]},
+        {'params': [p for n, p in model.named_parameters()
+                    if not any(nd in n for nd in no_decay) and any(nd in n for nd in transformer) and not any(nd in n for nd in identity_init) ],
+        'lr': args.lr, 'weight_decay': args.weight_decay,
+        'names': [n for n, p in model.named_parameters()
+                    if not any(nd in n for nd in no_decay) and any(nd in n for nd in transformer) and not any(nd in n for nd in identity_init)]},
+        {'params': [p for n, p in model.named_parameters()
+                    if not any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)],
+        'weight_decay': args.weight_decay, 'lr': args.bert_lr,
+        'names': [n for n, p in model.named_parameters()
+                    if not any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)]},
+        {'params': [p for n, p in model.named_parameters()
+                    if any(nd in n for nd in identity_init)],
+        'weight_decay': args.weight_decay, 'lr': args.weight_lr,
+        'names': [n for n, p in model.named_parameters()
+                    if any(nd in n for nd in identity_init)]}
+        ]
+    optimizer = AdamW(optimizer_grouped_parameters,
+                    eps=args.adam_epsilon)
 
     print(optimizer)
-
     num_train_steps = int(num_train_examples / args.B /
-                          args.gradient_accumulation_steps * args.epochs)
+                            args.gradient_accumulation_steps * args.epochs)
     num_warmup_steps = int(num_train_steps * args.warmup_proportion)
     if args.lambda_scheduler:
         scheduler = LambdaLR(optimizer, lr_lambda=lambda step: 1 - step / num_train_steps)
@@ -582,33 +581,53 @@ def main(args):
     data = load_zeshel_data(args.data, args.cands_dir, macro_eval_mode, args.debug, nearest = args.nearest)
     loader_test = None
     # simpleoptim: disable learning rate schduler
+    trainset_size = len(data[1][0])
+    if args.use_val_dataset:
+        trainset_size += len(data[2][0])
     if args.simpleoptim:
         optimizer, scheduler, num_train_steps, num_warmup_steps \
-            = configure_optimizer_simple(args, model, len(data[1][0]))
+            = configure_optimizer_simple(args, model, trainset_size)
     else:
         optimizer, scheduler, num_train_steps, num_warmup_steps \
-            = configure_optimizer(args, model, len(data[1][0]))
+            = configure_optimizer(args, model, trainset_size)
     if args.resume_training and not args.training_finished:
-        try:
-            optimizer.load_state_dict(cpt['opt_sd'])
-
-        except: 
-            no_decay = ['bias', 'LayerNorm.weight']
-            transformer = ['mlp']
-            identity_init = ['transformerencoderlayer.weight']
-            optimizer_grouped_parameters = [
-            {'params': [p for n, p in model.named_parameters()
-                        if not any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)],
-                'weight_decay': args.weight_decay, 'lr': args.bert_lr},
-            {'params': [p for n, p in model.named_parameters()
-                        if any(nd in n for nd in no_decay)],
-                'weight_decay': 0.0, 'lr': args.bert_lr},
-            {'params': [p for n, p in model.named_parameters()
-                        if any(nd in n for nd in transformer) and not any(nd in n for nd in no_decay)],
-                'lr': args.lr, 'weight_decay': args.weight_decay},
-            ]
-            optimizer = AdamW(optimizer_grouped_parameters,
-                            eps=args.adam_epsilon)    
+        # try:
+        optimizer.load_state_dict(cpt['opt_sd'])
+        # except: 
+        # no_decay = ['bias', 'LayerNorm.weight']
+        # transformer = ['extend_multi', 'mlp']
+        # identity_init = ['transformerencoderlayer.weight']
+        # optimizer_grouped_parameters = [
+        # {'params': [p for n, p in model.named_parameters()
+        #             if any(nd in n for nd in transformer) and any(nd in n for nd in no_decay) and not any(nd in n for nd in identity_init)],
+        # 'lr': args.lr, 'weight_decay': 0.0,
+        # 'names': [n for n, p in model.named_parameters()
+        #             if any(nd in n for nd in transformer) and any(nd in n for nd in no_decay) and not any(nd in n for nd in identity_init)]},
+        # {'params': [p for n, p in model.named_parameters()
+        #             if any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)],
+        # 'weight_decay': 0.0, 'lr': args.bert_lr,
+        # 'names': [n for n, p in model.named_parameters()
+        #             if any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)]},
+        # {'params': [p for n, p in model.named_parameters()
+        #             if not any(nd in n for nd in no_decay) and any(nd in n for nd in transformer) and not any(nd in n for nd in identity_init) ],
+        # 'lr': args.lr, 'weight_decay': args.weight_decay,
+        # 'names': [n for n, p in model.named_parameters()
+        #             if not any(nd in n for nd in no_decay) and any(nd in n for nd in transformer) and not any(nd in n for nd in identity_init)]},
+        # {'params': [p for n, p in model.named_parameters()
+        #             if not any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)],
+        # 'weight_decay': args.weight_decay, 'lr': args.bert_lr,
+        # 'names': [n for n, p in model.named_parameters()
+        #             if not any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)]},
+        # {'params': [p for n, p in model.named_parameters()
+        #             if any(nd in n for nd in identity_init)],
+        # 'weight_decay': args.weight_decay, 'lr': args.weight_lr,
+        # 'names': [n for n, p in model.named_parameters()
+        #             if any(nd in n for nd in identity_init)]}
+        # ]
+        # optimizer = AdamW(optimizer_grouped_parameters,
+        #             eps=args.adam_epsilon)
+        # optimizer.load_state_dict(cpt['opt_sd'])
+            # print(optimizer)    
         scheduler.load_state_dict(cpt['scheduler_sd'])
         if device.type == 'cuda':
             for state in optimizer.state.values():
@@ -792,6 +811,74 @@ def main(args):
                         student_logging_loss = student_tr_loss
                         teacher_logging_loss = teacher_tr_loss                      
                     logging_loss = tr_loss
+        if args.use_val_dataset:
+            alpha_original = args.alpha
+            args.alpha = 0
+            for i in tqdm(range(len(loader_val))):
+                val_loader = loader_val[i]
+                for batch_idx, batch in tqdm(enumerate(val_loader), total = len(val_loader)):  # Shuffled every epoch
+                    if args.debug and batch_idx > 10: break
+                    model.train()
+                    # Forward pass
+                    result = model.forward(**batch, args = args)
+
+                    if type(result) is tuple:
+                        loss = result[0]
+                        scores = result[2]
+                    elif type(result) is dict:
+                        loss = result['loss']
+                        scores = result['scores']
+                    if args.distill_training or args.regularization:
+                        student_loss = result[3].mean()
+                        teacher_loss = result[4].mean()
+                        student_tr_loss += student_loss.item()
+                        teacher_tr_loss += teacher_loss.item()
+
+                    loss = loss.mean()  # Needed in case of dataparallel
+                    if args.fp16:
+                        with amp.scale_loss(loss, optimizer) as scaled_loss:
+                            scaled_loss.backward()
+                    else:
+                        loss.backward()
+                    tr_loss += loss.item()
+                    # except:
+                    #     for i in range(4):
+                    #         print(batch_idx, batch[i].shape)
+                    if (batch_idx + 1) % args.gradient_accumulation_steps == 0:
+                        if args.fp16:
+                            torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer),
+                                                        args.clip)
+                        else:
+                            torch.nn.utils.clip_grad_norm_(model.parameters(),
+                                                        args.clip)
+                        optimizer.step()
+                        scheduler.step()
+                        model.zero_grad()
+                        step_num += 1
+
+                        # Logging training steps
+                        if step_num % args.logging_steps == 0:
+                            avg_loss = (tr_loss - logging_loss) / args.logging_steps
+                            # writer.add_scalar('avg_loss', avg_loss, step_num)
+                            logger.log('Step {:10d}/{:d} | Epoch {:3d} | '
+                                    'Batch {:5d}/{:5d} | '
+                                    'Average Loss {:8.4f}'.format(
+                                step_num, num_train_steps, epoch,
+                                batch_idx + 1, len(loader_train), avg_loss))
+                            wandb.log({"average loss": avg_loss, \
+                            "learning_rate": optimizer.param_groups[0]['lr'], \
+                            "epoch": epoch})
+                            if args.distill_training or args.regularization:
+                                avg_teacher_loss = (teacher_tr_loss-teacher_logging_loss)/args.logging_steps
+                                avg_student_loss = (student_tr_loss-student_logging_loss)/args.logging_steps
+                                wandb.log({"average teacher loss": avg_teacher_loss, \
+                                "average student loss": avg_student_loss,\
+                                "learning_rate": optimizer.param_groups[0]['lr'], \
+                                "epoch": epoch})  
+                                student_logging_loss = student_tr_loss
+                                teacher_logging_loss = teacher_tr_loss                      
+                            logging_loss = tr_loss
+                args.alpha = alpha_original
 
 
         if args.eval_method == "skip":
@@ -1112,6 +1199,19 @@ def main(args):
                                                         use_full_dataset,
                                                         macro_eval_mode, args = args)
 
+        if args.type_model != "full":
+            print('recall eval')
+            args.C_eval = 1024
+            args.val_random_shuffle =True
+            loader_train, loader_val, loader_test, \
+            num_val_samples, num_test_samples = get_loaders(data, tokenizer, args.L,
+                                                        args.C, args.B,
+                                                        args.num_workers,
+                                                        args.inputmark,
+                                                        args.C_eval,
+                                                        use_full_dataset,
+                                                        macro_eval_mode, args = args)
+
             beam_list = [0.0625, 0.25, 0.5]
             for beam in beam_list:
                 args.beam_ratio = beam
@@ -1120,7 +1220,6 @@ def main(args):
                 wandb_log = {"valid(tournament, beam {})/unnormalized acc".format(str(beam)): recall_result['acc_unorm'], \
                 "valid(tournament, beam {})/recall".format(str(beam)): recall_result['recall']}
                 wandb.log(wandb_log)
-
 #  writer.close()
 
 
@@ -1204,6 +1303,8 @@ if __name__ == '__main__':
                         help='simple optimizer (constant schedule, '
                              'no weight decay?')
     parser.add_argument('--nearest', action='store_true',
+                        help='vertical interaction w/ nearest neighbors')
+    parser.add_argument('--use_val_dataset', action='store_true',
                         help='vertical interaction w/ nearest neighbors')
     parser.add_argument('--eval_method', default='macro', type=str,
                         choices=['macro', 'micro', 'skip'],
@@ -1335,4 +1436,7 @@ if __name__ == '__main__':
     # Set environment variables before all else.
     os.environ['CUDA_VISIBLE_DEVICES'] = args.gpus  # Sets torch.cuda behavior
     if args.nearest: assert args.batch_first == False and args.type_cands == "fixed_negative"
+    if args.use_val_dataset: 
+        assert args.distill_training
     main(args)
+    

@@ -136,7 +136,7 @@ def distillation_loss(student_outputs, teacher_outputs, labels, alpha = 0.5, tem
         teacher_loss = torch.tensor([0.]).to(device)
     # Student loss is calculated by cross-entropy loss
     student_loss = nn.CrossEntropyLoss()(student_outputs, labels)
-    if mrr_penalty and teacher_outputs is not None:
+    if teacher_outputs is not None and mrr_penalty:
         # Zero tensor for hinge loss
         zero_tensors = torch.zeros_like(labels)
         zero_tensors = np.expand_dims(zero_tensors.cpu().detach().numpy(), axis = 1)
@@ -154,7 +154,6 @@ def distillation_loss(student_outputs, teacher_outputs, labels, alpha = 0.5, tem
         penalty_loss = torch.nn.CrossEntropyLoss(reduction='none')(student_outputs, labels)
         penalty_loss *= penalty
         penalty_loss = torch.mean(penalty_loss)
-        print("4", student_loss, penalty_loss)
         student_loss += penalty_loss
     # Weighted sum of teacher and student loss
     loss = alpha*student_loss + (1-alpha)*teacher_loss
