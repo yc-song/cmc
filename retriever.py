@@ -136,7 +136,7 @@ def distillation_loss(student_outputs, teacher_outputs, labels, alpha = 0.5, tem
         teacher_loss = torch.tensor([0.]).to(device)
     # Student loss is calculated by cross-entropy loss
     student_loss = nn.CrossEntropyLoss()(student_outputs, labels)
-    if mrr_penalty:
+    if mrr_penalty and teacher_outputs is not None:
         # Zero tensor for hinge loss
         zero_tensors = torch.zeros_like(labels)
         zero_tensors = np.expand_dims(zero_tensors.cpu().detach().numpy(), axis = 1)
@@ -147,11 +147,8 @@ def distillation_loss(student_outputs, teacher_outputs, labels, alpha = 0.5, tem
         idx_array_retriever = rankdata(-teacher_outputs.cpu().detach().numpy(), axis = 1, method = 'min')
         rank_retriever = np.take_along_axis(idx_array_retriever, labels[:, None].cpu().detach().numpy(), axis=1)
         # penalty is defined as (max(0, 1/rank_retriever-1/rank_reranker))
-        print("1", student_outputs, teacher_outputs, labels)
         penalty = np.maximum(zero_tensors, 1/rank_retriever-1/rank_reranker)
-        print("2", rank_reranker, rank_retriever)
         penalty = torch.from_numpy(penalty).squeeze(1).to(device)
-        print("3", penalty)
         # penalty is multiplied to loss of each element
         # https://discuss.pytorch.org/t/weighted-cross-entropy-for-each-sample-in-batch/101358/10
         penalty_loss = torch.nn.CrossEntropyLoss(reduction='none')(student_outputs, labels)
