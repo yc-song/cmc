@@ -399,7 +399,7 @@ class UnifiedDataset(BasicDataset):
                 "nearest_mention_token_ids": nearest_mention_token_ids, "nearest_mention_masks": nearest_mention_masks}
             else:
                 return {"mention_token_ids": mention_token_ids, "mention_masks": mention_masks, "candidate_token_ids": candidates_token_ids, \
-                "candidate_masks": candidates_masks, "label_idx": label_ids}
+                "candidate_masks": candidates_masks, "label_idx": label_ids, "teacher_scores":torch.tensor(candidates["scores"]).clone().detach()}
 
 class FullDataset(BasicDataset):
     def __init__(self, documents, samples, tokenizer, max_len,
