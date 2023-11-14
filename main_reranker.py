@@ -166,7 +166,7 @@ def micro_eval(model, loader_eval, num_total_unorm, args = None, mode = None):
             # if step == 0: scores_list = scores
             # else: scores_list = torch.cat([scores_list, scores], dim = 0)
             if args.distill:
-                for i, id in enumerate(batch[3]):
+                for i, id in enumerate(batch[2]):
                     candidate = {}
                     candidate['mention_id'] = id
                     candidate['candidates'] = list(batch[4][i])
@@ -384,7 +384,7 @@ def load_model(model_path, device, eval_mode=False, dp=False, type_model='full',
     if model is None:
         if args.type_bert == 'base':
             encoder = BertModel.from_pretrained('bert-base-uncased')
-        else:
+        elif args.type_bert == 'large':
             encoder = BertModel.from_pretrained('bert-large-uncased')
         if type_model == 'full':
             model = FullRanker(encoder, device, args).to(device)
@@ -511,29 +511,59 @@ def main(args):
                                  args.mention_use_codes, args.entity_use_codes,
                                  attention_type, None, False,args, num_heads = args.num_heads, num_layers = args.num_layers)
     # load bi-encoder from anncur retriever (https://github.com/iesl/anncur)
-    if args.anncur and not args.resume_training:
-        package = torch.load(args.model) if device.type == 'cuda' \
-        else torch.load(args.model, map_location=torch.device('cpu'))
-        new_state_dict = package['state_dict']
-        modified_state_dict = OrderedDict()
-        # Change dict keys for loading model parameter
-        for k, v in new_state_dict.items():
-            if k.startswith('model.input_encoder'):
-                name = k.replace('model.input_encoder.bert_model', 'mention_encoder')
-            elif k.startswith('model.label_encoder'):
-                name = k.replace('model.label_encoder.bert_model', 'entity_encoder')
-            modified_state_dict[name] = v
-        model.load_state_dict(modified_state_dict, strict = False)
-        # Loading pre-trained transformer encoder (deprecated)
-        if args.model_top is not None:
-            package = torch.load(args.model_top) if device.type == 'cuda' \
-            else torch.load(args.model_top, map_location=torch.device('cpu'))
-            new_state_dict = package['model_state_dict']
+    if not args.resume_training:
+        if args.anncur:
+            if args.type_model != "full":
+                package = torch.load(args.model) if device.type == 'cuda' \
+                else torch.load(args.model, map_location=torch.device('cpu'))
+                new_state_dict = package['state_dict']
+                modified_state_dict = OrderedDict()
+                # Change dict keys for loading model parameter
+                for k, v in new_state_dict.items():
+                    if k.startswith('model.input_encoder'):
+                        name = k.replace('model.input_encoder.bert_model', 'mention_encoder')
+                    elif k.startswith('model.label_encoder'):
+                        name = k.replace('model.label_encoder.bert_model', 'entity_encoder')
+                    modified_state_dict[name] = v
+                model.load_state_dict(modified_state_dict)
+                # Loading pre-trained transformer encoder (deprecated)
+                if args.model_top is not None:
+                    package = torch.load(args.model_top) if device.type == 'cuda' \
+                    else torch.load(args.model_top, map_location=torch.device('cpu'))
+                    new_state_dict = package['model_state_dict']
+                    modified_state_dict = OrderedDict()
+                    for k, v in new_state_dict.items():
+                        name = k.replace('model.', '')
+                        modified_state_dict[name] = v
+                    model.extend_multi.load_state_dict(modified_state_dict, strict = False)
+            else:
+                package = torch.load(args.model) if device.type == 'cuda' \
+                else torch.load(args.model, map_location=torch.device('cpu'))
+                new_state_dict = package['state_dict']
+                modified_state_dict = OrderedDict()
+                for k, v in new_state_dict.items():
+                    if 'additional_linear' in k:
+                        name = k.replace('model.encoder.additional_linear', 'score_layer.1')
+                    else:
+                        name = k.replace('model.encoder.bert_model.', 'encoder.')
+                    modified_state_dict[name] = v
+                model.load_state_dict(modified_state_dict, strict = False)
+
+        elif args.blink:
+            package = torch.load(args.model) if device.type == 'cuda' \
+            else torch.load(args.model, map_location=torch.device('cpu'))
             modified_state_dict = OrderedDict()
-            for k, v in new_state_dict.items():
-                name = k.replace('model.', '')
-                modified_state_dict[name] = v
-            model.extend_multi.load_state_dict(modified_state_dict, strict = False)
+            # Change dict keys for loading model parameter
+            position_ids = ["mention_encoder.embeddings.position_ids", "entity_encoder.embeddings.position_ids"]
+            for k, v in package.items():
+                name = None
+                if k.startswith('cand_encoder'):
+                    name = k.replace('cand_encoder.bert_model', 'entity_encoder')
+                elif k.startswith('context_encoder'):
+                    name = k.replace('context_encoder.bert_model', 'mention_encoder')
+                if name is not None:
+                    modified_state_dict[name] = v
+            model.load_state_dict(modified_state_dict, strict = False)
     # Load saved model
     if args.resume_training:
         count = 0
@@ -683,6 +713,7 @@ def main(args):
         loader_train = preprocess_data(loader_train, model, args.debug)
         loader_val = preprocess_data(loader_val, model, args.debug)
         loader_test = preprocess_data(loader_test, model, args.debug)
+
     for epoch in range(start_epoch, args.epochs + 1):
         if training_finished: break
         logger.log('\nEpoch %d' % epoch)
@@ -890,11 +921,15 @@ def main(args):
             val_result['num_correct'],
             val_result['num_total_norm'],
             newline=False))
-            wandb.log({"unnormalized acc": val_result['acc_unorm'], "normalized acc": val_result['acc_norm']
-            ,"val_loss": val_result['val_loss'], "epoch": epoch\
-            ,"micro_unnormalized_acc": sum(val_result['num_correct'])/sum(val_result['num_total_unorm'])\
-            ,"micro_normalized_acc": sum(val_result['num_correct'])/sum(val_result['num_total_norm'])})
-
+            wandb_log = {"valid(cands {})/unnormalized acc".format(str(args.C_eval)): val_result['acc_unorm'], \
+                    "valid(cands {})/normalized acc".format(str(args.C_eval)): val_result['acc_norm'],\
+                    "valid(cands {})/micro_unnormalized_acc".format(str(args.C_eval)): sum(val_result['num_correct'])/sum(val_result['num_total_unorm']),\
+                    "valid(cands {})/micro_normalized_acc".format(str(args.C_eval)): sum(val_result['num_correct'])/sum(val_result['num_total_norm']),\
+                    "valid(cands {})/mrr".format(str(args.C_eval)): val_result['mrr']}
+            for i in range(len(depth)):
+                wandb_log["valid(cands {})/recall@{}".format(str(args.C_eval), depth[i])] = val_result['recall'][i]
+            print(wandb_log)
+            wandb.log(wandb_log)
         # When accuracy is higher than best performance, save the model as 'pytorch_model.bin'
         if val_result['acc_unorm'] >= best_val_perf:
             triggert_times = 0 
@@ -980,8 +1015,9 @@ def main(args):
             break
     # Evaluation when training finished
     if training_finished:
+        
         # Retriever Evaluation
-        if args.type_model=="dual":
+        if args.type_model=="dual" and not args.blink:
             logger.log('retriever performance test')
             logger.log('loading datasets')
             entity_path = "./data/entities"
@@ -1037,41 +1073,42 @@ def main(args):
                                                         args.C_eval,
                                                         use_full_dataset,
                                                         macro_eval_mode, args = args)
-        cpt = torch.load(os.path.join(args.save_dir,"pytorch_model.bin")) if device.type == 'cuda' \
-            else torch.load(os.path.join(args.save_dir,"pytorch_model.bin") , map_location=torch.device('cpu'))
-        print("checkpoint from ", cpt['epoch'])
-        print("best performance ", cpt['perf'])
-        if dp:
-            state_dict = cpt['sd']
-            new_state_dict = OrderedDict()
-            for k, v in state_dict.items():
-                name = 'module.' + k  # remove `module.`
-                new_state_dict[name] = v
-            try:
-                model.load_state_dict(new_state_dict)
-            except:
-                new_state_dict = cpt['sd']
-                modified_state_dict = OrderedDict()
-                # Change dict keys for loading model parameter
-                for k, v in new_state_dict.items():
-                    if 'extend_multi.' in k:
-                        name = k.replace('extend_multi.', 'module.extend_multi_')
-                    else:
-                        name = 'module.' + k
-                    modified_state_dict[name] = v
-                model.load_state_dict(modified_state_dict)
-        else:
-            try:
-                model.load_state_dict(cpt['sd'])
-            except:
-                new_state_dict = cpt['sd']
-                modified_state_dict = OrderedDict()
-                # Change dict keys for loading model parameter
-                for k, v in new_state_dict.items():
-                    if 'extend_multi.' in k:
-                        k = k.replace('extend_multi.', 'extend_multi_')
-                    modified_state_dict[k] = v
-                model.load_state_dict(modified_state_dict)
+        if not args.blink and not args.run_id is None:
+            cpt = torch.load(os.path.join(args.save_dir,"pytorch_model.bin")) if device.type == 'cuda' \
+                else torch.load(os.path.join(args.save_dir,"pytorch_model.bin") , map_location=torch.device('cpu'))
+            print("checkpoint from ", cpt['epoch'])
+            print("best performance ", cpt['perf'])
+            if dp:
+                state_dict = cpt['sd']
+                new_state_dict = OrderedDict()
+                for k, v in state_dict.items():
+                    name = 'module.' + k  # remove `module.`
+                    new_state_dict[name] = v
+                try:
+                    model.load_state_dict(new_state_dict)
+                except:
+                    new_state_dict = cpt['sd']
+                    modified_state_dict = OrderedDict()
+                    # Change dict keys for loading model parameter
+                    for k, v in new_state_dict.items():
+                        if 'extend_multi.' in k:
+                            name = k.replace('extend_multi.', 'module.extend_multi_')
+                        else:
+                            name = 'module.' + k
+                        modified_state_dict[name] = v
+                    model.load_state_dict(modified_state_dict)
+            else:
+                try:
+                    model.load_state_dict(cpt['sd'])
+                except:
+                    new_state_dict = cpt['sd']
+                    modified_state_dict = OrderedDict()
+                    # Change dict keys for loading model parameter
+                    for k, v in new_state_dict.items():
+                        if 'extend_multi.' in k:
+                            k = k.replace('extend_multi.', 'extend_multi_')
+                        modified_state_dict[k] = v
+                    model.load_state_dict(modified_state_dict)
         if args.store_reranker_score:
             micro_eval(model, loader_train, num_val_samples, args, mode = 'train')
 
@@ -1401,6 +1438,8 @@ if __name__ == '__main__':
                             'and the entity input')
     parser.add_argument('--final_k', type=int, default=64,
                         help='the batch size')
+    parser.add_argument('--blink', action = 'store_true',
+                        help='load blink checkpoint')
     parser.add_argument('--mlp_layers', type=str, default="1536",
                         help='num of layers for mlp or mlp-with-som model (except for the first and the last layer)')
     parser.add_argument(

@@ -30,14 +30,14 @@ class BasicDataset(Dataset):
         self.MENTION_END = '[unused1]'
         self.args = args
         self.samples = self.cull_samples(samples)
-        if args.case_based:
-            self.samples_case_based = samples 
+        # if self.args.case_based:
+        #     self.samples_case_based = samples 
         # ToDo: cull_samples에서 return되는 타입 파악.
         # 아니면 그냥 예외처리 (16개만)
-        if args.nearest:
-            self.mention_ids = dict()
-            for item in self.samples[0]:
-                self.mention_ids[item['mention_id']]=item
+        # if self.args.nearest:
+        #     self.mention_ids = dict()
+        #     for item in self.samples[0]:
+        #         self.mention_ids[item['mention_id']]=item
 
     def __len__(self):
         return len(self.samples[0])
@@ -408,7 +408,7 @@ class FullDataset(BasicDataset):
         super(FullDataset, self).__init__(documents, samples, tokenizer,
                                           max_len, max_num_candidates,
                                           is_training,
-                                          indicate_mention_boundaries)
+                                          indicate_mention_boundaries, args = args)
         self.max_len_mention = (max_len - 3) // 2  # [CLS], [SEP], [SEP]
         self.max_len_candidate = (max_len - 3) - self.max_len_mention
         self.args = args
@@ -422,7 +422,7 @@ class FullDataset(BasicDataset):
         mention_start += 1  # [CLS]
         mention_end += 1  # [CLS]
         assert self.tokenizer.pad_token_id == 0
-        candidate_document_ids = self.prepare_candidates(mention, candidates, self.args, self.self_negs_again)
+        candidate_document_ids, label_ids = self.prepare_candidates(mention, candidates, self.args, self.self_negs_again)
         encoded_pairs = torch.zeros((len(candidate_document_ids), self.max_len))
         type_marks = torch.zeros((len(candidate_document_ids), self.max_len))
         input_lens = torch.zeros(len(candidate_document_ids))
@@ -441,7 +441,9 @@ class FullDataset(BasicDataset):
             input_lens[i] = len(mention_window) + len(candidate_prefix) + 3
         # print( np.array([mention['mention_id']]), candidate_ids)
         # return encoded_pairs, type_marks, input_lens, np.array([mention['mention_id']]), candidate_ids
-        return encoded_pairs, type_marks, input_lens, mention['mention_id'], candidate_ids
+        return {"encoded_pairs": encoded_pairs, "type_marks": type_marks,\
+        "input_lens": input_lens, "mention_id": mention['mention_id'],\
+        "candidates_id": candidate_ids, "label_idx": label_ids}
 
 
 def get_loaders(data, tokenizer, max_len, max_num_candidates, batch_size,
