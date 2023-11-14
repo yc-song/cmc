@@ -594,27 +594,30 @@ def main(args):
         try:
             optimizer.load_state_dict(cpt['opt_sd'])
         except: 
-            raise('Error')
-            no_decay = ['bias', 'LayerNorm.weight']
-            transformer = ['extend_multi', 'mlp']
-
-            identity_init = ['transformerencoderlayer.weight']
-            optimizer_grouped_parameters = [
-            {'params': [p for n, p in model.named_parameters()
-                        if not any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)],
-                'weight_decay': args.weight_decay, 'lr': args.bert_lr},
-            {'params': [p for n, p in model.named_parameters()
-                        if any(nd in n for nd in no_decay)],
-                'weight_decay': 0.0, 'lr': args.bert_lr},
-            {'params': [p for n, p in model.named_parameters()
-                        if any(nd in n for nd in transformer) and not any(nd in n for nd in no_decay)],
-                'lr': args.lr, 'weight_decay': args.weight_decay},
-            ]
-            optimizer = AdamW(optimizer_grouped_parameters,
-                            eps=args.adam_epsilon)
-            optimizer.load_state_dict(cpt['opt_sd'])
-            print(optimizer)    
-        scheduler.load_state_dict(cpt['scheduler_sd'])
+            if args.simpleoptim:
+                pass
+            else:
+                no_decay = ['bias', 'LayerNorm.weight']
+                transformer = ['extend_multi', 'mlp']
+                identity_init = ['transformerencoderlayer.weight']
+                optimizer_grouped_parameters = [
+                {'params': [p for n, p in model.named_parameters()
+                            if not any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)],
+                    'weight_decay': args.weight_decay, 'lr': args.bert_lr},
+                {'params': [p for n, p in model.named_parameters()
+                            if any(nd in n for nd in no_decay)],
+                    'weight_decay': 0.0, 'lr': args.bert_lr},
+                {'params': [p for n, p in model.named_parameters()
+                            if any(nd in n for nd in transformer) and not any(nd in n for nd in no_decay)],
+                    'lr': args.lr, 'weight_decay': args.weight_decay},
+                ]
+                optimizer = AdamW(optimizer_grouped_parameters,
+                                eps=args.adam_epsilon)
+                print(cpt['opt_sd'])
+                optimizer.load_state_dict(cpt['opt_sd'])
+                print(optimizer)  
+        if not args.simpleoptim:  
+            scheduler.load_state_dict(cpt['scheduler_sd'])
         if device.type == 'cuda':
             for state in optimizer.state.values():
                 for k, v in state.items():
@@ -864,7 +867,7 @@ def main(args):
                                 student_logging_loss = student_tr_loss
                                 teacher_logging_loss = teacher_tr_loss                      
                             logging_loss = tr_loss
-                args.alpha = alpha_original
+            args.alpha = alpha_original
 
 
         if args.eval_method == "skip":
