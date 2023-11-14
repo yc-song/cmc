@@ -202,17 +202,18 @@ class UnifiedRetriever(nn.Module):
             self.mlp = mlp(args)
         if args.type_model == 'mlp_with_som':
             self.mlp_with_som = mlp_with_som(args)
-        self.num_heads = num_heads
-        self.num_layers = num_layers
         # define transformer encoder
         if self.embed_dim is None: self.embed_dim = 768
-        self.extend_multi_transformerencoderlayer = torch.nn.TransformerEncoderLayer(self.embed_dim, self.num_heads, batch_first = True, dim_feedforward=3072).to(self.device)
-        if args.identity_bert:
-            self.extend_multi_transformerencoderlayer = IdentityInitializedTransformerEncoderLayer(self.embed_dim, self.num_heads, args = args).to(self.device)
         self.args = args
-        self.extend_multi_transformerencoder = torch.nn.TransformerEncoder(self.extend_multi_transformerencoderlayer, self.num_layers).to(self.device)
-        self.extend_multi_linearhead = torch.nn.Linear(self.embed_dim, 1).to(self.device)
-        self.extend_multi_token_type_embeddings = nn.Embedding(2, self.embed_dim).to(self.device)
+        if args.type_model == "extend_multi_dot" or args.type_model == "extend_multi":
+            self.num_heads = num_heads
+            self.num_layers = num_layers
+            self.extend_multi_transformerencoderlayer = torch.nn.TransformerEncoderLayer(self.embed_dim, self.num_heads, batch_first = True, dim_feedforward=3072).to(self.device)
+            if args.identity_bert:
+                self.extend_multi_transformerencoderlayer = IdentityInitializedTransformerEncoderLayer(self.embed_dim, self.num_heads, args = args).to(self.device)
+            self.extend_multi_transformerencoder = torch.nn.TransformerEncoder(self.extend_multi_transformerencoderlayer, self.num_layers).to(self.device)
+            self.extend_multi_linearhead = torch.nn.Linear(self.embed_dim, 1).to(self.device)
+            self.extend_multi_token_type_embeddings = nn.Embedding(2, self.embed_dim).to(self.device)
         if self.args.case_based: 
             assert self.args.batch_first == False
             assert not self.args.attend_to_gold

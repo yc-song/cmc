@@ -25,7 +25,7 @@ class FullRanker(nn.Module):
             mean=0.0, std=self.encoder.config.initializer_range)
         self.score_layer[1].bias.data.zero_()
 
-    def forward(self, encoded_pairs, type_marks, input_lens, mention_id=None, candidates_id=None, args=None, beam_ratio=None, recall_eval =None, sampling = False):
+    def forward(self, encoded_pairs, type_marks, input_lens, mention_id=None, candidates_id=None, args=None, beam_ratio=None, recall_eval =None, sampling = False, label_idx = None):
         encoded_pairs = encoded_pairs.to(self.device)
         type_marks = type_marks.to(self.device)
         input_lens = input_lens.to(self.device)
@@ -37,7 +37,8 @@ class FullRanker(nn.Module):
         pooler_output = outputs[1]  # BC x d
 
         scores = self.score_layer(pooler_output).unsqueeze(1).view(B, C)
-        scores.masked_fill_(input_lens == 0, float('-inf'))   
+        scores.masked_fill_(input_lens == 0, float('-inf')) 
+        # ToDo: cross entropy considering label idx arguments     
         if args.distill:
             loss = torch.tensor(0)
         else:
