@@ -19,7 +19,9 @@ import traceback
 import wandb
 from collections import OrderedDict
 import json
-
+import itertools
+import pdb
+import copy
 self_negative_methods=[
     'self_fixed_negative',
     'self_mixed_negative',
@@ -153,7 +155,10 @@ def micro_eval(model, loader_eval, num_total_unorm, args = None, mode = None):
             num_total += len(preds)
             num_correct += (preds.cpu() == label_ids).sum().item()
             for k in range(len(depth)):
-                recall_correct_list[k] += (scores.topk(depth[k], dim=1)[1].cpu()==label_ids.unsqueeze(-1)).sum().item()
+                try:
+                    recall_correct_list[k] += (scores.topk(depth[k], dim=1)[1].cpu()==label_ids.unsqueeze(-1)).sum().item()
+                except RuntimeError:
+                    recall_correct_list[k] = 0
             # recall_correct += (scores.topk(k, dim=1)[1].cpu()==label_ids.unsqueeze(-1)).sum().item()
             # getting mrr
             # after ranking scores, finding out the rank of lables
@@ -525,7 +530,7 @@ def main(args):
                     elif k.startswith('model.label_encoder'):
                         name = k.replace('model.label_encoder.bert_model', 'entity_encoder')
                     modified_state_dict[name] = v
-                model.load_state_dict(modified_state_dict)
+                model.load_state_dict(modified_state_dict, strict = False)
                 # Loading pre-trained transformer encoder (deprecated)
                 if args.model_top is not None:
                     package = torch.load(args.model_top) if device.type == 'cuda' \
@@ -565,7 +570,7 @@ def main(args):
                     modified_state_dict[name] = v
             model.load_state_dict(modified_state_dict, strict = False)
     # Load saved model
-    if args.resume_training:
+    else:
         count = 0
         print(args.save_dir)
         for each_file_name in os.listdir(args.save_dir):
@@ -624,7 +629,7 @@ def main(args):
         try:
             optimizer.load_state_dict(cpt['opt_sd'])
         except: 
-            raise('Error')
+            # raise('Error')
             no_decay = ['bias', 'LayerNorm.weight']
             transformer = ['extend_multi', 'mlp']
 
@@ -684,6 +689,13 @@ def main(args):
         teacher_tr_loss = 0.
         student_logging_loss = 0.
         teacher_logging_loss = 0.
+    if args.use_val_dataset:
+        student_tr_loss_train = 0.
+        teacher_tr_loss_train = 0.
+        student_tr_loss_val = 0.
+        teacher_tr_loss_val = 0.
+
+
     model.zero_grad() # Optimizer zero grad
     best_val_perf = float('-inf')
     # Load epoch and loss from checkpoint
@@ -716,8 +728,9 @@ def main(args):
         logger.log('\nEpoch %d' % epoch)
 
         if not args.freeze_bert:
+            if args.use_val_dataset and args.eval_method == 'macro':
+                macro_eval_mode =  False
             data = load_zeshel_data(args.data, args.cands_dir, macro_eval_mode, args.debug, nearest=args.nearest)
-
             loader_train, loader_val, loader_test, \
             num_val_samples, num_test_samples = get_loaders(data, tokenizer, args.L,
                                                     args.C, args.B,
@@ -726,6 +739,8 @@ def main(args):
                                                     args.C_eval,
                                                     use_full_dataset,
                                                     macro_eval_mode, args = args)
+            if args.use_val_dataset and args.eval_method == 'macro':
+                macro_eval_mode =  True
         # For self negative mining strategies, getting score distribution from the model
         if args.type_cands in self_negative_methods:
             with torch.no_grad():
@@ -766,140 +781,153 @@ def main(args):
 
         print('Begin Training')
         # Training loop
-        for batch_idx, batch in tqdm(enumerate(loader_train), total = len(loader_train)):  # Shuffled every epoch
-            if args.debug and batch_idx > 10: break
-            model.train()
-            # Forward pass
-            result = model.forward(**batch, args = args)
+        if not args.use_val_dataset:
+            for batch_idx, batch in tqdm(enumerate(loader_train), total = len(loader_train)):  # Shuffled every epoch
+                if args.debug and batch_idx > 10: break
+                model.train()
+                # Forward pass
+                result = model.forward(**batch, args = args)
 
-            if type(result) is tuple:
-                loss = result[0]
-                scores = result[2]
-            elif type(result) is dict:
-                loss = result['loss']
-                scores = result['scores']
-            if args.distill_training or args.regularization:
-                student_loss = result[3].mean()
-                teacher_loss = result[4].mean()
-                student_tr_loss += student_loss.item()
-                teacher_tr_loss += teacher_loss.item()
+                if type(result) is tuple:
+                    loss = result[0]
+                    scores = result[2]
+                elif type(result) is dict:
+                    loss = result['loss']
+                    scores = result['scores']
+                if args.distill_training or args.regularization:
+                    student_loss = result[3].mean()
+                    teacher_loss = result[4].mean()
+                    student_tr_loss += student_loss.item()
+                    teacher_tr_loss += teacher_loss.item()
 
-            loss = loss.mean()  # Needed in case of dataparallel
-            if args.fp16:
-                with amp.scale_loss(loss, optimizer) as scaled_loss:
-                    scaled_loss.backward()
-            else:
-                loss.backward()
-            tr_loss += loss.item()
-            # except:
-            #     for i in range(4):
-            #         print(batch_idx, batch[i].shape)
-            if (batch_idx + 1) % args.gradient_accumulation_steps == 0:
+                loss = loss.mean()  # Needed in case of dataparallel
                 if args.fp16:
-                    torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer),
-                                                   args.clip)
+                    with amp.scale_loss(loss, optimizer) as scaled_loss:
+                        scaled_loss.backward()
                 else:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(),
-                                                   args.clip)
-                optimizer.step()
-                scheduler.step()
-                model.zero_grad()
-                step_num += 1
-
-                # Logging training steps
-                if step_num % args.logging_steps == 0:
-                    avg_loss = (tr_loss - logging_loss) / args.logging_steps
-                    # writer.add_scalar('avg_loss', avg_loss, step_num)
-                    logger.log('Step {:10d}/{:d} | Epoch {:3d} | '
-                               'Batch {:5d}/{:5d} | '
-                               'Average Loss {:8.4f}'.format(
-                        step_num, num_train_steps, epoch,
-                        batch_idx + 1, len(loader_train), avg_loss))
-                    wandb.log({"average loss": avg_loss, \
-                    "learning_rate": optimizer.param_groups[0]['lr'], \
-                    "epoch": epoch})
-                    if args.distill_training or args.regularization:
-                        avg_teacher_loss = (teacher_tr_loss-teacher_logging_loss)/args.logging_steps
-                        avg_student_loss = (student_tr_loss-student_logging_loss)/args.logging_steps
-                        wandb.log({"average teacher loss": avg_teacher_loss, \
-                        "average student loss": avg_student_loss,\
-                        "learning_rate": optimizer.param_groups[0]['lr'], \
-                        "epoch": epoch})  
-                        student_logging_loss = student_tr_loss
-                        teacher_logging_loss = teacher_tr_loss                      
-                    logging_loss = tr_loss
-        if args.use_val_dataset:
-            alpha_original = args.alpha
-            args.alpha = 0
-            for i in tqdm(range(len(loader_val))):
-                val_loader = loader_val[i]
-                for batch_idx, batch in tqdm(enumerate(val_loader), total = len(val_loader)):  # Shuffled every epoch
-                    if args.debug and batch_idx > 10: break
-                    model.train()
-                    # Forward pass
-                    result = model.forward(**batch, args = args)
-
-                    if type(result) is tuple:
-                        loss = result[0]
-                        scores = result[2]
-                    elif type(result) is dict:
-                        loss = result['loss']
-                        scores = result['scores']
-                    if args.distill_training or args.regularization:
-                        student_loss = result[3].mean()
-                        teacher_loss = result[4].mean()
-                        student_tr_loss += student_loss.item()
-                        teacher_tr_loss += teacher_loss.item()
-
-                    loss = loss.mean()  # Needed in case of dataparallel
+                    loss.backward()
+                tr_loss += loss.item()
+                # except:
+                #     for i in range(4):
+                #         print(batch_idx, batch[i].shape)
+                if (batch_idx + 1) % args.gradient_accumulation_steps == 0:
                     if args.fp16:
-                        with amp.scale_loss(loss, optimizer) as scaled_loss:
-                            scaled_loss.backward()
+                        torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer),
+                                                    args.clip)
                     else:
-                        loss.backward()
-                    tr_loss += loss.item()
-                    # except:
-                    #     for i in range(4):
-                    #         print(batch_idx, batch[i].shape)
-                    if (batch_idx + 1) % args.gradient_accumulation_steps == 0:
-                        if args.fp16:
-                            torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer),
-                                                        args.clip)
-                        else:
-                            torch.nn.utils.clip_grad_norm_(model.parameters(),
-                                                        args.clip)
-                        optimizer.step()
-                        scheduler.step()
-                        model.zero_grad()
-                        step_num += 1
+                        torch.nn.utils.clip_grad_norm_(model.parameters(),
+                                                    args.clip)
+                    optimizer.step()
+                    scheduler.step()
+                    model.zero_grad()
+                    step_num += 1
 
-                        # Logging training steps
-                        if step_num % args.logging_steps == 0:
-                            avg_loss = (tr_loss - logging_loss) / args.logging_steps
-                            # writer.add_scalar('avg_loss', avg_loss, step_num)
-                            logger.log('Step {:10d}/{:d} | Epoch {:3d} | '
-                                    'Batch {:5d}/{:5d} | '
-                                    'Average Loss {:8.4f}'.format(
-                                step_num, num_train_steps, epoch,
-                                batch_idx + 1, len(loader_train), avg_loss))
-                            wandb.log({"average loss": avg_loss, \
+                    # Logging training steps
+                    if step_num % args.logging_steps == 0:
+                        avg_loss = (tr_loss - logging_loss) / args.logging_steps
+                        # writer.add_scalar('avg_loss', avg_loss, step_num)
+                        logger.log('Step {:10d}/{:d} | Epoch {:3d} | '
+                                'Batch {:5d}/{:5d} | '
+                                'Average Loss {:8.4f}'.format(
+                            step_num, num_train_steps, epoch,
+                            batch_idx + 1, len(loader_train), avg_loss))
+                        wandb.log({"average loss": avg_loss, \
+                        "learning_rate": optimizer.param_groups[0]['lr'], \
+                        "epoch": epoch})
+                        if args.distill_training or args.regularization:
+                            avg_teacher_loss = (teacher_tr_loss-teacher_logging_loss)/args.logging_steps
+                            avg_student_loss = (student_tr_loss-student_logging_loss)/args.logging_steps
+                            wandb.log({"average teacher loss": avg_teacher_loss, \
+                            "average student loss": avg_student_loss,\
                             "learning_rate": optimizer.param_groups[0]['lr'], \
-                            "epoch": epoch})
-                            if args.distill_training or args.regularization:
-                                avg_teacher_loss = (teacher_tr_loss-teacher_logging_loss)/args.logging_steps
-                                avg_student_loss = (student_tr_loss-student_logging_loss)/args.logging_steps
-                                wandb.log({"average teacher loss": avg_teacher_loss, \
-                                "average student loss": avg_student_loss,\
-                                "learning_rate": optimizer.param_groups[0]['lr'], \
-                                "epoch": epoch})  
-                                student_logging_loss = student_tr_loss
-                                teacher_logging_loss = teacher_tr_loss                      
-                            logging_loss = tr_loss
+                            "epoch": epoch})  
+                            student_logging_loss = student_tr_loss
+                            teacher_logging_loss = teacher_tr_loss                      
+                        logging_loss = tr_loss
+        elif args.use_val_dataset:
+            args_val = copy.deepcopy(args)
+            args_val.alpha = 0
+            for batch_idx, (batch_train, batch_val) in tqdm(enumerate(zip(loader_train, itertools.cycle(loader_val)))):
+                if args.debug and batch_idx > 10: break
+                model.train()
+                # Forward pass
+                result_train = model.forward(**batch_train, args = args)
+                result_val = model.forward(**batch_val, args = args_val)
+                if type(result_train) is tuple:
+                    loss_train = result_train[0]
+                    loss_val = result_val[0]
+                elif type(result_train) is dict:
+                    loss_train = result_train['loss']
+                    loss_val = result_val['loss']
+                if args.distill_training or args.regularization:
+                    student_loss_train = result_train[3].mean()
+                    teacher_loss_train = result_train[4].mean()
+                    student_tr_loss_train += student_loss_train.item()
+                    teacher_tr_loss_train += teacher_loss_train.item()
+                    student_loss_val = result_val[3].mean()
+                    teacher_loss_val = result_val[4].mean()
+                    student_tr_loss_val += student_loss_val.item()
+                    teacher_tr_loss_val += teacher_loss_val.item()
+                loss_train = loss_train.mean()
+                loss_val = loss_val.mean()
+                loss = loss_train + loss_val
+                if args.fp16:
+                    with amp.scale_loss(loss, optimizer) as scaled_loss:
+                        scaled_loss.backward()
+                else:
+                    loss.backward()
+                tr_loss += loss.item()
+                # except:
+                #     for i in range(4):
+                #         print(batch_idx, batch[i].shape)
+                if (batch_idx + 1) % args.gradient_accumulation_steps == 0:
+                    if args.fp16:
+                        torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer),
+                                                    args.clip)
+                    else:
+                        torch.nn.utils.clip_grad_norm_(model.parameters(),
+                                                    args.clip)
+                    optimizer.step()
+                    scheduler.step()
+                    model.zero_grad()
+                    step_num += 1
+
+                    # Logging training steps
+                    if step_num % args.logging_steps == 0:
+                        avg_loss = (tr_loss - logging_loss) / args.logging_steps
+                        # writer.add_scalar('avg_loss', avg_loss, step_num)
+                        logger.log('Step {:10d}/{:d} | Epoch {:3d} | '
+                                'Batch {:5d}/{:5d} | '
+                                'Average Loss {:8.4f}'.format(
+                            step_num, num_train_steps, epoch,
+                            batch_idx + 1, len(loader_train), avg_loss))
+                        wandb.log({"average loss": avg_loss, \
+                        "learning_rate": optimizer.param_groups[0]['lr'], \
+                        "epoch": epoch})
+                        if args.distill_training or args.regularization:
+                            avg_teacher_loss = (teacher_tr_loss-teacher_logging_loss)/args.logging_steps
+                            avg_student_loss = (student_tr_loss-student_logging_loss)/args.logging_steps
+                            wandb.log({"average teacher loss": avg_teacher_loss, \
+                            "average student loss": avg_student_loss,\
+                            "learning_rate": optimizer.param_groups[0]['lr'], \
+                            "epoch": epoch})  
+                            student_logging_loss = student_tr_loss
+                            teacher_logging_loss = teacher_tr_loss                      
+                        logging_loss = tr_loss
             args.alpha = alpha_original
 
 
         if args.eval_method == "skip":
             pass
+        if args.use_val_dataset and args.eval_method == 'macro':
+            loader_train, loader_val, loader_test, \
+            num_val_samples, num_test_samples = get_loaders(data, tokenizer, args.L,
+                                                    args.C, args.B,
+                                                    args.num_workers,
+                                                    args.inputmark,
+                                                    args.C_eval,
+                                                    use_full_dataset,
+                                                    macro_eval_mode, args = args)            
         else:
             # Evaluation after one training loop
             if args.eval_method == 'micro':
@@ -907,8 +935,8 @@ def main(args):
             elif args.eval_method == 'macro':
                 val_result = macro_eval(model, loader_val, num_val_samples, args)
             logger.log('Done with epoch {:3d} | train loss {:8.4f} | '
-                   'val acc unormalized  {:8.4f} ({}/{})|'
-                   'val acc normalized  {:8.4f} ({}/{}) '.format(
+                'val acc unormalized  {:8.4f} ({}/{})|'
+                'val acc normalized  {:8.4f} ({}/{}) '.format(
             epoch,
             tr_loss / step_num,
             val_result['acc_unorm'],
@@ -931,7 +959,7 @@ def main(args):
         if val_result['acc_unorm'] >= best_val_perf:
             triggert_times = 0 
             logger.log('      <----------New best val perf: %g -> %g' %
-                       (best_val_perf, val_result['acc_unorm']))
+                    (best_val_perf, val_result['acc_unorm']))
             best_val_perf = val_result['acc_unorm']
             print("saved best val perf:", best_val_perf)
             torch.save({'opt': args, 'sd': model.module.state_dict() if dp else model.state_dict(),
@@ -1010,7 +1038,8 @@ def main(args):
         if epoch >= args.epochs: training_finished = True # Training is over
         if args.training_one_epoch: # Only training for one epoch (because of timelimit)
             break
-    # Evaluation when training finished
+# Evaluation when training finished
+
     if training_finished:
         
         # Retriever Evaluation
@@ -1170,7 +1199,7 @@ def main(args):
         wandb.log({"test_unnormalized acc": test_result['acc_unorm'], "test_normalized acc": test_result['acc_norm']})
 
         print('start evaluation on >64 candidates')
-        C_eval_list = [128,256,512]
+        C_eval_list = [8, 16, 32, 128,256,512]
         for C_eval_elem in C_eval_list:
             print("C_eval", C_eval_elem)
             args.C_eval = C_eval_elem
