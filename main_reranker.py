@@ -868,6 +868,8 @@ def main(args):
                     teacher_loss_val = result_val[4].mean()
                     student_tr_loss_val += student_loss_val.item()
                     teacher_tr_loss_val += teacher_loss_val.item()
+                    student_tr_loss = student_tr_loss_train + student_tr_loss_val
+                    teacher_tr_loss = teacher_tr_loss_train + teacher_tr_loss_val
                 loss_train = loss_train.mean()
                 loss_val = loss_val.mean()
                 loss = loss_train + loss_val
@@ -914,7 +916,6 @@ def main(args):
                             student_logging_loss = student_tr_loss
                             teacher_logging_loss = teacher_tr_loss                      
                         logging_loss = tr_loss
-            args.alpha = alpha_original
 
 
         if args.eval_method == "skip":
