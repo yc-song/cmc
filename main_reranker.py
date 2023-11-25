@@ -629,7 +629,6 @@ def main(args):
         try:
             optimizer.load_state_dict(cpt['opt_sd'])
         except: 
-<<<<<<< HEAD
             if args.simpleoptim:
                 pass
             else:
@@ -654,29 +653,6 @@ def main(args):
                 print(optimizer)  
         if not args.simpleoptim:  
             scheduler.load_state_dict(cpt['scheduler_sd'])
-=======
-            # raise('Error')
-            no_decay = ['bias', 'LayerNorm.weight']
-            transformer = ['extend_multi', 'mlp']
-
-            identity_init = ['transformerencoderlayer.weight']
-            optimizer_grouped_parameters = [
-            {'params': [p for n, p in model.named_parameters()
-                        if not any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)],
-                'weight_decay': args.weight_decay, 'lr': args.bert_lr},
-            {'params': [p for n, p in model.named_parameters()
-                        if any(nd in n for nd in no_decay)],
-                'weight_decay': 0.0, 'lr': args.bert_lr},
-            {'params': [p for n, p in model.named_parameters()
-                        if any(nd in n for nd in transformer) and not any(nd in n for nd in no_decay)],
-                'lr': args.lr, 'weight_decay': args.weight_decay},
-            ]
-            optimizer = AdamW(optimizer_grouped_parameters,
-                            eps=args.adam_epsilon)
-            optimizer.load_state_dict(cpt['opt_sd'])
-            print(optimizer)    
-        scheduler.load_state_dict(cpt['scheduler_sd'])
->>>>>>> 1e219423586ace239491cd1a67eea4e280f42240
         if device.type == 'cuda':
             for state in optimizer.state.values():
                 for k, v in state.items():

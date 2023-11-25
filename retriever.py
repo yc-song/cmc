@@ -203,7 +203,11 @@ class UnifiedRetriever(nn.Module):
         if args.type_model == 'mlp_with_som':
             self.mlp_with_som = mlp_with_som(args)
         # define transformer encoder
-        if self.embed_dim is None: self.embed_dim = 768
+        if self.embed_dim is None: 
+            if args.type_bert == 'base':
+                self.embed_dim = 768
+            else:
+                self.embed_dim = 1024
         self.args = args
         if args.type_model == "extend_multi_dot" or args.type_model == "extend_multi":
             self.num_heads = num_heads
@@ -680,7 +684,10 @@ class extend_multi(nn.Module):
         )
         self.num_heads = num_heads
         self.num_layers = num_layers
-        self.embed_dim = 768
+        if args.type_bert=='base':
+            self.embed_dim = 768
+        else: 
+            self.embed_dim = 1024
         # define transformer encoder
         self.transformerencoderlayer = torch.nn.TransformerEncoderLayer(self.embed_dim, self.num_heads, batch_first = True, dim_feedforward=3072).to(self.device)
         if args.identity_bert:
