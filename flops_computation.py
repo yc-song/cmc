@@ -194,15 +194,7 @@ if __name__ == '__main__':
     parser.add_argument('--eval_method', default='macro', type=str,
                         choices=['macro', 'micro', 'skip'],
                         help='the evaluate method')
-    parser.add_argument('--case_based', action='store_true',
-                        help='simple optimizer (constant schedule, '
-                             'no weight decay?')
-    parser.add_argument('--gold_first', action='store_true',
-                        help='simple optimizer (constant schedule, '
-                             'no weight decay?')
-    parser.add_argument('--attend_to_gold', action='store_true',
-                        help='simple optimizer (constant schedule, '
-                             'no weight decay?')
+
     parser.add_argument('--type_model', type=str,
                         default='full',
                         choices=['dual',
@@ -249,9 +241,6 @@ if __name__ == '__main__':
                         default='base',
                         choices=['base', 'large'],
                         help='the type of encoder')
-    parser.add_argument('--batch_first', action='store_false',
-                        help='simple optimizer (constant schedule, '
-                             'no weight decay?')
     parser.add_argument('--num_mention_vecs', type=int, default=8,
                         help='the number of mention vectors ')
     parser.add_argument('--num_entity_vecs', type=int, default=8,
@@ -277,6 +266,8 @@ if __name__ == '__main__':
     parser.add_argument('--fixed_initial_weight', action='store_true',
                         help='fixed weight for identity weight')
     parser.add_argument('--recall_eval', action='store_true',
+                        help='the batch size')
+    parser.add_argument('--energy_model', action='store_true',
                         help='the batch size')
     parser.add_argument('--val_random_shuffle', action = 'store_true',
                         help='training only one epoch')
