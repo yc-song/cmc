@@ -412,6 +412,10 @@ class UnifiedRetriever(nn.Module):
                                                            num_cands,
                                                            l_y).max(-1)[
                         0]).sum(1)
+<<<<<<< HEAD
+=======
+                print('here')
+>>>>>>> 1839c230b7236e48f81c82e5e0f0982b48cb59ce
             return scores
         else:  # train\
             if args.energy_model:

@@ -569,6 +569,16 @@ def main(args):
                 if name is not None:
                     modified_state_dict[name] = v
             model.load_state_dict(modified_state_dict, strict = False)
+        elif args.cocondenser:
+            state_dict = torch.load(args.model) if device.type == 'cuda' \
+            else torch.load(args.model, map_location=torch.device('cpu'))
+            new_state_dict = OrderedDict()
+            for k, v in state_dict.items():
+                name_context = 'mention_encoder.'+k
+                name_candidate = 'entity_encoder.'+k
+                new_state_dict[name_context] = v
+                new_state_dict[name_candidate] = v
+            model.load_state_dict(new_state_dict, strict = False)
     # Load saved model
     else:
         count = 0
@@ -875,7 +885,7 @@ def main(args):
                     teacher_tr_loss = teacher_tr_loss_train + teacher_tr_loss_val
                 loss_train = loss_train.mean()
                 loss_val = loss_val.mean()
-                loss = loss_train + loss_val
+                loss = loss_train + loss_val*args.val_alpha
                 if args.fp16:
                     with amp.scale_loss(loss, optimizer) as scaled_loss:
                         scaled_loss.backward()
@@ -924,6 +934,8 @@ def main(args):
         if args.eval_method == "skip":
             pass
         if args.use_val_dataset and args.eval_method == 'macro':
+            macro_eval_mode = True
+            data = load_zeshel_data(args.data, args.cands_dir, macro_eval_mode, args.debug, nearest=args.nearest)
             loader_train, loader_val, loader_test, \
             num_val_samples, num_test_samples = get_loaders(data, tokenizer, args.L,
                                                     args.C, args.B,
@@ -932,34 +944,33 @@ def main(args):
                                                     args.C_eval,
                                                     use_full_dataset,
                                                     macro_eval_mode, args = args)            
-        else:
-            # Evaluation after one training loop
-            if args.eval_method == 'micro':
-                val_result = micro_eval(model, loader_val, num_val_samples, args)
-            elif args.eval_method == 'macro':
-                val_result = macro_eval(model, loader_val, num_val_samples, args)
-            logger.log('Done with epoch {:3d} | train loss {:8.4f} | '
-                'val acc unormalized  {:8.4f} ({}/{})|'
-                'val acc normalized  {:8.4f} ({}/{}) '.format(
-            epoch,
-            tr_loss / step_num,
-            val_result['acc_unorm'],
-            val_result['num_correct'],
-            num_val_samples,
-            val_result['acc_norm'],
-            val_result['num_correct'],
-            val_result['num_total_norm'],
-            newline=False))
-            wandb_log = {"valid(cands {})/unnormalized acc".format(str(args.C_eval)): val_result['acc_unorm'], \
-                    "valid(cands {})/normalized acc".format(str(args.C_eval)): val_result['acc_norm'],\
-                    "valid(cands {})/micro_unnormalized_acc".format(str(args.C_eval)): sum(val_result['num_correct'])/sum(val_result['num_total_unorm']),\
-                    "valid(cands {})/micro_normalized_acc".format(str(args.C_eval)): sum(val_result['num_correct'])/sum(val_result['num_total_norm']),\
-                    "valid(cands {})/mrr".format(str(args.C_eval)): val_result['mrr']}
-            for i in range(len(depth)):
-                wandb_log["valid(cands {})/recall@{}".format(str(args.C_eval), depth[i])] = val_result['recall'][i]
-            print(wandb_log)
-            wandb.log(wandb_log)
-        # When accuracy is higher than best performance, save the model as 'pytorch_model.bin'
+        # Evaluation after one training loop
+        if args.eval_method == 'micro':
+            val_result = micro_eval(model, loader_val, num_val_samples, args)
+        elif args.eval_method == 'macro':
+            val_result = macro_eval(model, loader_val, num_val_samples, args)
+        logger.log('Done with epoch {:3d} | train loss {:8.4f} | '
+            'val acc unormalized  {:8.4f} ({}/{})|'
+            'val acc normalized  {:8.4f} ({}/{}) '.format(
+        epoch,
+        tr_loss / step_num,
+        val_result['acc_unorm'],
+        val_result['num_correct'],
+        num_val_samples,
+        val_result['acc_norm'],
+        val_result['num_correct'],
+        val_result['num_total_norm'],
+        newline=False))
+        wandb_log = {"valid(cands {})/unnormalized acc".format(str(args.C_eval)): val_result['acc_unorm'], \
+                "valid(cands {})/normalized acc".format(str(args.C_eval)): val_result['acc_norm'],\
+                "valid(cands {})/micro_unnormalized_acc".format(str(args.C_eval)): sum(val_result['num_correct'])/sum(val_result['num_total_unorm']),\
+                "valid(cands {})/micro_normalized_acc".format(str(args.C_eval)): sum(val_result['num_correct'])/sum(val_result['num_total_norm']),\
+                "valid(cands {})/mrr".format(str(args.C_eval)): val_result['mrr']}
+        for i in range(len(depth)):
+            wandb_log["valid(cands {})/recall@{}".format(str(args.C_eval), depth[i])] = val_result['recall'][i]
+        print(wandb_log)
+        wandb.log(wandb_log)
+    # When accuracy is higher than best performance, save the model as 'pytorch_model.bin'
         if val_result['acc_unorm'] >= best_val_perf:
             triggert_times = 0 
             logger.log('      <----------New best val perf: %g -> %g' %
@@ -1415,6 +1426,10 @@ if __name__ == '__main__':
                         help='the number of atten                ion layers in extend_multi ')
     parser.add_argument('--resume_training', action='store_true',
                         help='resume training from checkpoint?')
+    parser.add_argument('--val_alpha', type=float, default=0.5,
+                        help='coefficient for val data loss')
+    parser.add_argument('--cocondenser', action = 'store_true',
+                        help='coefficient for val data loss')
     parser.add_argument('--type_bert', type=str,
                         default='base',
                         choices=['base', 'large'],

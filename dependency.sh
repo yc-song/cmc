@@ -19,5 +19,5 @@ jobid=257200
 for((i=0; i<$iterations; i++)); do           
     dependency="afterany:${jobid}"
     echo "dependency: $dependency"
-    jobid=$(sbatch --parsable --dependency=$dependency retriever.sh)
+    jobid=$(sbatch --parsable --dependency=$dependency reranker_extend.sh)
 done

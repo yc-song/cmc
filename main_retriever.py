@@ -416,7 +416,6 @@ def main(args):
             if args.debug and step > 10:
                 break
             model.train()
-
             loss = model(*batch, args = args)[0]
 
             if len(args.gpus) > 1:
