@@ -54,9 +54,19 @@ class BasicDataset(Dataset):
         xs = candidates['candidates']
         label_idx = candidates['labels']
         y = mention['label_document_id']
+        scores = candidates['scores']
+        print("candidate", xs)
+        print("label", label_idx, type(label_idx))
+        print("label id", y)
+        print("original scores", scores)
         if self.is_training:
             # At training time we can include target if not already included.
-            if not y in xs[:self.max_num_candidates]:
+            if label_idx == '-1':
+                xs = xs[-1:] + xs[:-1]
+                scores = scores[-1:] + scores[:-1]
+                label_idx = 0
+            elif not y in xs[:self.max_num_candidates]:
+                scores = [scores[label_idx]]+scores[:label_idx]+scores[label_idx+1:]
                 xs = [y] + [x for x in xs if x != y] 
                 label_idx = 0
             if not self_negs_again:
@@ -66,41 +76,58 @@ class BasicDataset(Dataset):
                     if not y in xs[:args.num_sampled]:
                         xs = [y] + [x for x in xs if x != y] 
                         label_idx = 0
-                    label_idx = xs[:args.num_sampled].index(y)
+                    else:
+                        label_idx = xs[:args.num_sampled].index(y)
                     return xs[:args.num_sampled], label_idx
                 elif args.type_cands == 'fixed_negative':
                     pass
                 elif args.type_cands == 'random_negative':
-                        xs = xs[:self.max_num_candidates]
-                        random.shuffle(xs)
-                        label_idx = xs.index(y)
-
+                    xs = xs[:self.max_num_candidates]
+                    scores = scores[:self.max_num_candidates]
+                    xs_with_scores = [(i, j) for i, j in zip(xs, scores)]
+                    random.shuffle(xs_with_scores)
+                    for i, x in enumerate(xs_with_scores):
+                        xs[i] = x[0]
+                        scores[i] = x[1]
+                    label_idx = xs.index(y)
                 elif args.type_cands == 'mixed_negative':
                     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
                     num_fixed = int(self.max_num_candidates * args.cands_ratio)
                     num_hards = self.max_num_candidates - num_fixed
+                    label_idx = xs.index(y)
+
                     xs = [y] + [x for x in xs if x != y]  # Target index always 0
+                    scores = [scores[label_idx]]+scores[:label_idx]+scores[label_idx+1:]
+                    label_idx = 0
                     xs = np.array(xs)
+                    scores = np.array(scores)
                     fixed_xs = xs[:num_fixed]
+                    fixed_scores = scores[:num_fixed]
                     # Random sampling by giving same probs to each candidate
-                    scores = torch.zeros(len(candidates['scores']))[num_fixed:] 
-                    probs = scores.softmax(dim=0)
+                    hard_scores = torch.zeros(len(candidates['scores']))[num_fixed:] 
+                    probs = hard_scores.softmax(dim=0)
                     probs = probs.unsqueeze(0)
                     hard_cands = torch.tensor([num_fixed]) + distribution_sample(probs, num_hards, device).squeeze(0)
                     hard_xs = xs[hard_cands.squeeze(0)]
+                    hard_scores = scores[hard_cands.squeeze(0)]
                     xs = np.concatenate((fixed_xs, hard_xs))
+                    scores = np.concatenate((fixed_scores, hard_scores))
                 if args.type_cands == 'hard_negative': 
                     # Later, training set is obtained by hard negs mining
                     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
                     num_hards = len(xs) 
                     # scores = candidates['scores'].clone().detach()
-                    scores = torch.tensor(candidates['scores'], dtype = float)
-                    probs = scores.softmax(dim=0).unsqueeze(0)
+                    hard_scores = torch.tensor(candidates['scores'], dtype = float)
+                    probs = hard_scores.softmax(dim=0).unsqueeze(0)
                     hard_cands = distribution_sample(probs, self.max_num_candidates,
                                                         device)
                     xs = np.array(xs)
+                    scores = np.array(scores)
                     xs = xs[hard_cands.squeeze(0).cpu()]
                     xs = [y] + [x for x in xs if x != y]  # Target index always 0
+                    scores_xs = scores[hard_cands.squeeze(0).cpu()]
+                    scores = [scores[label_idx]] + [score for score in scores_xs if score != scores[label_idx]]
+                    label_idx = 0
             else: 
                 if args.type_cands == 'self_fixed_negative':
                     scores = torch.tensor(candidates['scores'], dtype = float)
@@ -141,8 +168,11 @@ class BasicDataset(Dataset):
                 xs_nearest = candidates['nearest_candidates']
                 m_nearest = candidates['nearest_mentions']
 
-                return xs[:self.max_num_candidates], label_idx, xs_nearest[:self.max_num_candidates], m_nearest[:self.max_num_candidates]           
-            return xs[:self.max_num_candidates], label_idx
+                return xs[:self.max_num_candidates], label_idx, xs_nearest[:self.max_num_candidates], m_nearest[:self.max_num_candidates]      
+            print("return 1", xs[:self.max_num_candidates])
+            print("return 2",  label_idx)
+            print("return 3",  scores[:self.max_num_candidates])
+            return xs[:self.max_num_candidates], label_idx, scores[:self.max_num_candidates]
         else:
             # At test time we assume candidates already include target.
             # assert y in xs
@@ -320,7 +350,7 @@ class UnifiedDataset(BasicDataset):
                 nearest_mention_masks[i] = torch.tensor(mention_encoded_dict['attention_mask'])
 
         else:
-            candidate_document_ids, label_ids = self.prepare_candidates(mention, candidates, self.args, self.self_negs_again)
+            candidate_document_ids, label_ids, candidates_scores = self.prepare_candidates(mention, candidates, self.args, self.self_negs_again)
 
         candidates_token_ids = torch.zeros((len(candidate_document_ids),
                                             self.max_len))
@@ -352,12 +382,12 @@ class UnifiedDataset(BasicDataset):
         if self.is_training and self.args.distill_training:
             if self.args.nearest:
                 return {"mention_token_ids": mention_token_ids,"mention_masks": mention_masks, "candidate_token_ids": candidates_token_ids, \
-                "candidate_masks": candidates_masks, "label_idx": label_ids, "teacher_scores":torch.tensor(candidates["scores"]),\
+                "candidate_masks": candidates_masks, "label_idx": label_ids, "teacher_scores":torch.tensor(candidates_scores),\
                 "nearest_candidate_token_ids": nearest_token_ids, "nearest_candidate_masks": nearest_masks,\
                 "nearest_mention_token_ids": nearest_mention_token_ids, "nearest_mention_masks": nearest_mention_masks}
             else:
                 return {"mention_token_ids": mention_token_ids,"mention_masks": mention_masks, "candidate_token_ids": candidates_token_ids, \
-                "candidate_masks": candidates_masks, "label_idx": label_ids, "teacher_scores":torch.tensor(candidates["scores"]).clone().detach()}
+                "candidate_masks": candidates_masks, "label_idx": label_ids, "teacher_scores":torch.tensor(candidates_scores).clone().detach()}
 
         elif self.case_based:
             nearest_mentions = candidates['nearest_mentions']

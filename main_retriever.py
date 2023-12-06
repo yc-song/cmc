@@ -172,8 +172,12 @@ def main(args):
     # Wandb init
     # get model and tokenizer
     if args.pre_model == 'Bert':
-        tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
-        encoder = BertModel.from_pretrained('bert-base-uncased')
+        if args.type_bert == 'base':
+            tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+            encoder = BertModel.from_pretrained('bert-base-uncased')
+        elif args.type_bert == 'large':
+            tokenizer = BertTokenizer.from_pretrained('bert-large-uncased')
+            encoder = BertModel.from_pretrained('bert-large-uncased')
     elif args.pre_model == 'Roberta':
         tokenizer = RobertaTokenizer.from_pretrained('roberta-base')
         encoder = RobertaModel.from_pretrained('roberta-base')
@@ -412,7 +416,6 @@ def main(args):
             if args.debug and step > 10:
                 break
             model.train()
-
             loss = model(*batch, args = args)[0]
 
             if len(args.gpus) > 1:
@@ -594,7 +597,7 @@ if __name__ == '__main__':
                         help='the  data directory')
     parser.add_argument('--L', type=int, default=256,
                         help='max length of joint input [%(default)d]')
-    parser.add_argument('--save_dir', type = str, default = '/shared/s3/lab07/jongsong/hard-nce-el_garage/models',
+    parser.add_argument('--save_dir', type = str, default = './models',
                         help='debugging mode')
     parser.add_argument('--C', type=int, default=64,
                         help='max number of candidates [%(default)d]')
@@ -684,6 +687,10 @@ if __name__ == '__main__':
                                  'extend_multi_dot',
                                  'full'],
                         help='the type of model')
+    parser.add_argument('--type_bert', type=str,
+                        default='base',
+                        choices=['base', 'large'],
+                        help='the type of encoder')
     parser.add_argument('--token_type', action='store_false', help = "no token type id when specified")
     parser.add_argument('--energy_model', action='store_true',
                         help='regularize by bi-encoder objective')

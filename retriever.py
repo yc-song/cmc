@@ -408,7 +408,7 @@ class UnifiedRetriever(nn.Module):
                                                            num_cands,
                                                            l_y).max(-1)[
                         0]).sum(1)
-
+                print('here')
             return scores
         else:  # train\
             if args.energy_model:
