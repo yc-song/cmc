@@ -1487,6 +1487,8 @@ if __name__ == '__main__':
              "See details at https://nvidia.github.io/apex/amp.html",
     )
     parser.add_argument('--anncur', action='store_true', help = "load anncur ckpt")
+    parser.add_argument('--cocondenser', action='store_true', help = "load cocondenser ckpt")
+
     parser.add_argument('--token_type', action='store_false', help = "no token type id when specified")
 
     args = parser.parse_args()
