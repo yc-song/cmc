@@ -319,7 +319,8 @@ class UnifiedRetriever(nn.Module):
                 candidate_masks, label_idx = None, teacher_scores = None, candidate_probs=None, recall_eval = False, top_k = 64, \
                 beam_ratio = 0.5, args = None, sampling = False, nearest_mention_token_ids = None, nearest_mention_masks = None,\
                 nearest_label_token_ids = None, nearest_label_masks = None, loader_val_cased = None,\
-                nearest_candidate_token_ids = None, nearest_candidate_masks = None):
+                nearest_candidate_token_ids = None, nearest_candidate_masks = None,\
+                 mention_id = None, candidate_id = None):
         ## Input
         # mention_token_ids (torch.tensor): mention token ids by tokenizer
         # mention_masks (torch.tensor): 0 for meaningless tokens
@@ -412,7 +413,6 @@ class UnifiedRetriever(nn.Module):
                                                            num_cands,
                                                            l_y).max(-1)[
                         0]).sum(1)
-                print('here')
             return scores
         else:  # train\
             if args.energy_model:
