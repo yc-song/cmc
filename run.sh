@@ -9,7 +9,8 @@
 #SBATCH --partition=P1
 #SBATCH --output=slurm_output/%j.out
 
-python main_reranker.py --epochs=20 --lr=2e-05 --type_model=extend_multi_dot --warmup_proportion=0.2 --inputmark --training_one_epoch --anncur --model=./dual_encoder_zeshel.ckpt --type_cands=hard_negative --token_type
+python main_reranker.py --epochs=5 --bert_lr=1e-05 --lr=1e-05 --type_model=extend_multi_dot --warmup_proportion=0.01 --inputmark --model=./cocondenser.bin --type_cands=mixed_negative --token_type --eval_batch_size=8 --identity_bert --fixed_initial_weight --save_dir=./models --num_layers=2 --num_heads=4 --cands_dir=./data/cands_anncur_top1024 --cocondenser --B=2 --gradient_accumulation_steps=4 --resume_training --run_id=byh82dav
+# python main_reranker.py --epochs=20 --lr=2e-05 --type_model=extend_multi_dot --warmup_proportion=0.2 --inputmark --training_one_epoch --anncur --model=./dual_encoder_zeshel.ckpt --type_cands=hard_negative --token_type
 #python blink/crossencoder/train_cross.py --act_fn=softplus --architecture=extend_multi --classification_head=dot --learning_rate=2e-05 --n_heads=16 --num_layers=4 --num_train_epochs=500 --optimizer=AdamW --train_batch_size=256 --train_split=1
 # python main_r/eranker.py --epochs=20 --lr=2e-05 --type_model=extend_multi_dot --warmup_proportion=0.2 --inputmark --training_one_epoch --anncur --model=./dual_encoder_zeshel.ckpt --model_top=/home/jylab_share/jongsong/BLINK/models/zeshel/crossencoder/extend_extension/m62cweg5/Epochs/epoch_85
 # python main_reranker.py --epochs=20 --lr=2e-05 --type_model=extend_multi_dot --warmup_proportion=0.2 --inputmark --training_one_epoch --anncur --model=./dual_encoder_zeshel.ckpt --model_top=/home/jylab_share/jongsong/BLINK/models/zeshel/crossencoder/extend_extension/m62cweg5/Epochs/epoch_85 

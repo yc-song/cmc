@@ -55,10 +55,7 @@ class BasicDataset(Dataset):
         label_idx = candidates['labels']
         y = mention['label_document_id']
         scores = candidates['scores']
-        print("candidate", xs)
-        print("label", label_idx, type(label_idx))
-        print("label id", y)
-        print("original scores", scores)
+
         if self.is_training:
             # At training time we can include target if not already included.
             if label_idx == '-1':
@@ -169,9 +166,6 @@ class BasicDataset(Dataset):
                 m_nearest = candidates['nearest_mentions']
 
                 return xs[:self.max_num_candidates], label_idx, xs_nearest[:self.max_num_candidates], m_nearest[:self.max_num_candidates]      
-            print("return 1", xs[:self.max_num_candidates])
-            print("return 2",  label_idx)
-            print("return 3",  scores[:self.max_num_candidates])
             return xs[:self.max_num_candidates], label_idx, scores[:self.max_num_candidates]
         else:
             # At test time we assume candidates already include target.
@@ -223,7 +217,7 @@ class BasicDataset(Dataset):
             elif self.args.gold_first:
                 xs = [y] + [x for x in xs if x != y]  # Target index always 0
                 label_idx = 0
-            return xs[:self.max_num_candidates], label_idx
+            return xs[:self.max_num_candidates], label_idx, None
             # xs = [y] + [x for x in xs if x != y]  # Target index always 0
             # return xs[:self.maxnum_candidates]
 
@@ -429,7 +423,7 @@ class UnifiedDataset(BasicDataset):
                 "nearest_mention_token_ids": nearest_mention_token_ids, "nearest_mention_masks": nearest_mention_masks}
             else:
                 return {"mention_token_ids": mention_token_ids, "mention_masks": mention_masks, "candidate_token_ids": candidates_token_ids, \
-                "candidate_masks": candidates_masks, "label_idx": label_ids, "teacher_scores":torch.tensor(candidates["scores"]).clone().detach()}
+                "candidate_masks": candidates_masks, "label_idx": label_ids, "teacher_scores":candidates_scores}
 
 class FullDataset(BasicDataset):
     def __init__(self, documents, samples, tokenizer, max_len,
