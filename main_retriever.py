@@ -6,6 +6,7 @@ from data_retriever import ZeshelDataset, transform_entities, load_data, \
 from util import Logger
 from data_reranker import get_loaders, Logger,  load_zeshel_data
 # from main_reranker import micro_eval, macro_eval/
+from collections import OrderedDict
 
 import argparse
 import numpy as np
@@ -217,7 +218,47 @@ def main(args):
             else torch.load(args.save_dir+"pytorch_model.bin", map_location=torch.device('cpu'))
         model.load_state_dict(cpt['sd'])
     dp = torch.cuda.device_count() > 1
-    
+
+    if args.anncur:
+        package = torch.load(args.model) if device.type == 'cuda' \
+        else torch.load(args.model, map_location=torch.device('cpu'))
+        new_state_dict = package['state_dict']
+        modified_state_dict = OrderedDict()
+        # Change dict keys for loading model parameter
+        for k, v in new_state_dict.items():
+            if k.startswith('model.input_encoder'):
+                name = k.replace('model.input_encoder.bert_model', 'mention_encoder')
+            elif k.startswith('model.label_encoder'):
+                name = k.replace('model.label_encoder.bert_model', 'entity_encoder')
+            modified_state_dict[name] = v
+        model.load_state_dict(modified_state_dict)
+    elif args.blink:
+        package = torch.load(args.model) if device.type == 'cuda' \
+        else torch.load(args.model, map_location=torch.device('cpu'))
+        modified_state_dict = OrderedDict()
+        # Change dict keys for loading model parameter
+        position_ids = ["mention_encoder.embeddings.position_ids", "entity_encoder.embeddings.position_ids"]
+        for k, v in package.items():
+            name = None
+            if k.startswith('cand_encoder'):
+                name = k.replace('cand_encoder.bert_model', 'entity_encoder')
+            elif k.startswith('context_encoder'):
+                name = k.replace('context_encoder.bert_model', 'mention_encoder')
+            if name is not None:
+                modified_state_dict[name] = v
+        model.load_state_dict(modified_state_dict, strict = False)
+    elif args.cocondenser:
+        state_dict = torch.load(args.model) if device.type == 'cuda' \
+        else torch.load(args.model, map_location=torch.device('cpu'))
+        new_state_dict = OrderedDict()
+        for k, v in state_dict.items():
+            name_context = 'mention_encoder.'+k
+            name_candidate = 'entity_encoder.'+k
+            new_state_dict[name_context] = v
+            new_state_dict[name_candidate] = v
+        model.load_state_dict(new_state_dict, strict = False)
+
+
     if args.retriever_path:
         if args.retriever_type == 'poly':
             retriever_attention_type = 'soft_attention'
@@ -699,6 +740,10 @@ if __name__ == '__main__':
     parser.add_argument('--attend_to_gold', action='store_true',
                         help='simple optimizer (constant schedule, '
                              'no weight decay?')
+    parser.add_argument('--cocondenser', action='store_true', help = "load cocondenser ckpt")
+
+    parser.add_argument('--blink', action = 'store_true',
+                        help='load blink checkpoint')
     parser.add_argument('--num_heads', type=int, default=2,
                         help='the number of multi-head attention in extend_multi ')
     parser.add_argument('--num_layers', type=int, default=2,

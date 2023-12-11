@@ -193,28 +193,28 @@ class BasicDataset(Dataset):
             #     # print("6", xs_output)
             #     return xs_output[:args.num_eval_cands]
             assert y in xs
-            if args.type_cands == 'random_negative':
-                xs = xs[:self.max_num_candidates]
-                random.shuffle(xs)
-                label_idx = xs.index(y)
-                return xs, label_idx
-            elif self.args.val_random_shuffle:
-                num_batches = int(len(xs)//self.args.final_k) # Divide entire set by final number of k
-                xs_output = [] # list for final candidates
-                for i in range(num_batches):
-                    xs_output.extend(xs[i::num_batches]) # spread each candidate with regular step
-                # y_original_index = xs.index(y)
-                label_idx = xs_output.index(y)
-                # if y_original_index//num_batches == 0:
-                    # xs_output[0], xs_output[y_index] = xs_output[y_index], xs_output[0]
-                # else:
-                    # xs_output[(y_original_index//num_batches)], xs_output[y_index] = xs_output[y_index], xs_output[(y_original_index//num_batches)]
-                    # xs_output[(y_original_index//num_batches)], xs_output[0] = xs_output[0], xs_output[(y_original_index//num_batches)]
-                return xs_output[:self.max_num_candidates], label_idx
+            # if args.type_cands == 'random_negative':
+            #     xs = xs[:self.max_num_candidates]
+            #     random.shuffle(xs)
+            #     label_idx = xs.index(y)
+            #     return xs, label_idx
+            # elif self.args.val_random_shuffle:
+            #     num_batches = int(len(xs)//self.args.final_k) # Divide entire set by final number of k
+            #     xs_output = [] # list for final candidates
+            #     for i in range(num_batches):
+            #         xs_output.extend(xs[i::num_batches]) # spread each candidate with regular step
+            #     # y_original_index = xs.index(y)
+            #     label_idx = xs_output.index(y)
+            #     # if y_original_index//num_batches == 0:
+            #         # xs_output[0], xs_output[y_index] = xs_output[y_index], xs_output[0]
+            #     # else:
+            #         # xs_output[(y_original_index//num_batches)], xs_output[y_index] = xs_output[y_index], xs_output[(y_original_index//num_batches)]
+            #         # xs_output[(y_original_index//num_batches)], xs_output[0] = xs_output[0], xs_output[(y_original_index//num_batches)]
+            #     return xs_output[:self.max_num_candidates], label_idx
 
-            elif self.args.gold_first:
-                xs = [y] + [x for x in xs if x != y]  # Target index always 0
-                label_idx = 0
+            # elif self.args.gold_first:
+            #     xs = [y] + [x for x in xs if x != y]  # Target index always 0
+            #     label_idx = 0
             return xs[:self.max_num_candidates], label_idx, None
             # xs = [y] + [x for x in xs if x != y]  # Target index always 0
             # return xs[:self.maxnum_candidates]
@@ -229,9 +229,20 @@ class BasicDataset(Dataset):
             return mentions, samples[1]
 
         else:
-            mentions = [mc for mc in samples[0] if mc['label_document_id'] in
-                        samples[1][mc['mention_id']]['candidates'][
-                        :self.max_num_candidates]]
+            # print(samples[0][0]['label_document_id'])
+            # print(samples[1][0][samples[0][0]['mention_id']]['candidates'])
+            mentions= []
+            try:
+                for mc in samples[0]:
+                    
+                    if mc['label_document_id'] in samples[1][mc['mention_id']]['candidates'][:self.max_num_candidates]:
+                        mentions.append(mc)
+            except:
+                print(mc['label_document_id'])
+                print(samples[1][mc['mention_id']]['candidates'][:self.max_num_candidates])
+            # mentions = [mc for mc in samples[0] if mc['label_document_id'] in
+                        # samples[1][mc['mention_id']]['candidates'][
+                        # :self.max_num_candidates]]
             return mentions, samples[1]
         # else: 
         #     mentions = [mc for mc in samples[0] if mc['label_document_id'] in
@@ -343,7 +354,6 @@ class UnifiedDataset(BasicDataset):
 
         else:
             candidate_document_ids, label_ids, candidates_scores = self.prepare_candidates(mention, candidates, self.args, self.self_negs_again)
-
         candidates_token_ids = torch.zeros((len(candidate_document_ids),
                                             self.max_len))
         candidates_masks = torch.zeros((len(candidate_document_ids),
@@ -420,7 +430,8 @@ class UnifiedDataset(BasicDataset):
                 "nearest_mention_token_ids": nearest_mention_token_ids, "nearest_mention_masks": nearest_mention_masks}
             else:
                 return {"mention_token_ids": mention_token_ids, "mention_masks": mention_masks, "candidate_token_ids": candidates_token_ids, \
-                "candidate_masks": candidates_masks, "label_idx": label_ids, "teacher_scores":torch.tensor(candidates["scores"]).clone().detach()}
+                "candidate_masks": candidates_masks, "label_idx": label_ids, \
+                "mention_id": mention['mention_id'], "candidate_id": candidate_document_ids}
 
 class FullDataset(BasicDataset):
     def __init__(self, documents, samples, tokenizer, max_len,
@@ -583,6 +594,8 @@ def load_zeshel_data(data_dir, cands_dir, macro_eval=True, debug = False, scores
                     assert mentions[i]['context_document_id'] in documents
                     assert mentions[i]['label_document_id'] in documents
         candidates = {}
+        print(os.path.join(cands_dir,
+                               'candidates_%s.json' % part))
         with open(os.path.join(cands_dir,
                                'candidates_%s.json' % part)) as f:
             for i, line in enumerate(f):

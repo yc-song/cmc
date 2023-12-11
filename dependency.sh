@@ -15,7 +15,7 @@ iterations=1 # 총 몇 번이나 연속으로 돌릴 것인지
 # jobid=$(sbatch --parsable run.sh)
 
 # jobid=$(sbatch --parsable reranker_extend.sh)
-jobid=256319
+jobid=257200
 for((i=0; i<$iterations; i++)); do           
     dependency="afterany:${jobid}"
     echo "dependency: $dependency"

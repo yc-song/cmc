@@ -119,11 +119,11 @@ def micro_eval(model, loader_eval, num_total_unorm, args = None, mode = None):
     loss_total = 0
     recall_correct_list = [0]*len(depth)
     mrr_total = 0
-    if args.store_reranker_score:
+    if args.save_topk_nce:
         cands = []
-        with open(os.path.join(args.cands_dir, 'candidates_%s.json' % mode), 'r') as f:
-            for line in f:
-                cands.append(json.loads(line))
+        # with open(os.path.join(args.cands_dir, 'candidates_%s.json' % mode), 'w') as f:
+        #     for line in f:
+        #         cands.append(json.loads(line))
 
     if args.distill: cands = []
     with torch.no_grad():
@@ -177,12 +177,39 @@ def micro_eval(model, loader_eval, num_total_unorm, args = None, mode = None):
                     candidate['candidates'] = list(batch[4][i])
                     candidate['scores'] = scores[i].tolist()
                     cands.append(candidate)
-            if args.test_at_first:
-                print(batch, scores)
-        if args.distill:
-            with open(os.path.join(args.cands_dir, 'candidates_train_distillation.json'), 'w') as f:
-                for item in cands:
-                    f.write('%s\n' % json.dumps(item))
+            if args.save_topk_nce:
+                candidate_id_2d_list = [list(item) for item in batch['candidate_id']]
+                candidate_id_2d_list = [list(item) for item in zip(*candidate_id_2d_list)]
+                for i, id in enumerate(batch['mention_id']):
+                    candidate = {}
+                    candidate['mention_id'] = id
+                    # candidate['mention_id'] = hex(mention_id).upper()[2:].rjust(16, "0")
+                    sorted_pairs = sorted(zip(candidate_id_2d_list[i], scores[i].tolist()), key=lambda pair: pair[1], reverse=True)
+
+                    # Extract the sorted elements of both lists
+                    candidate_list = [x for x, _ in sorted_pairs]
+                    scores_list = [y for _, y in sorted_pairs]
+
+                    candidate['candidates'] = candidate_list
+
+                    candidate['scores'] = scores_list
+                    try:                    
+                        candidate['labels'] = candidate_list.index(candidate_id_2d_list[i][batch['label_idx'][i]])
+                    except:
+                        print(candidate_list)
+                        print(candidate_id_2d_list[i])
+                        print(batch['label_idx'][i])
+                    # candidate['labels'] = batch['label_idx'][i].item()
+                    # candidate['context_embedding'] = embedding_ctxt[i].cpu().tolist()
+                    # candidate['candidate_embedding'] = cand_encode_list[srcs[i].item()][inds.cpu()].cpu().tolist()
+                    cands.append(candidate)
+    if args.save_topk_nce:
+        json_save_path = os.path.join(args.cands_dir, args.run_id)
+        if not os.path.exists(json_save_path):
+            os.makedirs(json_save_path)
+        with open(os.path.join(json_save_path, f'candidates_{str(mode)}_{str(args.C_eval)}.json'), 'a') as f:
+            for item in cands:
+                f.write('%s\n' % json.dumps(item))
     if args.store_reranker_score:
         with open(os.path.join(args.cands_dir, 'candidates_%s_w_reranker_score.json' % mode), 'w') as f:
             for item in cands:
@@ -204,7 +231,7 @@ def micro_eval(model, loader_eval, num_total_unorm, args = None, mode = None):
             'mrr': mrr}
 
 
-def macro_eval(model, val_loaders, num_total_unorm, args = None):
+def macro_eval(model, val_loaders, num_total_unorm, args = None, mode = 'train'):
     model.eval()
     assert len(val_loaders) == len(num_total_unorm)
     acc_norm = 0
@@ -219,7 +246,7 @@ def macro_eval(model, val_loaders, num_total_unorm, args = None):
     for i in tqdm(range(len(val_loaders))):
         val_loader = val_loaders[i]
         num_unorm = num_total_unorm[i]
-        micro_results = micro_eval(model, val_loader, num_unorm, args = args)
+        micro_results = micro_eval(model, val_loader, num_unorm, args = args, mode = mode)
         print(micro_results)
         acc_norm += micro_results['acc_norm']
         acc_unorm += micro_results['acc_unorm']
@@ -1000,54 +1027,54 @@ def main(args):
 
         wandb.log({"epoch": epoch, "best acc": best_val_perf})
         # For bi-encoder, check out validation recall for entire entity sets
-        if args.type_model=="dual":
-            logger.log('retriever performance test')
-            logger.log('loading datasets')
-            entity_path = "./data/entities"
-            samples_train = torch.load(entity_path+"/samples_train.pt")
-            samples_heldout_train_seen = torch.load(entity_path+"/samples_heldout_train_seen.pt")
-            samples_heldout_train_unseen = torch.load(entity_path+"/samples_heldout_train_unseen.pt")
-            samples_val = torch.load(entity_path+"/samples_val.pt")
-            samples_test = torch.load(entity_path+"/samples_test.pt")
-            train_doc = torch.load(entity_path+"/train_doc.pt")
-            heldout_train_doc = torch.load(entity_path+"/heldout_train_doc.pt")
-            val_doc = torch.load(entity_path+"/val_doc.pt")
-            test_doc = torch.load(entity_path+"/test_doc.pt")
-            logger.log('loading train entities')
-            all_train_entity_token_ids = torch.load(entity_path+"/all_train_entity_token_ids.pt")
-            all_train_masks = torch.load(entity_path+"/all_train_masks.pt")
+        # if args.type_model=="dual":
+        #     logger.log('retriever performance test')
+        #     logger.log('loading datasets')
+        #     entity_path = "./data/entities"
+        #     samples_train = torch.load(entity_path+"/samples_train.pt")
+        #     samples_heldout_train_seen = torch.load(entity_path+"/samples_heldout_train_seen.pt")
+        #     samples_heldout_train_unseen = torch.load(entity_path+"/samples_heldout_train_unseen.pt")
+        #     samples_val = torch.load(entity_path+"/samples_val.pt")
+        #     samples_test = torch.load(entity_path+"/samples_test.pt")
+        #     train_doc = torch.load(entity_path+"/train_doc.pt")
+        #     heldout_train_doc = torch.load(entity_path+"/heldout_train_doc.pt")
+        #     val_doc = torch.load(entity_path+"/val_doc.pt")
+        #     test_doc = torch.load(entity_path+"/test_doc.pt")
+        #     logger.log('loading train entities')
+        #     all_train_entity_token_ids = torch.load(entity_path+"/all_train_entity_token_ids.pt")
+        #     all_train_masks = torch.load(entity_path+"/all_train_masks.pt")
 
-            logger.log('loading val and test entities')
-            all_val_entity_token_ids = torch.load(entity_path+"/all_val_entity_token_ids.pt")
-            all_val_masks = torch.load(entity_path+"/all_val_masks.pt")
-            all_test_entity_token_ids = torch.load(entity_path+"/all_test_entity_token_ids.pt")
-            all_test_masks = torch.load(entity_path+"/all_test_masks.pt")
+        #     logger.log('loading val and test entities')
+        #     all_val_entity_token_ids = torch.load(entity_path+"/all_val_entity_token_ids.pt")
+        #     all_val_masks = torch.load(entity_path+"/all_val_masks.pt")
+        #     all_test_entity_token_ids = torch.load(entity_path+"/all_test_entity_token_ids.pt")
+        #     all_test_masks = torch.load(entity_path+"/all_test_masks.pt")
 
-            data = Data(train_doc, val_doc, test_doc, tokenizer,
-            all_train_entity_token_ids, all_train_masks,
-            all_val_entity_token_ids, all_val_masks,
-            all_test_entity_token_ids, all_test_masks, args.max_len,
-            samples_train, samples_val, samples_test)
-            _, val_en_loader, _, _, \
-            val_men_loader, _ = data.get_loaders(args.mention_bsz, args.entity_bsz, False)
-            model.attention_type = "hard_attention"
-            model.num_mention_vecs = 1
-            model.num_entity_vecs = 1
-            model.evaluate_on = True
-            all_val_cands_embeds = get_all_entity_hiddens(val_en_loader, model,
-                                                args.store_en_hiddens,
-                                                    args.en_hidden_path, debug = args.debug)
-            eval_result = evaluate(val_men_loader, model, all_val_cands_embeds,
-                            args.k, device, len(val_en_loader),
-                            args.store_en_hiddens, args.en_hidden_path)
+        #     data = Data(train_doc, val_doc, test_doc, tokenizer,
+        #     all_train_entity_token_ids, all_train_masks,
+        #     all_val_entity_token_ids, all_val_masks,
+        #     all_test_entity_token_ids, all_test_masks, args.max_len,
+        #     samples_train, samples_val, samples_test)
+        #     _, val_en_loader, _, _, \
+        #     val_men_loader, _ = data.get_loaders(args.mention_bsz, args.entity_bsz, False)
+        #     model.attention_type = "hard_attention"
+        #     model.num_mention_vecs = 1
+        #     model.num_entity_vecs = 1
+        #     model.evaluate_on = True
+        #     all_val_cands_embeds = get_all_entity_hiddens(val_en_loader, model,
+        #                                         args.store_en_hiddens,
+        #                                             args.en_hidden_path, debug = args.debug)
+        #     eval_result = evaluate(val_men_loader, model, all_val_cands_embeds,
+        #                     args.k, device, len(val_en_loader),
+        #                     args.store_en_hiddens, args.en_hidden_path)
 
-            logger.log(
-                'validation recall {:8.4f}'
-                '|validation accuracy {:8.4f}'.format(
-                eval_result[0],
-                eval_result[1]
-                ))
-            wandb.log({"retriever/val_recall": eval_result[0], "retriever/val_accuracy": eval_result[1]})
+        #     logger.log(
+        #         'validation recall {:8.4f}'
+        #         '|validation accuracy {:8.4f}'.format(
+        #         eval_result[0],
+        #         eval_result[1]
+        #         ))
+        #     wandb.log({"retriever/val_recall": eval_result[0], "retriever/val_accuracy": eval_result[1]})
         
         if trigger_times > 5: break # Stopping rule for overfitting
         if epoch >= args.epochs: training_finished = True # Training is over
@@ -1058,54 +1085,54 @@ def main(args):
     if training_finished:
         
         # Retriever Evaluation
-        if args.type_model=="dual" and not args.blink:
-            logger.log('retriever performance test')
-            logger.log('loading datasets')
-            entity_path = "./data/entities"
-            samples_train = torch.load(entity_path+"/samples_train.pt")
-            samples_heldout_train_seen = torch.load(entity_path+"/samples_heldout_train_seen.pt")
-            samples_heldout_train_unseen = torch.load(entity_path+"/samples_heldout_train_unseen.pt")
-            samples_val = torch.load(entity_path+"/samples_val.pt")
-            samples_test = torch.load(entity_path+"/samples_test.pt")
-            train_doc = torch.load(entity_path+"/train_doc.pt")
-            heldout_train_doc = torch.load(entity_path+"/heldout_train_doc.pt")
-            val_doc = torch.load(entity_path+"/val_doc.pt")
-            test_doc = torch.load(entity_path+"/test_doc.pt")
-            logger.log('loading train entities')
-            all_train_entity_token_ids = torch.load(entity_path+"/all_train_entity_token_ids.pt")
-            all_train_masks = torch.load(entity_path+"/all_train_masks.pt")
+        # if args.type_model=="dual" and not args.blink:
+        #     logger.log('retriever performance test')
+        #     logger.log('loading datasets')
+        #     entity_path = "./data/entities"
+        #     samples_train = torch.load(entity_path+"/samples_train.pt")
+        #     samples_heldout_train_seen = torch.load(entity_path+"/samples_heldout_train_seen.pt")
+        #     samples_heldout_train_unseen = torch.load(entity_path+"/samples_heldout_train_unseen.pt")
+        #     samples_val = torch.load(entity_path+"/samples_val.pt")
+        #     samples_test = torch.load(entity_path+"/samples_test.pt")
+        #     train_doc = torch.load(entity_path+"/train_doc.pt")
+        #     heldout_train_doc = torch.load(entity_path+"/heldout_train_doc.pt")
+        #     val_doc = torch.load(entity_path+"/val_doc.pt")
+        #     test_doc = torch.load(entity_path+"/test_doc.pt")
+        #     logger.log('loading train entities')
+        #     all_train_entity_token_ids = torch.load(entity_path+"/all_train_entity_token_ids.pt")
+        #     all_train_masks = torch.load(entity_path+"/all_train_masks.pt")
 
-            logger.log('loading val and test entities')
-            all_val_entity_token_ids = torch.load(entity_path+"/all_val_entity_token_ids.pt")
-            all_val_masks = torch.load(entity_path+"/all_val_masks.pt")
-            all_test_entity_token_ids = torch.load(entity_path+"/all_test_entity_token_ids.pt")
-            all_test_masks = torch.load(entity_path+"/all_test_masks.pt")
+        #     logger.log('loading val and test entities')
+        #     all_val_entity_token_ids = torch.load(entity_path+"/all_val_entity_token_ids.pt")
+        #     all_val_masks = torch.load(entity_path+"/all_val_masks.pt")
+        #     all_test_entity_token_ids = torch.load(entity_path+"/all_test_entity_token_ids.pt")
+        #     all_test_masks = torch.load(entity_path+"/all_test_masks.pt")
 
-            data = Data(train_doc, val_doc, test_doc, tokenizer,
-            all_train_entity_token_ids, all_train_masks,
-            all_val_entity_token_ids, all_val_masks,
-            all_test_entity_token_ids, all_test_masks, args.max_len,
-            samples_train, samples_val, samples_test)
-            _, val_en_loader, _, _, \
-            val_men_loader, _ = data.get_loaders(args.mention_bsz, args.entity_bsz, False)
-            model.attention_type = "hard_attention"
-            model.num_mention_vecs = 1
-            model.num_entity_vecs = 1
-            model.evaluate_on = True
-            all_val_cands_embeds = get_all_entity_hiddens(val_en_loader, model,
-                                                args.store_en_hiddens,
-                                                    args.en_hidden_path, debug = args.debug)
-            eval_result = evaluate(val_men_loader, model, all_val_cands_embeds,
-                            args.k, device, len(val_en_loader),
-                            args.store_en_hiddens, args.en_hidden_path)
+        #     data = Data(train_doc, val_doc, test_doc, tokenizer,
+        #     all_train_entity_token_ids, all_train_masks,
+        #     all_val_entity_token_ids, all_val_masks,
+        #     all_test_entity_token_ids, all_test_masks, args.max_len,
+        #     samples_train, samples_val, samples_test)
+        #     _, val_en_loader, _, _, \
+        #     val_men_loader, _ = data.get_loaders(args.mention_bsz, args.entity_bsz, False)
+        #     model.attention_type = "hard_attention"
+        #     model.num_mention_vecs = 1
+        #     model.num_entity_vecs = 1
+        #     model.evaluate_on = True
+        #     all_val_cands_embeds = get_all_entity_hiddens(val_en_loader, model,
+        #                                         args.store_en_hiddens,
+        #                                             args.en_hidden_path, debug = args.debug)
+        #     eval_result = evaluate(val_men_loader, model, all_val_cands_embeds,
+        #                     args.k, device, len(val_en_loader),
+        #                     args.store_en_hiddens, args.en_hidden_path)
 
-            logger.log(
-                'validation recall {:8.4f}'
-                '|validation accuracy {:8.4f}'.format(
-                eval_result[0],
-                eval_result[1]
-                ))
-            wandb.log({"retriever/val_recall": eval_result[0], "retriever/val_accuracy": eval_result[1]})
+        #     logger.log(
+        #         'validation recall {:8.4f}'
+        #         '|validation accuracy {:8.4f}'.format(
+        #         eval_result[0],
+        #         eval_result[1]
+        #         ))
+        #     wandb.log({"retriever/val_recall": eval_result[0], "retriever/val_accuracy": eval_result[1]})
         loader_train, loader_val, loader_test, \
         num_val_samples, num_test_samples = get_loaders(data, tokenizer, args.L,
                                                         args.C, args.B,
@@ -1153,18 +1180,99 @@ def main(args):
         if args.store_reranker_score:
             micro_eval(model, loader_train, num_val_samples, args, mode = 'train')
 
+        if args.tfidf:
+            print('start evaluation on BM25 val set (to check whether correct model loaded)')
+            args.cands_dir_previous = args.cands_dir
+            args.cands_dir = './data/bm25'
+            data = load_zeshel_data(args.data, args.cands_dir, macro_eval_mode, args.debug, nearest = args.nearest)
+            _, loader_val, loader_test, \
+            num_val_samples, num_test_samples = get_loaders(data, tokenizer, args.L,
+                                                            args.C, args.B,
+                                                            args.num_workers,
+                                                            args.inputmark,
+                                                            args.C_eval,
+                                                            use_full_dataset,
+                                                            macro_eval_mode, args = args)
+            if not args.case_based:
+                if args.eval_method == 'micro':
+                    val_result = micro_eval(model, loader_val, num_val_samples, args, mode = 'valid')
+                elif args.eval_method == 'macro':
+                    val_result = macro_eval(model, loader_val, num_val_samples, args, mode = 'valid')
+            else:
+                if args.eval_method == 'micro':
+                    val_result = micro_eval(model, loader_val, num_val_samples, args, mode = 'valid')
+                elif args.eval_method == 'macro':
+                    val_result = macro_eval(model, loader_val, num_val_samples, args, mode = 'valid')
+            print(val_result)
+            print('val acc unormalized  {:8.4f} ({}/{})|'
+                        'val acc normalized  {:8.4f} ({}/{}) '.format(
+                    val_result['acc_unorm'],
+                    val_result['num_correct'],
+                    num_val_samples,
+                    val_result['acc_norm'],
+                    val_result['num_correct'],
+                    val_result['num_total_norm'],
+                    newline=False))
+            wandb_log = {"BM25_valid(cands {})/unnormalized acc".format(str(args.C_eval)): val_result['acc_unorm'], \
+                    "BM25_valid(cands {})/normalized acc".format(str(args.C_eval)): val_result['acc_norm'],\
+                    "BM25_valid(cands {})/micro_unnormalized_acc".format(str(args.C_eval)): sum(val_result['num_correct'])/sum(val_result['num_total_unorm']),\
+                    "BM25_valid(cands {})/micro_normalized_acc".format(str(args.C_eval)): sum(val_result['num_correct'])/sum(val_result['num_total_norm']),\
+                    "BM25_valid(cands {})/mrr".format(str(args.C_eval)): val_result['mrr']}
+            for i in range(len(depth)):
+                wandb_log["BM25_valid(cands {})/recall@{}".format(str(args.C_eval), depth[i])] = val_result['recall'][i]
+            print(wandb_log)
+            wandb.log(wandb_log)
 
+            print('start evaluation on test set')
+            if loader_test is None:
+                _, _, loader_test, \
+                _, num_test_samples = get_loaders(data, tokenizer, args.L,
+                                                                args.C, args.B,
+                                                                args.num_workers,
+                                                                args.inputmark,
+                                                                args.C_eval,
+                                                                use_full_dataset,
+                                                                macro_eval_mode, args = args)
+            if args.eval_method == 'micro':
+                test_result = micro_eval(model, loader_test, num_test_samples, args, mode = 'test')
+            elif args.eval_method == 'macro':
+                test_result = macro_eval(model, loader_test, num_test_samples, args, mode = 'test')
+
+            logger.log('\nDone training | training time {:s} | '
+                    'test acc unormalized {:8.4f} ({}/{})|'
+                    'test acc normalized {:8.4f} ({}/{})'.format(str(
+            datetime.now() - start_time),
+            test_result['acc_unorm'],
+            test_result['num_correct'],
+            num_test_samples,
+            test_result['acc_norm'],
+            test_result['num_correct'],
+            test_result['num_total_norm']))
+
+            wandb.log({"BM25_test_unnormalized acc": test_result['acc_unorm'], "BM25_test_normalized acc": test_result['acc_norm']})
+
+            #원래 dataloader load
+            args.cands_dir = args.cands_dir_previous
+            data = load_zeshel_data(args.data, args.cands_dir, macro_eval_mode, args.debug, nearest = args.nearest)
+            loader_train, loader_val, loader_test, \
+            num_val_samples, num_test_samples = get_loaders(data, tokenizer, args.L,
+                                                            args.C, args.B,
+                                                            args.num_workers,
+                                                            args.inputmark,
+                                                            args.C_eval,
+                                                            use_full_dataset,
+                                                            macro_eval_mode, args = args)
         print('start evaluation on val set (to check whether correct model loaded)')
         if not args.case_based:
             if args.eval_method == 'micro':
-                val_result = micro_eval(model, loader_val, num_val_samples, args)
+                val_result = micro_eval(model, loader_val, num_val_samples, args, mode = 'valid')
             elif args.eval_method == 'macro':
-                val_result = macro_eval(model, loader_val, num_val_samples, args)
+                val_result = macro_eval(model, loader_val, num_val_samples, args, mode = 'valid')
         else:
             if args.eval_method == 'micro':
-                val_result = micro_eval(model, loader_val, num_val_samples, args)
+                val_result = micro_eval(model, loader_val, num_val_samples, args, mode = 'valid')
             elif args.eval_method == 'macro':
-                val_result = macro_eval(model, loader_val, num_val_samples, args)
+                val_result = macro_eval(model, loader_val, num_val_samples, args, mode = 'valid')
         print(val_result)
         print('val acc unormalized  {:8.4f} ({}/{})|'
                     'val acc normalized  {:8.4f} ({}/{}) '.format(
@@ -1196,9 +1304,9 @@ def main(args):
                                                             use_full_dataset,
                                                             macro_eval_mode, args = args)
         if args.eval_method == 'micro':
-            test_result = micro_eval(model, loader_test, num_test_samples, args)
+            test_result = micro_eval(model, loader_test, num_test_samples, args, mode = 'test')
         elif args.eval_method == 'macro':
-            test_result = macro_eval(model, loader_test, num_test_samples, args)
+            test_result = macro_eval(model, loader_test, num_test_samples, args, mode = 'test')
 
         logger.log('\nDone training | training time {:s} | '
                 'test acc unormalized {:8.4f} ({}/{})|'
@@ -1212,6 +1320,9 @@ def main(args):
         test_result['num_total_norm']))
 
         wandb.log({"test_unnormalized acc": test_result['acc_unorm'], "test_normalized acc": test_result['acc_norm']})
+
+
+
 
         print('start evaluation on >64 candidates')
         C_eval_list = [8, 16, 32, 128,256,512]
@@ -1230,9 +1341,9 @@ def main(args):
                 train_result = micro_eval(model, loader_train, num_val_samples, args, mode = "train")
                 print(train_result)
             if args.eval_method == 'micro':
-                val_result = micro_eval(model, loader_val, num_val_samples, args)
+                val_result = micro_eval(model, loader_val, num_val_samples, args, mode = 'valid')
             elif args.eval_method == 'macro':
-                val_result = macro_eval(model, loader_val, num_val_samples, args)
+                val_result = macro_eval(model, loader_val, num_val_samples, args, mode = 'valid')
             print('C_eval: {}'.format(C_eval_elem))
             print(val_result)
             print('val acc unormalized  {:8.4f} ({}/{})|'
@@ -1393,6 +1504,8 @@ if __name__ == '__main__':
                         help='debugging mode')
     parser.add_argument('--save_dir', type = str, default = '/shared/s3/lab07/jongsong/hard-nce-el_garage/models',
                         help='debugging mode')
+    parser.add_argument('--save_topk_nce', action = 'store_true',
+                        help='save the result of reranking')
     parser.add_argument('--training_one_epoch', action = 'store_true',
                         help='stop the training after one epoch')
     parser.add_argument('--type_cands', type=str,
@@ -1427,8 +1540,6 @@ if __name__ == '__main__':
     parser.add_argument('--resume_training', action='store_true',
                         help='resume training from checkpoint?')
     parser.add_argument('--val_alpha', type=float, default=0.5,
-                        help='coefficient for val data loss')
-    parser.add_argument('--cocondenser', action = 'store_true',
                         help='coefficient for val data loss')
     parser.add_argument('--type_bert', type=str,
                         default='base',
@@ -1502,6 +1613,9 @@ if __name__ == '__main__':
              "See details at https://nvidia.github.io/apex/amp.html",
     )
     parser.add_argument('--anncur', action='store_true', help = "load anncur ckpt")
+    parser.add_argument('--cocondenser', action='store_true', help = "load cocondenser ckpt")
+    parser.add_argument('--tfidf', action='store_true', help = "load cocondenser ckpt")
+
     parser.add_argument('--token_type', action='store_false', help = "no token type id when specified")
 
     args = parser.parse_args()
