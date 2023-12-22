@@ -62,7 +62,9 @@ class BasicDataset(Dataset):
                 scores = scores[-1:] + scores[:-1]
                 label_idx = 0
             elif not y in xs[:self.max_num_candidates]:
-                scores = [scores[label_idx]]+scores[:label_idx]+scores[label_idx+1:]
+                if len(scores) != 0:
+                    scores = [scores[label_idx]]+scores[:label_idx]+scores[label_idx+1:]
+                else: scores = [0]
                 xs = [y] + [x for x in xs if x != y] 
                 label_idx = 0
             if not self_negs_again:
@@ -315,45 +317,8 @@ class UnifiedDataset(BasicDataset):
         mention_token_ids = torch.tensor(mention_encoded_dict['input_ids'])
         mention_masks = torch.tensor(mention_encoded_dict['attention_mask'])
 
-        if self.args.nearest: 
-            candidate_document_ids, label_ids, nearest_document_ids, nearest_mention_ids = self.prepare_candidates(mention, candidates, self.args, self.self_negs_again)
-            nearest_token_ids = torch.zeros((len(nearest_document_ids),len(nearest_document_ids[0]),
-                                            self.max_len))
-            nearest_masks = torch.zeros((len(nearest_document_ids),len(nearest_document_ids[0]),
-                                            self.max_len))
-            nearest_tokens = [[None for x in range(len(nearest_document_ids[0]))] for y in range(len(nearest_document_ids))]
-            for i in range(len(nearest_document_ids)):
-                for j in range(len(nearest_document_ids[0])):
 
-                    
-                    candidate_window, candidate_token = self.get_candidate_prefix(nearest_document_ids[i][j])
-                    candidate_dict = self.tokenizer.encode_plus(candidate_window,
-                                                                add_special_tokens=True,
-                                                                max_length=self.max_len,
-                                                                pad_to_max_length=True,
-                                                                truncation=True)
-                    nearest_token_ids[i][j] = torch.tensor(candidate_dict['input_ids'])
-                    nearest_masks[i][j] = torch.tensor(candidate_dict['attention_mask'])
-                    nearest_tokens[i][j] = candidate_token
-            nearest_mention_token_ids = torch.zeros((len(nearest_mention_ids), self.max_len))
-            nearest_mention_masks = torch.zeros((len(nearest_mention_ids), self.max_len))
-            nearest_mention_tokens =  [None]*len(nearest_mention_ids)
-
-
-            for i, mention_id in enumerate(nearest_mention_ids):
-                nearest_mention= self.mention_ids[mention_id]
-                mention_window = self.get_mention_window(nearest_mention)[0]
-                nearest_mention_tokens[i]  = self.documents[nearest_mention['context_document_id']]['text']
-                mention_encoded_dict = self.tokenizer.encode_plus(mention_window,
-                                                                add_special_tokens=True,
-                                                                max_length=self.max_len,
-                                                                pad_to_max_length=True,
-                                                                truncation=True)
-                nearest_mention_token_ids[i] = torch.tensor(mention_encoded_dict['input_ids'])
-                nearest_mention_masks[i] = torch.tensor(mention_encoded_dict['attention_mask'])
-
-        else:
-            candidate_document_ids, label_ids, candidates_scores = self.prepare_candidates(mention, candidates, self.args, self.self_negs_again)
+        candidate_document_ids, label_ids, candidates_scores = self.prepare_candidates(mention, candidates, self.args, self.self_negs_again)
         candidates_token_ids = torch.zeros((len(candidate_document_ids),
                                             self.max_len))
         candidates_masks = torch.zeros((len(candidate_document_ids),
@@ -370,68 +335,15 @@ class UnifiedDataset(BasicDataset):
             candidates_masks[i] = torch.tensor(candidate_dict['attention_mask'])
             candidates_tokens[i] = candidate_token
 
-        # print('''
-        # A list of documents is shown below. Each document has a number next to it along with a summary of each entity. A sentence that includes mention and context is also provided.
-        # Respond with the numbers of the documents you should consult to answer the question, in order of relevance, as well as the relevance score. A relevance score is a number from 1–10 based on which entity is the correct reference for the given mention.
-        # Do not include any documents that are not relevant to the question.
-        # Example format:
-        # ''')
-        # for i, elem in enumerate(candidates_tokens):
-        #     print("Document {}: {}".format(i, elem))
-        # print("Question: {}".format(mention_token))
-        # print("Answer:")
+
+
         if self.is_training and self.args.distill_training:
-            if self.args.nearest:
-                return {"mention_token_ids": mention_token_ids,"mention_masks": mention_masks, "candidate_token_ids": candidates_token_ids, \
-                "candidate_masks": candidates_masks, "label_idx": label_ids, "teacher_scores":torch.tensor(candidates_scores),\
-                "nearest_candidate_token_ids": nearest_token_ids, "nearest_candidate_masks": nearest_masks,\
-                "nearest_mention_token_ids": nearest_mention_token_ids, "nearest_mention_masks": nearest_mention_masks}
-            else:
-                return {"mention_token_ids": mention_token_ids,"mention_masks": mention_masks, "candidate_token_ids": candidates_token_ids, \
+            return {"mention_token_ids": mention_token_ids,"mention_masks": mention_masks, "candidate_token_ids": candidates_token_ids, \
                 "candidate_masks": candidates_masks, "label_idx": label_ids, "teacher_scores":torch.tensor(candidates_scores).clone().detach()}
 
-        elif self.case_based:
-            nearest_mentions = candidates['nearest_mentions']
-            nearest_mention_token_ids = torch.tensor([])
-            nearest_mention_masks = torch.tensor([])
-            nearest_label = torch.tensor([])
-            label_token_ids = torch.tensor([])
-            label_masks = torch.tensor([])
-            for i, mention in enumerate(nearest_mentions):
-                mention = self.lookup_dict[mention] # get nearest neighbor id
-                nearest_mention_window = self.get_mention_window(mention)[0]
-                nearest_mention_token  = self.documents[mention['context_document_id']]['text']
-                nearest_mention_encoded_dict = self.tokenizer.encode_plus(nearest_mention_window,
-                                                                add_special_tokens=True,
-                                                                max_length=self.max_len,
-                                                                pad_to_max_length=True,
-                                                                truncation=True)
-                nearest_mention_token_ids = torch.cat([nearest_mention_token_ids, torch.tensor(nearest_mention_encoded_dict['input_ids']).unsqueeze(0)], dim = 0)
-                nearest_mention_masks = torch.cat([nearest_mention_masks, torch.tensor(nearest_mention_encoded_dict['attention_mask']).unsqueeze(0)], dim = 0)
-                nearest_label = mention['label_document_id']
-                label_window, label_token = self.get_candidate_prefix(nearest_label)
-                label_dict = self.tokenizer.encode_plus(label_window,
-                                                            add_special_tokens=True,
-                                                            max_length=self.max_len,
-                                                            pad_to_max_length=True,
-                                                            truncation=True)
-                label_token_ids = torch.cat([label_token_ids, torch.tensor(label_dict['input_ids']).unsqueeze(0)], dim = 0)
-                label_masks = torch.cat([label_masks, torch.tensor(label_dict['attention_mask']).unsqueeze(0)], dim = 0)
-                label_tokens = label_token
-            return {"mention_token_ids": mention_token_ids, "mention_masks": mention_masks, "candidate_token_ids": candidates_token_ids, \
-                "candidate_masks": candidates_masks, "label_idx": label_ids, \
-                "nearest_mention_token_ids": nearest_mention_token_ids, "nearest_mention_masks": nearest_mention_masks, \
-                "nearest_label_token_ids": label_token_ids, "nearest_label_masks": label_masks}
         else:
-            if self.args.nearest:
-                return {"mention_token_ids": mention_token_ids, "mention_masks": mention_masks, "candidate_token_ids": candidates_token_ids, \
-                "candidate_masks": candidates_masks, "label_idx": label_ids,\
-                "nearest_candidate_token_ids": nearest_token_ids, "nearest_candidate_masks": nearest_masks,\
-                "nearest_mention_token_ids": nearest_mention_token_ids, "nearest_mention_masks": nearest_mention_masks}
-            else:
-                return {"mention_token_ids": mention_token_ids, "mention_masks": mention_masks, "candidate_token_ids": candidates_token_ids, \
-                "candidate_masks": candidates_masks, "label_idx": label_ids, \
-                "mention_id": mention['mention_id'], "candidate_id": candidate_document_ids}
+            return {"mention_token_ids": mention_token_ids, "mention_masks": mention_masks, "candidate_token_ids": candidates_token_ids, \
+                "candidate_masks": candidates_masks, "label_idx": label_ids}
 
 class FullDataset(BasicDataset):
     def __init__(self, documents, samples, tokenizer, max_len,
