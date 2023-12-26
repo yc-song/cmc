@@ -4,12 +4,8 @@ import os
 import random
 import torch
 import torch.nn as nn
-<<<<<<< HEAD
 import json
 from data_reranker import get_loaders, load_zeshel_data, Logger
-=======
-from data_reranker import get_loaders, load_zeshel_data, Logger, preprocess_data
->>>>>>> 68000b0f97e8e15db906a5a1b6b51885ba23641f
 from datetime import datetime
 from reranker import FullRanker
 from retriever import UnifiedRetriever
@@ -406,26 +402,27 @@ def main(args):
                                  args.mention_use_codes, args.entity_use_codes,
                                  attention_type, None, False,args, num_heads = args.num_heads, num_layers = args.num_layers)
     if args.anncur and not args.resume_training:
-        package = torch.load(args.model) if device.type == 'cuda' \
-        else torch.load(args.model, map_location=torch.device('cpu'))
-        new_state_dict = package['state_dict']
-        modified_state_dict = OrderedDict()
-        for k, v in new_state_dict.items():
-            if k.startswith('model.input_encoder'):
-                name = k.replace('model.input_encoder.bert_model', 'mention_encoder')
-            elif k.startswith('model.label_encoder'):
-                name = k.replace('model.label_encoder.bert_model', 'entity_encoder')
-            modified_state_dict[name] = v
-        model.load_state_dict(modified_state_dict, strict = False)
-        if args.model_top is not None:
-            package = torch.load(args.model_top) if device.type == 'cuda' \
-            else torch.load(args.model_top, map_location=torch.device('cpu'))
-            new_state_dict = package['model_state_dict']
+        if type_model != 'full':
+            package = torch.load(args.model) if device.type == 'cuda' \
+            else torch.load(args.model, map_location=torch.device('cpu'))
+            new_state_dict = package['state_dict']
             modified_state_dict = OrderedDict()
             for k, v in new_state_dict.items():
-                name = k.replace('model.', '')
+                if k.startswith('model.input_encoder'):
+                    name = k.replace('model.input_encoder.bert_model', 'mention_encoder')
+                elif k.startswith('model.label_encoder'):
+                    name = k.replace('model.label_encoder.bert_model', 'entity_encoder')
                 modified_state_dict[name] = v
-            model.extend_multi.load_state_dict(modified_state_dict, strict = False)
+            model.load_state_dict(modified_state_dict, strict = False)
+            if args.model_top is not None:
+                package = torch.load(args.model_top) if device.type == 'cuda' \
+                else torch.load(args.model_top, map_location=torch.device('cpu'))
+                new_state_dict = package['model_state_dict']
+                modified_state_dict = OrderedDict()
+                for k, v in new_state_dict.items():
+                    name = k.replace('model.', '')
+                    modified_state_dict[name] = v
+                model.extend_multi.load_state_dict(modified_state_dict, strict = False)
 
 
     dp = torch.cuda.device_count() > 1
@@ -875,8 +872,6 @@ if __name__ == '__main__':
                         help='max number of candidates [%(default)d] when eval')
     parser.add_argument('--B', type=int, default=4,
                         help='batch size [%(default)d]')
-    parser.add_argument('--final_k', type=int, default=64,
-                        help='batch size [%(default)d]')
     parser.add_argument('--freeze_bert', action = 'store_true',
                         help='freeze encoder BERT')
     parser.add_argument('--identity_bert', action = 'store_true',
@@ -884,6 +879,8 @@ if __name__ == '__main__':
     parser.add_argument('--eval_batch_size', type=int, default=8,
                         help='evaluation batch size [%(default)d]')
 
+    parser.add_argument('--alpha', type=float, default=0.5,
+                        help='coefficient for multi-loss')
     parser.add_argument('--lr', type=float, default=2e-5,
                         help='initial learning rate [%(default)g]')
     parser.add_argument('--warmup_proportion', type=float, default=0.1,
@@ -905,13 +902,40 @@ if __name__ == '__main__':
                         help='init (default if 0) [%(default)g]')
     parser.add_argument('--seed', type=int, default=42,
                         help='random seed [%(default)d]')
-    parser.add_argument('--num_workers', type=int, default=4,
+    parser.add_argument('--num_workers', type=int, default=2,
                         help='num workers [%(default)d]')
+    parser.add_argument('--k', type=int, default=64,
+                        help='recall@k when evaluate')
     parser.add_argument('--gpus', type=str, default='0,1',
                         help='GPUs separated by comma [%(default)s]')
     parser.add_argument('--simpleoptim', action='store_true',
                         help='simple optimizer (constant schedule, '
                              'no weight decay?')
+    parser.add_argument('--case_based', action='store_true',
+                        help='simple optimizer (constant schedule, '
+                             'no weight decay?')
+    parser.add_argument('--gold_first', action='store_true',
+                        help='simple optimizer (constant schedule, '
+                             'no weight decay?')
+    parser.add_argument('--test_at_first', action='store_true',
+                        help='simple optimizer (constant schedule, '
+                             'no weight decay?')
+    parser.add_argument('--order_changed', action='store_true',
+                        help='simple optimizer (constant schedule, '
+                             'no weight decay?')
+    parser.add_argument('--attend_to_gold', action='store_true',
+                        help='simple optimizer (constant schedule, '
+                             'no weight decay?')
+    parser.add_argument('--attend_to_itself', action='store_true',
+                        help='simple optimizer (constant schedule, '
+                             'no weight decay?')
+    parser.add_argument('--batch_first', action='store_false',
+                        help='simple optimizer (constant schedule, '
+                             'no weight decay?')
+    parser.add_argument('--nearest', action='store_true',
+                        help='vertical interaction w/ nearest neighbors')
+    parser.add_argument('--use_val_dataset', action='store_true',
+                        help='vertical interaction w/ nearest neighbors')
     parser.add_argument('--eval_method', default='macro', type=str,
                         choices=['macro', 'micro', 'skip'],
                         help='the evaluate method')
@@ -928,8 +952,12 @@ if __name__ == '__main__':
                         help='the type of model')
     parser.add_argument('--debug', action = 'store_true',
                         help='debugging mode')
+    parser.add_argument('--store_reranker_score', action = 'store_true',
+                        help='debugging mode')
     parser.add_argument('--save_dir', type = str, default = '/shared/s3/lab07/jongsong/hard-nce-el_garage/models',
                         help='debugging mode')
+    parser.add_argument('--save_topk_nce', action = 'store_true',
+                        help='save the result of reranking')
     parser.add_argument('--training_one_epoch', action = 'store_true',
                         help='stop the training after one epoch')
     parser.add_argument('--type_cands', type=str,
@@ -938,9 +966,13 @@ if __name__ == '__main__':
                                 'mixed_negative',
                                  'hard_negative',
                                  'self_negative',
+                                'random_negative',
                                  'self_fixed_negative',
                                  'self_mixed_negative'],
                         help='fixed: top k, hard: distributionally sampled k')
+    parser.add_argument('--mention_bsz', type=int, default=512,
+                        help='the batch size')
+
     parser.add_argument('--run_id', type = str,
                         help='run id when resuming the run')
     parser.add_argument('--training_finished', action = 'store_true',
@@ -953,10 +985,14 @@ if __name__ == '__main__':
                         help='ratio of sampled negatives')
     parser.add_argument('--num_heads', type=int, default=16,
                         help='the number of multi-head attention in extend_multi ')
+    parser.add_argument('--mrr_penalty', action = 'store_true',
+                        help='the number of multi-head attention in extend_multi ')
     parser.add_argument('--num_layers', type=int, default=4,
                         help='the number of atten                ion layers in extend_multi ')
     parser.add_argument('--resume_training', action='store_true',
                         help='resume training from checkpoint?')
+    parser.add_argument('--val_alpha', type=float, default=0.5,
+                        help='coefficient for val data loss')
     parser.add_argument('--type_bert', type=str,
                         default='base',
                         choices=['base', 'large'],
@@ -991,14 +1027,27 @@ if __name__ == '__main__':
                         help='training only one epoch')
     parser.add_argument('--distill', action='store_true',
                         help='getting score distribution for distillation purpose')
+    parser.add_argument('--BCELoss', action='store_true',
+                        help='getting score distribution for distillation purpose')
     parser.add_argument('--distill_training', action='store_true',
                         help='training smaller model from crossencoder scores')
+    parser.add_argument('--energy_model', action='store_true',
+                        help='regularize by bi-encoder objective')
+    parser.add_argument('--regularization', action='store_true',
+                        help='regularize by bi-encoder score distribution')
     parser.add_argument('--bert_lr', type=float, default=1e-5,
                         help='the batch size')
     parser.add_argument('--weight_lr', type=float, default=1e-2,
                         help='the batch size')
-    parser.add_argument('--num_sampled', type=int, default=256,
+    parser.add_argument('--num_sampled', type=int, default=1024,
+                        help='train set candidates to get distribution from')
+    parser.add_argument('--max_len', type=int, default=128,
+                        help='max length of the mention input '
+                            'and the entity input')
+    parser.add_argument('--final_k', type=int, default=64,
                         help='the batch size')
+    parser.add_argument('--blink', action = 'store_true',
+                        help='load blink checkpoint')
     parser.add_argument('--mlp_layers', type=str, default="1536",
                         help='num of layers for mlp or mlp-with-som model (except for the first and the last layer)')
     parser.add_argument(
@@ -1016,6 +1065,9 @@ if __name__ == '__main__':
              "See details at https://nvidia.github.io/apex/amp.html",
     )
     parser.add_argument('--anncur', action='store_true', help = "load anncur ckpt")
+    parser.add_argument('--cocondenser', action='store_true', help = "load cocondenser ckpt")
+    parser.add_argument('--tfidf', action='store_true', help = "load cocondenser ckpt")
+
     parser.add_argument('--token_type', action='store_false', help = "no token type id when specified")
 
     args = parser.parse_args()

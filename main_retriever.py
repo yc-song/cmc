@@ -542,6 +542,30 @@ def main(args):
         # torch.cuda.empty_cache()
     # test model on test dataset
 
+
+    package = torch.load(os.path.join(args.save_dir, "pytorch_model.bin")) if device.type == 'cuda' \
+        else torch.load(os.path.join(args.save_dir, "pytorch_model.bin"), map_location=torch.device('cpu'))
+    new_state_dict = package['sd']
+    # encoder=MLPEncoder(args.max_len)
+    if args.pre_model == 'Bert':
+        encoder = BertModel.from_pretrained('bert-base-uncased')
+    elif args.pre_model == 'Roberta':
+        encoder = RobertaModel.from_pretrained('roberta-base')
+    else:
+        raise ValueError('wrong encoder type')
+    model = UnifiedRetriever(encoder, device, num_mention_vecs, num_entity_vecs,
+                             args.mention_use_codes, args.entity_use_codes,
+                             attention_type, args=args)
+    model.load_state_dict(new_state_dict)
+    if dp:
+        logger.log('Data parallel across {:d} GPUs {:s}'
+                   ''.format(len(args.gpus.split(',')), args.gpus))
+        model = nn.DataParallel(model)
+    model.to(device)
+    model.eval()
+    print("***get_all_entity_hiddens***")
+
+
     logger.log("evaluate on val set")
 
     all_val_cands_embeds = get_all_entity_hiddens(val_en_loader, model,
@@ -558,30 +582,7 @@ def main(args):
         eval_result[0],
         eval_result[1]
     ))
-    wandb.log({"val_recall": eval_result[0], "val_accuracy": eval_result[1]})
-
-    package = torch.load(os.path.join(args.save_dir, "pytorch_model.bin")) if device.type == 'cuda' \
-        else torch.load(os.path.join(args.save_dir, "pytorch_model.bin"), map_location=torch.device('cpu'))
-    new_state_dict = package['sd']
-    # encoder=MLPEncoder(args.max_len)
-    if args.pre_model == 'Bert':
-        encoder = BertModel.from_pretrained('bert-base-uncased')
-    elif args.pre_model == 'Roberta':
-        encoder = RobertaModel.from_pretrained('roberta-base')
-    else:
-        raise ValueError('wrong encoder type')
-    model = UnifiedRetriever(encoder, device, num_mention_vecs, num_entity_vecs,
-                             args.mention_use_codes, args.entity_use_codes,
-                             attention_type, None, False)
-    model.load_state_dict(new_state_dict)
-    if dp:
-        logger.log('Data parallel across {:d} GPUs {:s}'
-                   ''.format(len(args.gpus.split(',')), args.gpus))
-        model = nn.DataParallel(model)
-    model.to(device)
-    model.eval()
-    print("***get_all_entity_hiddens***")
-
+    wandb.log({"best_val_recall": eval_result[0], "best_val_accuracy": eval_result[1]})
     print("***test_result***")
     all_test_cands_embeds = get_all_entity_hiddens(test_en_loader, model,
                                                 args.store_en_hiddens,
@@ -592,10 +593,12 @@ def main(args):
     logger.log(' test recall@{:d} : {:8.4f}'
             '| test accuracy : {:8.4f}'.format(args.k, test_result[0],
                                                 test_result[1]))
-    if args.eval_method == 'micro':
-        test_result = micro_eval(model, loader_test, num_test_samples)
-    else:
-        test_result = macro_eval(model, loader_test, num_test_samples)
+    # if args.eval_method == 'micro':
+    #     test_result = micro_eval(model, loader_test, num_test_samples)
+    # else:
+    #     test_result = macro_eval(model, loader_test, num_test_samples)
+    wandb.log({"test_recall": test_result[0], "test_accuracy": test_result[1]})
+
     logger.log('\nDone training | training time {:s} | '
                'test acc unormalized {:8.4f} ({}/{})|'
                'test acc normalized {:8.4f} ({}/{})'.format(str(

@@ -4,7 +4,7 @@ import os
 import random
 import torch
 import torch.nn as nn
-from data_reranker import get_loaders, load_zeshel_data, Logger, preprocess_data
+from data_reranker import get_loaders, load_zeshel_data, load_wikipedia_data, Logger, preprocess_data
 from datetime import datetime
 from reranker import FullRanker
 from retriever import UnifiedRetriever
@@ -203,14 +203,17 @@ def micro_eval(model, loader_eval, num_total_unorm, args = None, mode = None):
                     # candidate['context_embedding'] = embedding_ctxt[i].cpu().tolist()
                     # candidate['candidate_embedding'] = cand_encode_list[srcs[i].item()][inds.cpu()].cpu().tolist()
                     cands.append(candidate)
+    
     if args.save_topk_nce:
         json_save_path = os.path.join(args.cands_dir, args.run_id)
-        if not os.path.exists(json_save_path):
-            os.makedirs(json_save_path)
+
         with open(os.path.join(json_save_path, f'candidates_{str(mode)}_{str(args.C_eval)}.json'), 'a') as f:
             for item in cands:
                 f.write('%s\n' % json.dumps(item))
     if args.store_reranker_score:
+        json_save_path = os.path.join(args.cands_dir, args.run_id)
+
+
         with open(os.path.join(args.cands_dir, 'candidates_%s_w_reranker_score.json' % mode), 'w') as f:
             for item in cands:
                 f.write('%s\n' % json.dumps(item))
@@ -243,6 +246,13 @@ def macro_eval(model, val_loaders, num_total_unorm, args = None, mode = 'train')
     mrr_total = 0
     mrr_list = []
     recall_correct_list = []
+    if args.save_topk_nce:
+
+        json_save_path = os.path.join(args.cands_dir, args.run_id)
+        if not os.path.exists(json_save_path):
+            os.makedirs(json_save_path)
+        with open(os.path.join(json_save_path, f'candidates_{str(mode)}_{str(args.C_eval)}.json'), 'w') as f:
+            f.write('')
     for i in tqdm(range(len(val_loaders))):
         val_loader = val_loaders[i]
         num_unorm = num_total_unorm[i]
@@ -580,7 +590,7 @@ def main(args):
                         name = k.replace('model.encoder.bert_model.', 'encoder.')
                     modified_state_dict[name] = v
                 model.load_state_dict(modified_state_dict, strict = False)
-
+                torch.save({'sd': model.state_dict(),'epoch':0, 'perf':0}, os.path.join(args.save_dir, "pytorch_model.bin"))
         elif args.blink:
             package = torch.load(args.model) if device.type == 'cuda' \
             else torch.load(args.model, map_location=torch.device('cpu'))
@@ -650,7 +660,11 @@ def main(args):
         tokenizer = BertTokenizer.from_pretrained('bert-large-uncased')
     use_full_dataset = (args.type_model == 'full') # Load dataset for cross-encoder
     macro_eval_mode = (args.eval_method == 'macro') # Load dataset for different eval type
-    data = load_zeshel_data(args.data, args.cands_dir, macro_eval_mode, args.debug, nearest = args.nearest)
+    if args.dataset == 'zeshel':
+        data = load_zeshel_data(args.data, args.cands_dir, macro_eval_mode, args.debug, nearest = args.nearest)
+    elif args.dataset == 'wikipedia':
+        data = load_wikipedia_data(args.cands_dir)
+
     loader_test = None
     # simpleoptim: disable learning rate schduler
     trainset_size = len(data[1][0])
@@ -770,7 +784,10 @@ def main(args):
         if not args.freeze_bert:
             if args.use_val_dataset and args.eval_method == 'macro':
                 macro_eval_mode =  False
-            data = load_zeshel_data(args.data, args.cands_dir, macro_eval_mode, args.debug, nearest=args.nearest)
+            if args.dataset == 'zeshel':
+                data = load_zeshel_data(args.data, args.cands_dir, macro_eval_mode, args.debug, nearest = args.nearest)
+            elif args.dataset == 'wikipedia':
+                data = load_wikipedia_data(args.cands_dir)
             loader_train, loader_val, loader_test, \
             num_val_samples, num_test_samples = get_loaders(data, tokenizer, args.L,
                                                     args.C, args.B,
@@ -827,7 +844,6 @@ def main(args):
                 model.train()
                 # Forward pass
                 result = model.forward(**batch, args = args)
-
                 if type(result) is tuple:
                     loss = result[0]
                     scores = result[2]
@@ -988,11 +1004,19 @@ def main(args):
         val_result['num_correct'],
         val_result['num_total_norm'],
         newline=False))
-        wandb_log = {"valid(cands {})/unnormalized acc".format(str(args.C_eval)): val_result['acc_unorm'], \
+        if args.dataset == 'zeshel':
+            wandb_log = {"valid(cands {})/unnormalized acc".format(str(args.C_eval)): val_result['acc_unorm'], \
                 "valid(cands {})/normalized acc".format(str(args.C_eval)): val_result['acc_norm'],\
                 "valid(cands {})/micro_unnormalized_acc".format(str(args.C_eval)): sum(val_result['num_correct'])/sum(val_result['num_total_unorm']),\
                 "valid(cands {})/micro_normalized_acc".format(str(args.C_eval)): sum(val_result['num_correct'])/sum(val_result['num_total_norm']),\
                 "valid(cands {})/mrr".format(str(args.C_eval)): val_result['mrr']}
+        else:
+            wandb_log = {"valid(cands {})/unnormalized acc".format(str(args.C_eval)): val_result['acc_unorm'], \
+                "valid(cands {})/normalized acc".format(str(args.C_eval)): val_result['acc_norm'],\
+                "valid(cands {})/micro_unnormalized_acc".format(str(args.C_eval)): val_result['num_correct']/val_result['num_total_unorm'],\
+                "valid(cands {})/micro_normalized_acc".format(str(args.C_eval)): val_result['num_correct']/val_result['num_total_norm'],\
+                "valid(cands {})/mrr".format(str(args.C_eval)): val_result['mrr']}
+
         for i in range(len(depth)):
             wandb_log["valid(cands {})/recall@{}".format(str(args.C_eval), depth[i])] = val_result['recall'][i]
         print(wandb_log)
@@ -1262,36 +1286,36 @@ def main(args):
                                                             args.C_eval,
                                                             use_full_dataset,
                                                             macro_eval_mode, args = args)
-        print('start evaluation on val set (to check whether correct model loaded)')
-        if not args.case_based:
-            if args.eval_method == 'micro':
-                val_result = micro_eval(model, loader_val, num_val_samples, args, mode = 'valid')
-            elif args.eval_method == 'macro':
-                val_result = macro_eval(model, loader_val, num_val_samples, args, mode = 'valid')
-        else:
-            if args.eval_method == 'micro':
-                val_result = micro_eval(model, loader_val, num_val_samples, args, mode = 'valid')
-            elif args.eval_method == 'macro':
-                val_result = macro_eval(model, loader_val, num_val_samples, args, mode = 'valid')
-        print(val_result)
-        print('val acc unormalized  {:8.4f} ({}/{})|'
-                    'val acc normalized  {:8.4f} ({}/{}) '.format(
-                val_result['acc_unorm'],
-                val_result['num_correct'],
-                num_val_samples,
-                val_result['acc_norm'],
-                val_result['num_correct'],
-                val_result['num_total_norm'],
-                newline=False))
-        wandb_log = {"valid(cands {})/unnormalized acc".format(str(args.C_eval)): val_result['acc_unorm'], \
-                "valid(cands {})/normalized acc".format(str(args.C_eval)): val_result['acc_norm'],\
-                "valid(cands {})/micro_unnormalized_acc".format(str(args.C_eval)): sum(val_result['num_correct'])/sum(val_result['num_total_unorm']),\
-                "valid(cands {})/micro_normalized_acc".format(str(args.C_eval)): sum(val_result['num_correct'])/sum(val_result['num_total_norm']),\
-                "valid(cands {})/mrr".format(str(args.C_eval)): val_result['mrr']}
-        for i in range(len(depth)):
-            wandb_log["valid(cands {})/recall@{}".format(str(args.C_eval), depth[i])] = val_result['recall'][i]
-        print(wandb_log)
-        wandb.log(wandb_log)
+        # print('start evaluation on val set (to check whether correct model loaded)')
+        # if not args.case_based:
+        #     if args.eval_method == 'micro':
+        #         val_result = micro_eval(model, loader_val, num_val_samples, args, mode = 'test')
+        #     elif args.eval_method == 'macro':
+        #         val_result = macro_eval(model, loader_val, num_val_samples, args, mode = 'test')
+        # else:
+        #     if args.eval_method == 'micro':
+        #         val_result = micro_eval(model, loader_val, num_val_samples, args, mode = 'test')
+        #     elif args.eval_method == 'macro':
+        #         val_result = macro_eval(model, loader_val, num_val_samples, args, mode = 'test')
+        # print(val_result)
+        # print('val acc unormalized  {:8.4f} ({}/{})|'
+        #             'val acc normalized  {:8.4f} ({}/{}) '.format(
+        #         val_result['acc_unorm'],
+        #         val_result['num_correct'],
+        #         num_val_samples,
+        #         val_result['acc_norm'],
+        #         val_result['num_correct'],
+        #         val_result['num_total_norm'],
+        #         newline=False))
+        # wandb_log = {"valid(cands {})/unnormalized acc".format(str(args.C_eval)): val_result['acc_unorm'], \
+        #         "valid(cands {})/normalized acc".format(str(args.C_eval)): val_result['acc_norm'],\
+        #         "valid(cands {})/micro_unnormalized_acc".format(str(args.C_eval)): sum(val_result['num_correct'])/sum(val_result['num_total_unorm']),\
+        #         "valid(cands {})/micro_normalized_acc".format(str(args.C_eval)): sum(val_result['num_correct'])/sum(val_result['num_total_norm']),\
+        #         "valid(cands {})/mrr".format(str(args.C_eval)): val_result['mrr']}
+        # for i in range(len(depth)):
+        #     wandb_log["valid(cands {})/recall@{}".format(str(args.C_eval), depth[i])] = val_result['recall'][i]
+        # print(wandb_log)
+        # wandb.log(wandb_log)
 
         print('start evaluation on test set')
         if loader_test is None:
@@ -1359,11 +1383,40 @@ def main(args):
                 "valid(cands {})/normalized acc".format(str(C_eval_elem)): val_result['acc_norm'],\
                 "valid(cands {})/micro_unnormalized_acc".format(str(C_eval_elem)): sum(val_result['num_correct'])/sum(val_result['num_total_unorm']),\
                 "valid(cands {})/micro_normalized_acc".format(str(C_eval_elem)): sum(val_result['num_correct'])/sum(val_result['num_total_norm']),\
-                "valid(cands {})/mrr".format(str(args.C_eval)): val_result['mrr']}
+                "valid(cands {})/mrr".format(str(args.C_eval_lem)): val_result['mrr']}
             for i in range(len(depth)):
                 wandb_log["valid(cands {})/recall@{}".format(str(C_eval_elem), depth[i])] = val_result['recall'][i]
             print(wandb_log)
             wandb.log(wandb_log)
+
+            if args.eval_method == 'micro':
+                test_result = micro_eval(model, loader_test, num_test_samples, args, mode = 'test')
+            elif args.eval_method == 'macro':
+                test_result = macro_eval(model, loader_test, num_test_samples, args, mode = 'test')
+            print('C_eval: {}'.format(C_eval_elem))
+            print(test_result)
+            print('test acc unormalized  {:8.4f} ({}/{})|'
+                    'test acc normalized  {:8.4f} ({}/{})|'.format(
+                test_result['acc_unorm'],
+                test_result['num_correct'],
+                num_test_samples,
+                test_result['acc_norm'],
+                test_result['num_correct'],
+                test_result['num_total_norm'],
+                newline=False))
+            wandb_log = {"test(cands {})/unnormalized acc".format(str(C_eval_elem)): test_result['acc_unorm'], \
+                "test(cands {})/normalized acc".format(str(C_eval_elem)): test_result['acc_norm'],\
+                "test(cands {})/micro_unnormalized_acc".format(str(C_eval_elem)): sum(test_result['num_correct'])/sum(test_result['num_total_unorm']),\
+                "test(cands {})/micro_normalized_acc".format(str(C_eval_elem)): sum(test_result['num_correct'])/sum(test_result['num_total_norm']),\
+                "test(cands {})/mrr".format(str(args.C_eval_elem)): test_result['mrr']}
+            for i in range(len(depth)):
+                wandb_log["test(cands {})/recall@{}".format(str(C_eval_elem), depth[i])] = test_result['recall'][i]
+            print(wandb_log)
+            wandb.log(wandb_log)
+
+
+
+
         if args.type_model != "full":
             print('recall eval')
             args.C_eval = 1024
@@ -1502,7 +1555,7 @@ if __name__ == '__main__':
                         help='debugging mode')
     parser.add_argument('--store_reranker_score', action = 'store_true',
                         help='debugging mode')
-    parser.add_argument('--save_dir', type = str, default = '/shared/s3/lab07/jongsong/hard-nce-el_garage/models',
+    parser.add_argument('--save_dir', type = str, default = './models',
                         help='debugging mode')
     parser.add_argument('--save_topk_nce', action = 'store_true',
                         help='save the result of reranking')
@@ -1544,6 +1597,10 @@ if __name__ == '__main__':
     parser.add_argument('--type_bert', type=str,
                         default='base',
                         choices=['base', 'large'],
+                        help='the type of encoder')
+    parser.add_argument('--dataset', type=str,
+                        default='zeshel',
+                        choices=['zeshel', 'wikipedia'],
                         help='the type of encoder')
     parser.add_argument('--num_mention_vecs', type=int, default=1,
                         help='the number of mention vectors ')
@@ -1625,5 +1682,6 @@ if __name__ == '__main__':
     if args.nearest: assert args.batch_first == False and args.type_cands == "fixed_negative"
     if args.use_val_dataset: 
         assert args.distill_training
+    assert not args.dataset == 'wikipedia' or args.eval_method == 'micro' # if dataset == wikipedia, eval_method is required to be micro
     main(args)
     

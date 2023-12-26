@@ -28,6 +28,7 @@ class BasicDataset(Dataset):
         self.indicate_mention_boundaries = indicate_mention_boundaries
         self.MENTION_START = '[unused0]'
         self.MENTION_END = '[unused1]'
+        self.ENTITY_TAG = '[unused2]'
         self.args = args
         self.samples = self.cull_samples(samples)
         # if self.args.case_based:
@@ -55,7 +56,6 @@ class BasicDataset(Dataset):
         label_idx = candidates['labels']
         y = mention['label_document_id']
         scores = candidates['scores']
-
         if self.is_training:
             # At training time we can include target if not already included.
             if label_idx == '-1':
@@ -63,7 +63,9 @@ class BasicDataset(Dataset):
                 scores = scores[-1:] + scores[:-1]
                 label_idx = 0
             elif not y in xs[:self.max_num_candidates]:
-                scores = [scores[label_idx]]+scores[:label_idx]+scores[label_idx+1:]
+                if len(scores) != 0:
+                    scores = [scores[label_idx]]+scores[:label_idx]+scores[label_idx+1:]
+                else: scores = [0]
                 xs = [y] + [x for x in xs if x != y] 
                 label_idx = 0
             if not self_negs_again:
@@ -164,62 +166,11 @@ class BasicDataset(Dataset):
             if args.nearest:
                 xs_nearest = candidates['nearest_candidates']
                 m_nearest = candidates['nearest_mentions']
-
                 return xs[:self.max_num_candidates], label_idx, xs_nearest[:self.max_num_candidates], m_nearest[:self.max_num_candidates]      
             return xs[:self.max_num_candidates], label_idx, scores[:self.max_num_candidates]
         else:
-            # At test time we assume candidates already include target.
-            # assert y in xs
-            # if self.args.val_random_shuffle:
-            #     xs_output = [None]*len(xs)
-            #     xs_output[0] = y
-            #     y_index = xs.index(y)
-            #     num_batches = int(len(xs)//self.args.final_k)
-            #     indices = [(i+1)*num_batches-1 for i in range(self.args.final_k)]
-            #     # print("3", indices)
-            #     if y_index < self.args.final_k:
-            #         xs.remove(y)
-            #         xs_output = place_elements(xs_output, xs[:self.args.final_k-1], indices)
-            #     else:
-            #         xs_output[1] = xs[0]
-            #         xs.remove(y)
-            #         xs_output = place_elements(xs_output, xs[1:self.args.final_k], indices)
-            #     remaining_items = [x for x in xs if x not in xs_output]
-            #     # print("5", remaining_items)
-            #     random.shuffle(remaining_items)
-            #     j = 0
-            #     for i, val in enumerate(xs_output):
-            #         if val is None:
-            #             xs_output[i] = remaining_items[j]
-            #             j+=1
-            #     # print("6", xs_output)
-            #     return xs_output[:args.num_eval_cands]
             assert y in xs
-            # if args.type_cands == 'random_negative':
-            #     xs = xs[:self.max_num_candidates]
-            #     random.shuffle(xs)
-            #     label_idx = xs.index(y)
-            #     return xs, label_idx
-            # elif self.args.val_random_shuffle:
-            #     num_batches = int(len(xs)//self.args.final_k) # Divide entire set by final number of k
-            #     xs_output = [] # list for final candidates
-            #     for i in range(num_batches):
-            #         xs_output.extend(xs[i::num_batches]) # spread each candidate with regular step
-            #     # y_original_index = xs.index(y)
-            #     label_idx = xs_output.index(y)
-            #     # if y_original_index//num_batches == 0:
-            #         # xs_output[0], xs_output[y_index] = xs_output[y_index], xs_output[0]
-            #     # else:
-            #         # xs_output[(y_original_index//num_batches)], xs_output[y_index] = xs_output[y_index], xs_output[(y_original_index//num_batches)]
-            #         # xs_output[(y_original_index//num_batches)], xs_output[0] = xs_output[0], xs_output[(y_original_index//num_batches)]
-            #     return xs_output[:self.max_num_candidates], label_idx
-
-            # elif self.args.gold_first:
-            #     xs = [y] + [x for x in xs if x != y]  # Target index always 0
-            #     label_idx = 0
             return xs[:self.max_num_candidates], label_idx, None
-            # xs = [y] + [x for x in xs if x != y]  # Target index always 0
-            # return xs[:self.maxnum_candidates]
 
             
 
@@ -317,45 +268,8 @@ class UnifiedDataset(BasicDataset):
         mention_token_ids = torch.tensor(mention_encoded_dict['input_ids'])
         mention_masks = torch.tensor(mention_encoded_dict['attention_mask'])
 
-        if self.args.nearest: 
-            candidate_document_ids, label_ids, nearest_document_ids, nearest_mention_ids = self.prepare_candidates(mention, candidates, self.args, self.self_negs_again)
-            nearest_token_ids = torch.zeros((len(nearest_document_ids),len(nearest_document_ids[0]),
-                                            self.max_len))
-            nearest_masks = torch.zeros((len(nearest_document_ids),len(nearest_document_ids[0]),
-                                            self.max_len))
-            nearest_tokens = [[None for x in range(len(nearest_document_ids[0]))] for y in range(len(nearest_document_ids))]
-            for i in range(len(nearest_document_ids)):
-                for j in range(len(nearest_document_ids[0])):
 
-                    
-                    candidate_window, candidate_token = self.get_candidate_prefix(nearest_document_ids[i][j])
-                    candidate_dict = self.tokenizer.encode_plus(candidate_window,
-                                                                add_special_tokens=True,
-                                                                max_length=self.max_len,
-                                                                pad_to_max_length=True,
-                                                                truncation=True)
-                    nearest_token_ids[i][j] = torch.tensor(candidate_dict['input_ids'])
-                    nearest_masks[i][j] = torch.tensor(candidate_dict['attention_mask'])
-                    nearest_tokens[i][j] = candidate_token
-            nearest_mention_token_ids = torch.zeros((len(nearest_mention_ids), self.max_len))
-            nearest_mention_masks = torch.zeros((len(nearest_mention_ids), self.max_len))
-            nearest_mention_tokens =  [None]*len(nearest_mention_ids)
-
-
-            for i, mention_id in enumerate(nearest_mention_ids):
-                nearest_mention= self.mention_ids[mention_id]
-                mention_window = self.get_mention_window(nearest_mention)[0]
-                nearest_mention_tokens[i]  = self.documents[nearest_mention['context_document_id']]['text']
-                mention_encoded_dict = self.tokenizer.encode_plus(mention_window,
-                                                                add_special_tokens=True,
-                                                                max_length=self.max_len,
-                                                                pad_to_max_length=True,
-                                                                truncation=True)
-                nearest_mention_token_ids[i] = torch.tensor(mention_encoded_dict['input_ids'])
-                nearest_mention_masks[i] = torch.tensor(mention_encoded_dict['attention_mask'])
-
-        else:
-            candidate_document_ids, label_ids, candidates_scores = self.prepare_candidates(mention, candidates, self.args, self.self_negs_again)
+        candidate_document_ids, label_ids, candidates_scores = self.prepare_candidates(mention, candidates, self.args, self.self_negs_again)
         candidates_token_ids = torch.zeros((len(candidate_document_ids),
                                             self.max_len))
         candidates_masks = torch.zeros((len(candidate_document_ids),
@@ -372,69 +286,226 @@ class UnifiedDataset(BasicDataset):
             candidates_masks[i] = torch.tensor(candidate_dict['attention_mask'])
             candidates_tokens[i] = candidate_token
 
-        # print('''
-        # A list of documents is shown below. Each document has a number next to it along with a summary of each entity. A sentence that includes mention and context is also provided.
-        # Respond with the numbers of the documents you should consult to answer the question, in order of relevance, as well as the relevance score. A relevance score is a number from 1–10 based on which entity is the correct reference for the given mention.
-        # Do not include any documents that are not relevant to the question.
-        # Example format:
-        # ''')
-        # for i, elem in enumerate(candidates_tokens):
-        #     print("Document {}: {}".format(i, elem))
-        # print("Question: {}".format(mention_token))
-        # print("Answer:")
+
 
         if self.is_training and self.args.distill_training:
-            if self.args.nearest:
-                return {"mention_token_ids": mention_token_ids,"mention_masks": mention_masks, "candidate_token_ids": candidates_token_ids, \
-                "candidate_masks": candidates_masks, "label_idx": label_ids, "teacher_scores":torch.tensor(candidates_scores),\
-                "nearest_candidate_token_ids": nearest_token_ids, "nearest_candidate_masks": nearest_masks,\
-                "nearest_mention_token_ids": nearest_mention_token_ids, "nearest_mention_masks": nearest_mention_masks}
-            else:
-                return {"mention_token_ids": mention_token_ids,"mention_masks": mention_masks, "candidate_token_ids": candidates_token_ids, \
+            return {"mention_token_ids": mention_token_ids,"mention_masks": mention_masks, "candidate_token_ids": candidates_token_ids, \
                 "candidate_masks": candidates_masks, "label_idx": label_ids, "teacher_scores":torch.tensor(candidates_scores).clone().detach()}
 
-        elif self.case_based:
-            nearest_mentions = candidates['nearest_mentions']
-            nearest_mention_token_ids = torch.tensor([])
-            nearest_mention_masks = torch.tensor([])
-            nearest_label = torch.tensor([])
-            label_token_ids = torch.tensor([])
-            label_masks = torch.tensor([])
-            for i, mention in enumerate(nearest_mentions):
-                mention = self.lookup_dict[mention] # get nearest neighbor id
-                nearest_mention_window = self.get_mention_window(mention)[0]
-                nearest_mention_token  = self.documents[mention['context_document_id']]['text']
-                nearest_mention_encoded_dict = self.tokenizer.encode_plus(nearest_mention_window,
-                                                                add_special_tokens=True,
-                                                                max_length=self.max_len,
-                                                                pad_to_max_length=True,
-                                                                truncation=True)
-                nearest_mention_token_ids = torch.cat([nearest_mention_token_ids, torch.tensor(nearest_mention_encoded_dict['input_ids']).unsqueeze(0)], dim = 0)
-                nearest_mention_masks = torch.cat([nearest_mention_masks, torch.tensor(nearest_mention_encoded_dict['attention_mask']).unsqueeze(0)], dim = 0)
-                nearest_label = mention['label_document_id']
-                label_window, label_token = self.get_candidate_prefix(nearest_label)
-                label_dict = self.tokenizer.encode_plus(label_window,
-                                                            add_special_tokens=True,
-                                                            max_length=self.max_len,
-                                                            pad_to_max_length=True,
-                                                            truncation=True)
-                label_token_ids = torch.cat([label_token_ids, torch.tensor(label_dict['input_ids']).unsqueeze(0)], dim = 0)
-                label_masks = torch.cat([label_masks, torch.tensor(label_dict['attention_mask']).unsqueeze(0)], dim = 0)
-                label_tokens = label_token
-            return {"mention_token_ids": mention_token_ids, "mention_masks": mention_masks, "candidate_token_ids": candidates_token_ids, \
-                "candidate_masks": candidates_masks, "label_idx": label_ids, \
-                "nearest_mention_token_ids": nearest_mention_token_ids, "nearest_mention_masks": nearest_mention_masks, \
-                "nearest_label_token_ids": label_token_ids, "nearest_label_masks": label_masks}
         else:
-            if self.args.nearest:
-                return {"mention_token_ids": mention_token_ids, "mention_masks": mention_masks, "candidate_token_ids": candidates_token_ids, \
-                "candidate_masks": candidates_masks, "label_idx": label_ids,\
-                "nearest_candidate_token_ids": nearest_token_ids, "nearest_candidate_masks": nearest_masks,\
-                "nearest_mention_token_ids": nearest_mention_token_ids, "nearest_mention_masks": nearest_mention_masks}
-            else:
-                return {"mention_token_ids": mention_token_ids, "mention_masks": mention_masks, "candidate_token_ids": candidates_token_ids, \
-                "candidate_masks": candidates_masks, "label_idx": label_ids, \
-                "mention_id": mention['mention_id'], "candidate_id": candidate_document_ids}
+            return {"mention_token_ids": mention_token_ids, "mention_masks": mention_masks, "candidate_token_ids": candidates_token_ids, \
+                "candidate_masks": candidates_masks, "label_idx": label_ids}
+
+class WikipediaDataset(BasicDataset):
+    def __init__(self, documents, samples, tokenizer, max_len,
+                 max_num_candidates,
+                 is_training, indicate_mention_boundaries=False, args=None, self_negs_again=False):
+        super(WikipediaDataset, self).__init__(documents, samples, tokenizer,
+                                             max_len, max_num_candidates,
+                                             is_training,
+                                             indicate_mention_boundaries, args)
+        self.max_len = max_len // 2
+        self.max_len_mention = self.max_len - 2  # cls and sep
+        self.max_len_candidate = self.max_len - 2  # cls and sep
+        self.args = args
+        self.is_training = is_training
+        self.self_negs_again = self_negs_again
+        self.tokenizer.add_special_tokens({'additional_special_tokens': ['[unused0]','[unused1]','[unused2]']})
+        self.samples = self.cull_samples(samples)
+
+    def cull_samples(self, samples):
+        self.num_samples_original = len(samples)
+        # if self.args.nearest:
+        if self.is_training:
+            mentions = [i for i in range(len(samples))]
+            return mentions, samples
+
+        else:
+            # print(samples[0][0]['label_document_id'])
+            # print(samples[1][0][samples[0][0]['mention_id']]['candidates'])
+            mentions= []
+            returned_samples = []
+            try:
+                for i in range(len(samples)):
+                    if samples[i]['label'] < self.max_num_candidates:
+                        mentions.append(i)
+                        returned_samples.append(samples[i])
+            except: pass
+
+            return mentions, returned_samples
+    def prepare_candidates(self, candidates, args, self_negs_again = False):
+        # xs = candidates['candidates'][:self.max_num_candidates]
+        def place_elements(lst, elements, indices):
+            for i, x in zip(indices, elements):
+                lst[i] = x
+            return lst
+        xs = candidates['candidates']
+        label_idx = candidates['label']
+        y = xs[label_idx]
+        scores = candidates['scores']
+        if self.is_training:
+            # At training time we can include target if not already included.
+            if label_idx == '-1':
+                xs = xs[-1:] + xs[:-1]
+                scores = scores[-1:] + scores[:-1]
+                label_idx = 0
+            elif label_idx >= self.max_num_candidates:
+                if len(scores) != 0:
+                    scores = [scores[label_idx]]+scores[:label_idx]+scores[label_idx+1:]
+                else: scores = [0]
+                xs = [y] + [x for x in xs if x != y] 
+                label_idx = 0
+            if not self_negs_again:
+                # At first, training set == entire set
+                if args.type_cands == 'self_negative' or args.type_cands == "self_fixed_negative"\
+                or args.type_cands == "self_mixed_negative":
+                    if not y in xs[:args.num_sampled]:
+                        xs = [y] + [x for x in xs if x != y] 
+                        label_idx = 0
+                    else:
+                        label_idx = xs[:args.num_sampled].index(y)
+                    return xs[:args.num_sampled], label_idx
+                elif args.type_cands == 'fixed_negative':
+                    pass
+                elif args.type_cands == 'random_negative':
+                    xs = xs[:self.max_num_candidates]
+                    scores = scores[:self.max_num_candidates]
+                    xs_with_scores = [(i, j) for i, j in zip(xs, scores)]
+                    random.shuffle(xs_with_scores)
+                    for i, x in enumerate(xs_with_scores):
+                        xs[i] = x[0]
+                        scores[i] = x[1]
+                    label_idx = xs.index(y)
+                elif args.type_cands == 'mixed_negative':
+                    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+                    num_fixed = int(self.max_num_candidates * args.cands_ratio)
+                    num_hards = self.max_num_candidates - num_fixed
+                    label_idx = xs.index(y)
+
+                    xs = [y] + [x for x in xs if x != y]  # Target index always 0
+                    scores = [scores[label_idx]]+scores[:label_idx]+scores[label_idx+1:]
+                    label_idx = 0
+                    xs = np.array(xs)
+                    scores = np.array(scores)
+                    fixed_xs = xs[:num_fixed]
+                    fixed_scores = scores[:num_fixed]
+                    # Random sampling by giving same probs to each candidate
+                    hard_scores = torch.zeros(len(candidates['scores']))[num_fixed:] 
+                    probs = hard_scores.softmax(dim=0)
+                    probs = probs.unsqueeze(0)
+                    hard_cands = torch.tensor([num_fixed]) + distribution_sample(probs, num_hards, device).squeeze(0)
+                    hard_xs = xs[hard_cands.squeeze(0)]
+                    hard_scores = scores[hard_cands.squeeze(0)]
+                    xs = np.concatenate((fixed_xs, hard_xs))
+                    scores = np.concatenate((fixed_scores, hard_scores))
+                if args.type_cands == 'hard_negative': 
+                    # Later, training set is obtained by hard negs mining
+                    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+                    num_hards = len(xs) 
+                    # scores = candidates['scores'].clone().detach()
+                    hard_scores = torch.tensor(candidates['scores'], dtype = float)
+                    probs = hard_scores.softmax(dim=0).unsqueeze(0)
+                    hard_cands = distribution_sample(probs, self.max_num_candidates,
+                                                        device)
+                    xs = np.array(xs)
+                    scores = np.array(scores)
+                    xs = xs[hard_cands.squeeze(0).cpu()]
+                    xs = [y] + [x for x in xs if x != y]  # Target index always 0
+                    scores_xs = scores[hard_cands.squeeze(0).cpu()]
+                    scores = [scores[label_idx]] + [score for score in scores_xs if score != scores[label_idx]]
+                    label_idx = 0
+            else: 
+                if args.type_cands == 'self_fixed_negative':
+                    scores = torch.tensor(candidates['scores'], dtype = float)
+                    topk_indices = torch.topk(scores, self.max_num_candidates)[1]
+                    xs = np.array(xs)[topk_indices.cpu()]
+                    xs = [y] + [x for x in xs if x!= y]
+                    label_idx = 0
+                elif args.type_cands == "self_negative":
+                    # Later, training set is obtained by hard negs mining
+                    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+                    num_hards = len(xs)
+                    # scores = torch.tensor(candidates['self_scores'], dtype = float).clone().detach()
+                    probs = candidates['self_scores'].softmax(dim=0).unsqueeze(0)
+                    hard_cands = distribution_sample(probs, self.max_num_candidates,
+                                                        device)
+                    xs = np.array(xs)
+                    xs = xs[hard_cands.squeeze(0).cpu()]
+                    xs = [y] + [x for x in xs if x != y]  # Target index always 0
+                    label_idx = 0
+
+                elif args.type_cands == 'self_mixed_negative':
+                    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+                    num_fixed = int(self.max_num_candidates * args.cands_ratio)
+                    num_hards = self.max_num_candidates - num_fixed
+                    xs = [y] + [x for x in xs if x != y]  # Target index always 0
+                    xs = np.array(xs)
+                    fixed_xs = xs[:num_fixed]
+                    # Random sampling by giving same probs to each candidate
+                    scores = torch.zeros(len(candidates['scores']))[num_fixed:] 
+                    probs = scores.softmax(dim=0)
+                    probs = probs.unsqueeze(0)
+                    hard_cands = torch.tensor([num_fixed]) + distribution_sample(probs, num_hards, device).squeeze(0)
+                    hard_xs = xs[hard_cands.squeeze(0)]
+                    xs = np.concatenate((fixed_xs, hard_xs))
+                    label_idx = 0
+
+            if args.nearest:
+                xs_nearest = candidates['nearest_candidates']
+                m_nearest = candidates['nearest_mentions']
+                return xs[:self.max_num_candidates], label_idx, xs_nearest[:self.max_num_candidates], m_nearest[:self.max_num_candidates]      
+            return xs[:self.max_num_candidates], label_idx, scores[:self.max_num_candidates]
+        else:
+            assert y in xs
+            return xs[:self.max_num_candidates], label_idx, None
+    def get_candidate_prefix(self, candidate_document_id):
+        # Get "enough" context from space-tokenized text.
+        tokens_title = self.documents[candidate_document_id]['title'].split()
+        tokens_text = self.documents[candidate_document_id]['text'].split()
+        tokens = tokens_title + [self.ENTITY_TAG] + tokens_text
+        prefix = tokens[:self.max_len_candidate]
+        prefix = ' '.join(prefix)
+
+        # Get prefix under new tokenization.
+        return self.tokenizer.tokenize(prefix)[:self.max_len_candidate], self.documents[candidate_document_id]['text'] 
+
+    def __getitem__(self, index):
+        mention = self.samples[1][index]['context']
+        candidates = self.samples[1][index]['candidates']
+        mention_encoded_dict = self.tokenizer.encode_plus(mention,
+                                                          add_special_tokens=False,
+                                                          max_length=self.max_len,
+                                                          pad_to_max_length=True,
+                                                          truncation=True)
+        mention_token_ids = torch.tensor(mention_encoded_dict['input_ids'])
+
+        mention_masks = torch.tensor(mention_encoded_dict['attention_mask'])
+
+
+        candidate_document_ids, label_ids, candidates_scores = self.prepare_candidates(self.samples[1][index], self.args, self.self_negs_again)
+        candidates_token_ids = torch.zeros((len(candidate_document_ids),
+                                            self.max_len))
+        candidates_masks = torch.zeros((len(candidate_document_ids),
+                                        self.max_len))
+        for i, candidate_document_id in enumerate(candidate_document_ids):
+            candidate_window, candidate_token = self.get_candidate_prefix(candidate_document_id)
+            candidate_dict = self.tokenizer.encode_plus(candidate_window,
+                                                        add_special_tokens=True,
+                                                        max_length=self.max_len,
+                                                        pad_to_max_length=True,
+                                                        truncation=True)
+            candidates_token_ids[i] = torch.tensor(candidate_dict['input_ids'])
+            candidates_masks[i] = torch.tensor(candidate_dict['attention_mask'])
+
+
+
+        if self.is_training and self.args.distill_training:
+            return {"mention_token_ids": mention_token_ids,"mention_masks": mention_masks, "candidate_token_ids": candidates_token_ids, \
+                "candidate_masks": candidates_masks, "label_idx": label_ids, "teacher_scores":torch.tensor(candidates_scores).clone().detach()}
+
+        else:
+            return {"mention_token_ids": mention_token_ids, "mention_masks": mention_masks, "candidate_token_ids": candidates_token_ids, \
+                "candidate_masks": candidates_masks, "label_idx": label_ids}
 
 class FullDataset(BasicDataset):
     def __init__(self, documents, samples, tokenizer, max_len,
@@ -490,14 +561,19 @@ def get_loaders(data, tokenizer, max_len, max_num_candidates, batch_size,
     (documents, samples_train,
      samples_val, samples_test) = data
     print('get train loaders')
-    if use_full_dataset:
-        dataset_train = FullDataset(documents, samples_train, tokenizer,
-                                    max_len, max_num_candidates, True,
-                                    indicate_mention_boundaries, args = args, self_negs_again=self_negs_again)
-    else:
-        dataset_train = UnifiedDataset(documents, samples_train, tokenizer,
-                                       max_len, max_num_candidates, True,
-                                       indicate_mention_boundaries, args = args, self_negs_again=self_negs_again)
+    if args.dataset == 'zeshel':
+        if use_full_dataset:
+            dataset_train = FullDataset(documents, samples_train, tokenizer,
+                                        max_len, max_num_candidates, True,
+                                        indicate_mention_boundaries, args = args, self_negs_again=self_negs_again)
+        else:
+            dataset_train = UnifiedDataset(documents, samples_train, tokenizer,
+                                        max_len, max_num_candidates, True,
+                                        indicate_mention_boundaries, args = args, self_negs_again=self_negs_again)
+    elif args.dataset == 'wikipedia':
+        dataset_train = WikipediaDataset(documents, samples_train, tokenizer,
+                                        max_len, max_num_candidates, True,
+                                        indicate_mention_boundaries, args = args, self_negs_again=self_negs_again)
     if args.C>64:
         loader_train = DataLoader(dataset_train, batch_size=batch_size,
                                 shuffle=True, num_workers=num_workers)
@@ -514,19 +590,28 @@ def get_loaders(data, tokenizer, max_len, max_num_candidates, batch_size,
                                 shuffle=True, num_workers=num_workers)
 
     def help_loader(samples):
-        num_samples = len(samples[0])
-        if use_full_dataset:
-            dataset = FullDataset(documents, samples, tokenizer,
-                                  max_len, max_num_cands_val, False,
-                                  indicate_mention_boundaries, args)
+        if args.dataset == 'zeshel':
+            num_samples = len(samples[0])
         else:
-            dataset = UnifiedDataset(documents, samples, tokenizer,
-                                     max_len, max_num_cands_val, False,
-                                     indicate_mention_boundaries, args)
+            num_samples = len(samples)
+        if args.dataset == 'zeshel':    
+            if use_full_dataset:
+                dataset = FullDataset(documents, samples, tokenizer,
+                                    max_len, max_num_cands_val, False,
+                                    indicate_mention_boundaries, args)
+            else:
+                dataset = UnifiedDataset(documents, samples, tokenizer,
+                                        max_len, max_num_cands_val, False,
+                                        indicate_mention_boundaries, args)
+        elif args.dataset == 'wikipedia':
+            dataset = WikipediaDataset(documents, samples, tokenizer,
+                                        max_len, max_num_cands_val, False,
+                                        indicate_mention_boundaries, args)
         loader = DataLoader(dataset, batch_size=eval_batch_size,
                             shuffle=False,
                             num_workers=num_workers)
         return loader, num_samples
+    
     if self_negs_again:
         loader_val = None
         loader_test = None
@@ -612,22 +697,6 @@ def load_zeshel_data(data_dir, cands_dir, macro_eval=True, debug = False, scores
                         field['self_scores'] = scores[i]
                     
                 candidates[field['mention_id']] = field
-        if nearest:
-            with open(os.path.join(cands_dir,
-                               'entities_%s.json' % part)) as f:
-                nearest_candidates = dict()
-                for i, line in enumerate(f):
-                    field = json.loads(line)
-                    nearest_candidates[field['entity_id']] = field['nearest_entities']
-            with open(os.path.join(cands_dir,
-                               'mentions_%s.json' % part)) as f:
-                for i, line in enumerate(f):
-                    field = json.loads(line)
-                    candidates[field['mention_id']]['nearest_mentions'] = field['nearest_mentions']
-                    for i, candidate in enumerate(candidates[field['mention_id']]['candidates']):
-                        if i == 0: 
-                            candidates[field['mention_id']]['nearest_candidates'] = [[None] for y in range(len(candidates[field['mention_id']]['candidates']))]
-                        candidates[field['mention_id']]['nearest_candidates'][i] = nearest_candidates[candidate]
         return mentions, candidates
     
 
@@ -662,9 +731,44 @@ def load_zeshel_data(data_dir, cands_dir, macro_eval=True, debug = False, scores
         else:
             samples_val = None
             samples_test = None
-
     return documents, samples_train, samples_val, samples_test
 
+def load_wikipedia_data(cands_dir):
+    """
+
+    :param data_dir: train_data_dir if args.train else eval_data_dir
+    :return: mentions, entities,doc
+    """
+    print('begin loading data (AIDA)')
+    def load_documents():
+        documents = {}
+        path = os.path.join(cands_dir, 'entities.json')
+        with open(os.path.join(path)) as f:
+            for i, line in tqdm(enumerate(f)):
+                fields = json.loads(line)
+                documents[fields['id']] = fields
+        return documents
+    documents = load_documents()
+
+    def load_mention_candidates_pairs(part):
+        assert part == 'train' or part == 'testa' or part == 'testb'  
+        
+        candidates = {}
+        with open(os.path.join(cands_dir,
+                               'AIDA-YAGO2_%s.jsonl' % part)) as f:
+            for i, line in tqdm(enumerate(f)):
+                field = json.loads(line)
+                candidates[i] = field
+        return candidates
+    
+
+    print('start getting train pairs')
+    samples_train = load_mention_candidates_pairs('train')
+    print('start getting val (testa) and test (testb) pairs')
+    samples_val = load_mention_candidates_pairs('testa')
+    samples_test = load_mention_candidates_pairs('testb')
+    print('load all done')
+    return documents, samples_train, samples_val, samples_test
 
 class Logger(BasicLogger):
 

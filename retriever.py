@@ -321,6 +321,7 @@ class UnifiedRetriever(nn.Module):
                 nearest_label_token_ids = None, nearest_label_masks = None, loader_val_cased = None,\
                 nearest_candidate_token_ids = None, nearest_candidate_masks = None,\
                  mention_id = None, candidate_id = None):
+        
         ## Input
         # mention_token_ids (torch.tensor): mention token ids by tokenizer
         # mention_masks (torch.tensor): 0 for meaningless tokens
