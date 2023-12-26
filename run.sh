@@ -1,13 +1,12 @@
 #!/bin/bash
 
-#SBATCH --job-name=nce-el
+#SBATCH --job-name=cocondenser
 #SBATCH --nodes=1
-#SBATCH --gres=gpu:2
-#SBATCH --time=0-12:00:00
+#SBATCH --time=0-72:00:00
 #SBATCH --mem=100000MB
-#SBATCH --cpus-per-task=16
-#SBATCH --partition=P1
+#SBATCH --cpus-per-task=8
 #SBATCH --output=slurm_output/%j.out
+<<<<<<< HEAD
 python main_retriever.py --data_dir ./data --B 4 --gradient_accumulation_steps 1 --logging_steps 1000 --k 64 --epochs 4 --lr 0.00002 --num_cands 64 --type_cands hard_negative --cands_ratio 0.5 --type_model dual --num_mention_vecs 128 --num_entity_vecs 128 --gpus 0,1 --type_model dual --num_mention_vecs 128 --num_entity_vecs 128 --model=./cocondenser.bin --cocondenser --resume_training --run_id=macc0g2v
 # python main_reranker.py --epochs=5 --bert_lr=1e-05 --lr=1e-05 --type_model=extend_multi_dot --warmup_proportion=0.01 --inputmark --model=./cocondenser.bin --type_cands=mixed_negative --token_type --eval_batch_size=8 --identity_bert --fixed_initial_weight --save_dir=./models --num_layers=2 --num_heads=4 --cands_dir=./data/cands_anncur_top1024 --cocondenser --B=2 --gradient_accumulation_steps=4 --resume_training --run_id=byh82dav
 # python main_reranker.py --epochs=20 --lr=2e-05 --type_model=extend_multi_dot --warmup_proportion=0.2 --inputmark --training_one_epoch --anncur --model=./dual_encoder_zeshel.ckpt --type_cands=hard_negative --token_type
@@ -22,3 +21,11 @@ python main_retriever.py --data_dir ./data --B 4 --gradient_accumulation_steps 1
 # python main_retriever.py --model ./models/model_dual.pt --data_dir data --B 4 --gradient_accumulation_steps 2 --logging_steps 1000 --k 64 --epochs 4 --lr 0.00001 --num_cands 64 --type_cands mixed_negative --cands_ratio 0.5 --gpus 0,1,2,3 --type_model full --num_mention_vecs 128 --num_entity_vecs 128 --en_hidden_path=./data/en_hidden_sum_max/ --store_en_hiddens --entity_bsz 1024 --mention_bsz 1024 --cands_dir=data/cands_dual --eval_method=micro --retriever_path=/home/jylab_share/jongsong/hard-nce-el/models/dual/q0z280i9/pytorch_model.bin --retriever_type=dual
 # python main_retriever.py --model ./models/model_dual.pt --data_dir data --B 1 --gradient_accumulation_steps 2 --logging_steps 1000 --k 64 --epochs 4 --lr 0.00001 --num_cands 64 --type_cands mixed_negative --cands_ratio 0.5 --gpus 0,1 --type_model full --num_mention_vecs 128 --num_entity_vecs 128 --entity_bsz 512 --mention_bsz 512 --cands_dir=data/cands_dual --eval_method=micro --retriever_path=/home/jylab_share/jongsong/hard-nce-el/models/dual/q0z280i9/pytorch_model.bin --retriever_type=dual 
 # python main_retriever.py --model ./models/model_dual.pt --data_dir data --B 4 --gradient_accumulation_steps 2 --logging_steps 1000 --k 64 --epochs 4 --lr 0.00001 --num_cands 64 --type_cands mixed_negative --cands_ratio 0.5 --gpus 0,1,2,3 --type_model dual --num_mention_vecs 128 --num_entity_vecs 128 --en_hidden_path=./data/en_hidden_path/ --entity_bsz 512 --mention_bsz 512 --resume_training --run_id=q0z280i9 --cands_dir=data/cands_dual --eval_method=micro
+=======
+python main_reranker.py --epochs=5 --bert_lr=1e-05 --lr=1e-05 --type_model=extend_multi_dot --warmup_proportion=0.1 --inputmark --type_cands=mixed_negative --token_type --eval_batch_size=8 --save_dir=./models --num_layers=2 --num_heads=4 --cands_dir=./data/cands_top1024 --type_bert=base --B=2 --gradient_accumulation_steps=4 --gpus=3 --model=./cocondenser.bin --cocondenser 
+# python main_reranker.py --epochs=5 --bert_lr=1e-05 --lr=1e-05 --type_model=extend_multi_dot --warmup_proportion=0.2 --inputmark --type_cands=mixed_negative --token_type --eval_batch_size=8 --identity_bert --fixed_initial_weight --save_dir=./models --distill_training --alpha=0.2 --num_layers=2 --num_heads=4 --cands_dir=./data/cands_anncur_top1024 --type_bert=large --B=2 --gradient_accumulation_steps=8 --gpus=1,3
+# python main_reranker.py --epochs=5 --bert_lr=1e-05 --lr=1e-05 --type_model=extend_multi_dot --warmup_proportion=0.2 --inputmark --type_cands=mixed_negative --token_type --eval_batch_size=8 --identity_bert --fixed_initial_weight --save_dir=./models --distill_training --alpha=0.2 --num_layers=2 --num_heads=4 --cands_dir=./data/cands_anncur_top1024 --type_bert=base --B=4 --gradient_accumulation_steps=4 --gpus=2
+# python main_retriever.py --data_dir ./data --B 4 --gradient_accumulation_steps 1 --logging_steps 1000 --k 64 --epochs 4 --lr 0.00001 --num_cands 64 --type_cands mixed_negative --cands_ratio 0.5 --gpus 2,3 --type_model dual --num_mention_vecs 128 --num_entity_vecs 128 --type_model dual --num_mention_vecs 128 --num_entity_vecs 128  --type_bert=large
+
+# python main_reranker.py --epochs=20 --bert_lr=1e-05 --lr=1e-05 --type_model=extend_multi_dot --warmup_proportion=0.01 --inputmark --model=./biencoder_wiki_large.bin --type_cands=mixed_negative --token_type --eval_batch_size=8 --blink --identity_bert --fixed_initial_weight --save_dir=./models --num_layers=2 --num_heads=4 --cands_dir=./data/cands_anncur_top1024_blink_retrieved --type_bert=large --B=2 --gradient_accumulation_steps=4 --distill_training --alpha=0.2 --gpus=0
+>>>>>>> 1d7e376ade561e4b3d84b637d747e40c393e8a83

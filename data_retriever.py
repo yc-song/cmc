@@ -233,12 +233,10 @@ def transform_entities(doc, len_max, tokenizer):  # get all entities token
         en_text_tokens = tokenizer.tokenize(en_text)
         window = (en_title_tokens + [ENT] + en_text_tokens)[:max_len]
         return window
-
-
     all_entities = list(doc.keys())
     all_entity_token_ids = [None]*len(all_entities)
     all_entity_masks = [None]*len(all_entities)
-    for i, page_id in tqdm(enumerate(all_entities)):
+    for i, page_id in tqdm(enumerate(all_entities), total = len(all_entities)):
         entity_window = get_entity_window(page_id)
         entity_dict = tokenizer.encode_plus(entity_window,
                                             add_special_tokens=True,

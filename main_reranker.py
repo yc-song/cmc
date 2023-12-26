@@ -628,25 +628,8 @@ def main(args):
                 count+=1
                 print(os.path.join(args.save_dir,each_file_name))
         
-        try:
-            model.load_state_dict(cpt['sd'])
-        except: 
-            new_state_dict = cpt['sd']
-            modified_state_dict = OrderedDict()
-            # Change dict keys for loading model parameter
-            for k, v in new_state_dict.items():
-                if args.run_id=='j3bgbhma' or 'hraimnt1':
-                    if k.startswith('extend_multi'):
-                        k = k.replace('extend_multi.', 'extend_multi_')
-                if args.run_id=='35lamxa3' or '1dmse9gy':
-                    if k.startswith('transformerencoder'):
-                        k = k.replace('transformerencoder', 'extend_multi_transformerencoder')
-                    elif k.startswith('linearhead'):
-                        k = k.replace('linearhead', 'extend_multi_linearhead')
-                    elif k.startswith('token_type_embeddings'):
-                        k = k.replace('token_type_embeddings', 'extend_multi_token_type_embeddings')
-                modified_state_dict[k] = v
-            model.load_state_dict(modified_state_dict)            
+        model.load_state_dict(cpt['sd'])
+      
     # Variables for parallel computing
     dp = torch.cuda.device_count() > 1
     if dp:
@@ -677,31 +660,7 @@ def main(args):
         optimizer, scheduler, num_train_steps, num_warmup_steps \
             = configure_optimizer(args, model, trainset_size)
     if args.resume_training and not args.training_finished:
-        try:
-            optimizer.load_state_dict(cpt['opt_sd'])
-        except: 
-            if args.simpleoptim:
-                pass
-            else:
-                no_decay = ['bias', 'LayerNorm.weight']
-                transformer = ['extend_multi', 'mlp']
-                identity_init = ['transformerencoderlayer.weight']
-                optimizer_grouped_parameters = [
-                {'params': [p for n, p in model.named_parameters()
-                            if not any(nd in n for nd in no_decay) and not any(nd in n for nd in transformer)],
-                    'weight_decay': args.weight_decay, 'lr': args.bert_lr},
-                {'params': [p for n, p in model.named_parameters()
-                            if any(nd in n for nd in no_decay)],
-                    'weight_decay': 0.0, 'lr': args.bert_lr},
-                {'params': [p for n, p in model.named_parameters()
-                            if any(nd in n for nd in transformer) and not any(nd in n for nd in no_decay)],
-                    'lr': args.lr, 'weight_decay': args.weight_decay},
-                ]
-                optimizer = AdamW(optimizer_grouped_parameters,
-                                eps=args.adam_epsilon)
-                print(cpt['opt_sd'])
-                optimizer.load_state_dict(cpt['opt_sd'])
-                print(optimizer)  
+        optimizer.load_state_dict(cpt['opt_sd'])
         if not args.simpleoptim:  
             scheduler.load_state_dict(cpt['scheduler_sd'])
         if device.type == 'cuda':
@@ -856,137 +815,53 @@ def main(args):
                     student_tr_loss += student_loss.item()
                     teacher_tr_loss += teacher_loss.item()
 
-                loss = loss.mean()  # Needed in case of dataparallel
+            loss = loss.mean()  # Needed in case of dataparallel
+            if args.fp16:
+                with amp.scale_loss(loss, optimizer) as scaled_loss:
+                    scaled_loss.backward()
+            else:
+                loss.backward()
+            tr_loss += loss.item()
+            # except:
+            #     for i in range(4):
+            #         print(batch_idx, batch[i].shape)
+            if (batch_idx + 1) % args.gradient_accumulation_steps == 0:
                 if args.fp16:
-                    with amp.scale_loss(loss, optimizer) as scaled_loss:
-                        scaled_loss.backward()
+                    torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer),
+                                                args.clip)
                 else:
-                    loss.backward()
-                tr_loss += loss.item()
-                # except:
-                #     for i in range(4):
-                #         print(batch_idx, batch[i].shape)
-                if (batch_idx + 1) % args.gradient_accumulation_steps == 0:
-                    if args.fp16:
-                        torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer),
-                                                    args.clip)
-                    else:
-                        torch.nn.utils.clip_grad_norm_(model.parameters(),
-                                                    args.clip)
-                    optimizer.step()
-                    scheduler.step()
-                    model.zero_grad()
-                    step_num += 1
+                    torch.nn.utils.clip_grad_norm_(model.parameters(),
+                                                args.clip)
+                optimizer.step()
+                scheduler.step()
+                model.zero_grad()
+                step_num += 1
 
-                    # Logging training steps
-                    if step_num % args.logging_steps == 0:
-                        avg_loss = (tr_loss - logging_loss) / args.logging_steps
-                        # writer.add_scalar('avg_loss', avg_loss, step_num)
-                        logger.log('Step {:10d}/{:d} | Epoch {:3d} | '
-                                'Batch {:5d}/{:5d} | '
-                                'Average Loss {:8.4f}'.format(
-                            step_num, num_train_steps, epoch,
-                            batch_idx + 1, len(loader_train), avg_loss))
-                        wandb.log({"average loss": avg_loss, \
+                # Logging training steps
+                if step_num % args.logging_steps == 0:
+                    avg_loss = (tr_loss - logging_loss) / args.logging_steps
+                    # writer.add_scalar('avg_loss', avg_loss, step_num)
+                    logger.log('Step {:10d}/{:d} | Epoch {:3d} | '
+                            'Batch {:5d}/{:5d} | '
+                            'Average Loss {:8.4f}'.format(
+                        step_num, num_train_steps, epoch,
+                        batch_idx + 1, len(loader_train), avg_loss))
+                    wandb.log({"average loss": avg_loss, \
+                    "learning_rate": optimizer.param_groups[0]['lr'], \
+                    "epoch": epoch})
+                    if args.distill_training or args.regularization:
+                        avg_teacher_loss = (teacher_tr_loss-teacher_logging_loss)/args.logging_steps
+                        avg_student_loss = (student_tr_loss-student_logging_loss)/args.logging_steps
+                        wandb.log({"average teacher loss": avg_teacher_loss, \
+                        "average student loss": avg_student_loss,\
                         "learning_rate": optimizer.param_groups[0]['lr'], \
-                        "epoch": epoch})
-                        if args.distill_training or args.regularization:
-                            avg_teacher_loss = (teacher_tr_loss-teacher_logging_loss)/args.logging_steps
-                            avg_student_loss = (student_tr_loss-student_logging_loss)/args.logging_steps
-                            wandb.log({"average teacher loss": avg_teacher_loss, \
-                            "average student loss": avg_student_loss,\
-                            "learning_rate": optimizer.param_groups[0]['lr'], \
-                            "epoch": epoch})  
-                            student_logging_loss = student_tr_loss
-                            teacher_logging_loss = teacher_tr_loss                      
-                        logging_loss = tr_loss
-        elif args.use_val_dataset:
-            args_val = copy.deepcopy(args)
-            args_val.alpha = 0
-            for batch_idx, (batch_train, batch_val) in tqdm(enumerate(zip(loader_train, itertools.cycle(loader_val)))):
-                if args.debug and batch_idx > 10: break
-                model.train()
-                # Forward pass
-                result_train = model.forward(**batch_train, args = args)
-                result_val = model.forward(**batch_val, args = args_val)
-                if type(result_train) is tuple:
-                    loss_train = result_train[0]
-                    loss_val = result_val[0]
-                elif type(result_train) is dict:
-                    loss_train = result_train['loss']
-                    loss_val = result_val['loss']
-                if args.distill_training or args.regularization:
-                    student_loss_train = result_train[3].mean()
-                    teacher_loss_train = result_train[4].mean()
-                    student_tr_loss_train += student_loss_train.item()
-                    teacher_tr_loss_train += teacher_loss_train.item()
-                    student_loss_val = result_val[3].mean()
-                    teacher_loss_val = result_val[4].mean()
-                    student_tr_loss_val += student_loss_val.item()
-                    teacher_tr_loss_val += teacher_loss_val.item()
-                    student_tr_loss = student_tr_loss_train + student_tr_loss_val
-                    teacher_tr_loss = teacher_tr_loss_train + teacher_tr_loss_val
-                loss_train = loss_train.mean()
-                loss_val = loss_val.mean()
-                loss = loss_train + loss_val*args.val_alpha
-                if args.fp16:
-                    with amp.scale_loss(loss, optimizer) as scaled_loss:
-                        scaled_loss.backward()
-                else:
-                    loss.backward()
-                tr_loss += loss.item()
-                # except:
-                #     for i in range(4):
-                #         print(batch_idx, batch[i].shape)
-                if (batch_idx + 1) % args.gradient_accumulation_steps == 0:
-                    if args.fp16:
-                        torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer),
-                                                    args.clip)
-                    else:
-                        torch.nn.utils.clip_grad_norm_(model.parameters(),
-                                                    args.clip)
-                    optimizer.step()
-                    scheduler.step()
-                    model.zero_grad()
-                    step_num += 1
-
-                    # Logging training steps
-                    if step_num % args.logging_steps == 0:
-                        avg_loss = (tr_loss - logging_loss) / args.logging_steps
-                        # writer.add_scalar('avg_loss', avg_loss, step_num)
-                        logger.log('Step {:10d}/{:d} | Epoch {:3d} | '
-                                'Batch {:5d}/{:5d} | '
-                                'Average Loss {:8.4f}'.format(
-                            step_num, num_train_steps, epoch,
-                            batch_idx + 1, len(loader_train), avg_loss))
-                        wandb.log({"average loss": avg_loss, \
-                        "learning_rate": optimizer.param_groups[0]['lr'], \
-                        "epoch": epoch})
-                        if args.distill_training or args.regularization:
-                            avg_teacher_loss = (teacher_tr_loss-teacher_logging_loss)/args.logging_steps
-                            avg_student_loss = (student_tr_loss-student_logging_loss)/args.logging_steps
-                            wandb.log({"average teacher loss": avg_teacher_loss, \
-                            "average student loss": avg_student_loss,\
-                            "learning_rate": optimizer.param_groups[0]['lr'], \
-                            "epoch": epoch})  
-                            student_logging_loss = student_tr_loss
-                            teacher_logging_loss = teacher_tr_loss                      
-                        logging_loss = tr_loss
-
+                        "epoch": epoch})  
+                        student_logging_loss = student_tr_loss
+                        teacher_logging_loss = teacher_tr_loss                      
+                    logging_loss = tr_loss
 
         if args.eval_method == "skip":
             pass
-        if args.use_val_dataset and args.eval_method == 'macro':
-            macro_eval_mode = True
-            data = load_zeshel_data(args.data, args.cands_dir, macro_eval_mode, args.debug, nearest=args.nearest)
-            loader_train, loader_val, loader_test, \
-            num_val_samples, num_test_samples = get_loaders(data, tokenizer, args.L,
-                                                    args.C, args.B,
-                                                    args.num_workers,
-                                                    args.inputmark,
-                                                    args.C_eval,
-                                                    use_full_dataset,
-                                                    macro_eval_mode, args = args)            
         # Evaluation after one training loop
         if args.eval_method == 'micro':
             val_result = micro_eval(model, loader_val, num_val_samples, args)
@@ -1050,56 +925,6 @@ def main(args):
             trigger_times += 1
 
         wandb.log({"epoch": epoch, "best acc": best_val_perf})
-        # For bi-encoder, check out validation recall for entire entity sets
-        # if args.type_model=="dual":
-        #     logger.log('retriever performance test')
-        #     logger.log('loading datasets')
-        #     entity_path = "./data/entities"
-        #     samples_train = torch.load(entity_path+"/samples_train.pt")
-        #     samples_heldout_train_seen = torch.load(entity_path+"/samples_heldout_train_seen.pt")
-        #     samples_heldout_train_unseen = torch.load(entity_path+"/samples_heldout_train_unseen.pt")
-        #     samples_val = torch.load(entity_path+"/samples_val.pt")
-        #     samples_test = torch.load(entity_path+"/samples_test.pt")
-        #     train_doc = torch.load(entity_path+"/train_doc.pt")
-        #     heldout_train_doc = torch.load(entity_path+"/heldout_train_doc.pt")
-        #     val_doc = torch.load(entity_path+"/val_doc.pt")
-        #     test_doc = torch.load(entity_path+"/test_doc.pt")
-        #     logger.log('loading train entities')
-        #     all_train_entity_token_ids = torch.load(entity_path+"/all_train_entity_token_ids.pt")
-        #     all_train_masks = torch.load(entity_path+"/all_train_masks.pt")
-
-        #     logger.log('loading val and test entities')
-        #     all_val_entity_token_ids = torch.load(entity_path+"/all_val_entity_token_ids.pt")
-        #     all_val_masks = torch.load(entity_path+"/all_val_masks.pt")
-        #     all_test_entity_token_ids = torch.load(entity_path+"/all_test_entity_token_ids.pt")
-        #     all_test_masks = torch.load(entity_path+"/all_test_masks.pt")
-
-        #     data = Data(train_doc, val_doc, test_doc, tokenizer,
-        #     all_train_entity_token_ids, all_train_masks,
-        #     all_val_entity_token_ids, all_val_masks,
-        #     all_test_entity_token_ids, all_test_masks, args.max_len,
-        #     samples_train, samples_val, samples_test)
-        #     _, val_en_loader, _, _, \
-        #     val_men_loader, _ = data.get_loaders(args.mention_bsz, args.entity_bsz, False)
-        #     model.attention_type = "hard_attention"
-        #     model.num_mention_vecs = 1
-        #     model.num_entity_vecs = 1
-        #     model.evaluate_on = True
-        #     all_val_cands_embeds = get_all_entity_hiddens(val_en_loader, model,
-        #                                         args.store_en_hiddens,
-        #                                             args.en_hidden_path, debug = args.debug)
-        #     eval_result = evaluate(val_men_loader, model, all_val_cands_embeds,
-        #                     args.k, device, len(val_en_loader),
-        #                     args.store_en_hiddens, args.en_hidden_path)
-
-        #     logger.log(
-        #         'validation recall {:8.4f}'
-        #         '|validation accuracy {:8.4f}'.format(
-        #         eval_result[0],
-        #         eval_result[1]
-        #         ))
-        #     wandb.log({"retriever/val_recall": eval_result[0], "retriever/val_accuracy": eval_result[1]})
-        
         if trigger_times > 5: break # Stopping rule for overfitting
         if epoch >= args.epochs: training_finished = True # Training is over
         if args.training_one_epoch: # Only training for one epoch (because of timelimit)
@@ -1109,54 +934,54 @@ def main(args):
     if training_finished:
         
         # Retriever Evaluation
-        # if args.type_model=="dual" and not args.blink:
-        #     logger.log('retriever performance test')
-        #     logger.log('loading datasets')
-        #     entity_path = "./data/entities"
-        #     samples_train = torch.load(entity_path+"/samples_train.pt")
-        #     samples_heldout_train_seen = torch.load(entity_path+"/samples_heldout_train_seen.pt")
-        #     samples_heldout_train_unseen = torch.load(entity_path+"/samples_heldout_train_unseen.pt")
-        #     samples_val = torch.load(entity_path+"/samples_val.pt")
-        #     samples_test = torch.load(entity_path+"/samples_test.pt")
-        #     train_doc = torch.load(entity_path+"/train_doc.pt")
-        #     heldout_train_doc = torch.load(entity_path+"/heldout_train_doc.pt")
-        #     val_doc = torch.load(entity_path+"/val_doc.pt")
-        #     test_doc = torch.load(entity_path+"/test_doc.pt")
-        #     logger.log('loading train entities')
-        #     all_train_entity_token_ids = torch.load(entity_path+"/all_train_entity_token_ids.pt")
-        #     all_train_masks = torch.load(entity_path+"/all_train_masks.pt")
+        if args.type_model=="dual" and not args.blink:
+            logger.log('retriever performance test')
+            logger.log('loading datasets')
+            entity_path = "./data/entities"
+            samples_train = torch.load(entity_path+"/samples_train.pt")
+            samples_heldout_train_seen = torch.load(entity_path+"/samples_heldout_train_seen.pt")
+            samples_heldout_train_unseen = torch.load(entity_path+"/samples_heldout_train_unseen.pt")
+            samples_val = torch.load(entity_path+"/samples_val.pt")
+            samples_test = torch.load(entity_path+"/samples_test.pt")
+            train_doc = torch.load(entity_path+"/train_doc.pt")
+            heldout_train_doc = torch.load(entity_path+"/heldout_train_doc.pt")
+            val_doc = torch.load(entity_path+"/val_doc.pt")
+            test_doc = torch.load(entity_path+"/test_doc.pt")
+            logger.log('loading train entities')
+            all_train_entity_token_ids = torch.load(entity_path+"/all_train_entity_token_ids.pt")
+            all_train_masks = torch.load(entity_path+"/all_train_masks.pt")
 
-        #     logger.log('loading val and test entities')
-        #     all_val_entity_token_ids = torch.load(entity_path+"/all_val_entity_token_ids.pt")
-        #     all_val_masks = torch.load(entity_path+"/all_val_masks.pt")
-        #     all_test_entity_token_ids = torch.load(entity_path+"/all_test_entity_token_ids.pt")
-        #     all_test_masks = torch.load(entity_path+"/all_test_masks.pt")
+            logger.log('loading val and test entities')
+            all_val_entity_token_ids = torch.load(entity_path+"/all_val_entity_token_ids.pt")
+            all_val_masks = torch.load(entity_path+"/all_val_masks.pt")
+            all_test_entity_token_ids = torch.load(entity_path+"/all_test_entity_token_ids.pt")
+            all_test_masks = torch.load(entity_path+"/all_test_masks.pt")
 
-        #     data = Data(train_doc, val_doc, test_doc, tokenizer,
-        #     all_train_entity_token_ids, all_train_masks,
-        #     all_val_entity_token_ids, all_val_masks,
-        #     all_test_entity_token_ids, all_test_masks, args.max_len,
-        #     samples_train, samples_val, samples_test)
-        #     _, val_en_loader, _, _, \
-        #     val_men_loader, _ = data.get_loaders(args.mention_bsz, args.entity_bsz, False)
-        #     model.attention_type = "hard_attention"
-        #     model.num_mention_vecs = 1
-        #     model.num_entity_vecs = 1
-        #     model.evaluate_on = True
-        #     all_val_cands_embeds = get_all_entity_hiddens(val_en_loader, model,
-        #                                         args.store_en_hiddens,
-        #                                             args.en_hidden_path, debug = args.debug)
-        #     eval_result = evaluate(val_men_loader, model, all_val_cands_embeds,
-        #                     args.k, device, len(val_en_loader),
-        #                     args.store_en_hiddens, args.en_hidden_path)
+            data = Data(train_doc, val_doc, test_doc, tokenizer,
+            all_train_entity_token_ids, all_train_masks,
+            all_val_entity_token_ids, all_val_masks,
+            all_test_entity_token_ids, all_test_masks, args.max_len,
+            samples_train, samples_val, samples_test)
+            _, val_en_loader, _, _, \
+            val_men_loader, _ = data.get_loaders(args.mention_bsz, args.entity_bsz, False)
+            model.attention_type = "hard_attention"
+            model.num_mention_vecs = 1
+            model.num_entity_vecs = 1
+            model.evaluate_on = True
+            all_val_cands_embeds = get_all_entity_hiddens(val_en_loader, model,
+                                                args.store_en_hiddens,
+                                                    args.en_hidden_path, debug = args.debug)
+            eval_result = evaluate(val_men_loader, model, all_val_cands_embeds,
+                            args.k, device, len(val_en_loader),
+                            args.store_en_hiddens, args.en_hidden_path)
 
-        #     logger.log(
-        #         'validation recall {:8.4f}'
-        #         '|validation accuracy {:8.4f}'.format(
-        #         eval_result[0],
-        #         eval_result[1]
-        #         ))
-        #     wandb.log({"retriever/val_recall": eval_result[0], "retriever/val_accuracy": eval_result[1]})
+            logger.log(
+                'validation recall {:8.4f}'
+                '|validation accuracy {:8.4f}'.format(
+                eval_result[0],
+                eval_result[1]
+                ))
+            wandb.log({"retriever/val_recall": eval_result[0], "retriever/val_accuracy": eval_result[1]})
         loader_train, loader_val, loader_test, \
         num_val_samples, num_test_samples = get_loaders(data, tokenizer, args.L,
                                                         args.C, args.B,

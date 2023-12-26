@@ -4,6 +4,8 @@ from data_retriever import MentionSet, EntitySet, transform_entities
 import logging
 import argparse
 import numpy as np
+from util import Logger
+from data_reranker import get_loaders, Logger,  load_zeshel_data
 from transformers import BertTokenizer, BertModel, RobertaModel
 from torch.utils.data import DataLoader
 import json
@@ -122,24 +124,28 @@ def save_candidates(all_cands_indices, cands_dir, doc, all_mentions, part):
 
 def main(args):
     LOG_FORMAT = "%(levelname)s:  %(message)s"
+    logger = Logger(args.save_dir + '.log', True)
+    logger.log(str(args))
     logging.basicConfig(
 
         level=logging.DEBUG,
         format=LOG_FORMAT)
     # load data and initialize model and dataset
     train_mentions, val_mentions, test_mentions, train_doc, val_doc, test_doc \
-        = load_domain_data(args.data_dir)
+        = load_domain_data(args.data_dir, args.dataset)
     tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
 
     # get model and tokenizer
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     package = torch.load(args.model) if device.type == 'cuda' \
         else torch.load(args.model, map_location=torch.device('cpu'))
-    if args.anncur: new_state_dict = package['state_dict']
-    else: new_state_dict = package['sd']
+
     # encoder=MLPEncoder(args.max_len)
     if args.pre_model == 'Bert':
-        encoder = BertModel.from_pretrained('bert-base-uncased')
+        if args.type_bert == 'base':
+            encoder = BertModel.from_pretrained('bert-base-uncased')
+        elif args.type_bert == 'large':
+            encoder = BertModel.from_pretrained('bert-large-uncased')
     if args.pre_model == 'Roberta':
         encoder = RobertaModel.from_pretrained('roberta-base')
     if args.type_model == 'poly':
@@ -157,8 +163,9 @@ def main(args):
         num_entity_vecs = args.num_entity_vecs
     model = UnifiedRetriever(encoder, device, num_mention_vecs, num_entity_vecs,
                              args.mention_use_codes, args.entity_use_codes,
-                             attention_type, None, False)
-    if args.anncur:
+                             attention_type, None, False, args)
+    if args.ckpt == 'anncur':
+        new_state_dict = package['state_dict']
         modified_state_dict = OrderedDict()
         for k, v in new_state_dict.items():
             if k.startswith('model.input_encoder'):
@@ -167,8 +174,23 @@ def main(args):
                 name = k.replace('model.label_encoder.bert_model', 'entity_encoder')
             modified_state_dict[name] = v
         model.load_state_dict(modified_state_dict, strict = False)        
-
+    elif args.ckpt == 'blink':
+        package = torch.load(args.model) if device.type == 'cuda' \
+        else torch.load(args.model, map_location=torch.device('cpu'))
+        modified_state_dict = OrderedDict()
+        # Change dict keys for loading model parameter
+        position_ids = ["mention_encoder.embeddings.position_ids", "entity_encoder.embeddings.position_ids"]
+        for k, v in package.items():
+            name = None
+            if k.startswith('cand_encoder'):
+                name = k.replace('cand_encoder.bert_model', 'entity_encoder')
+            elif k.startswith('context_encoder'):
+                name = k.replace('context_encoder.bert_model', 'mention_encoder')
+            if name is not None:
+                modified_state_dict[name] = v
+        model.load_state_dict(modified_state_dict, strict = False)
     else:
+        new_state_dict = package['sd']
         model.load_state_dict(new_state_dict)
 
     dp = torch.cuda.device_count() > 1
@@ -178,44 +200,61 @@ def main(args):
         model = nn.DataParallel(model)
     model.to(device)
     model.eval()
-    train_loaders, val_loaders, test_loaders = [], [], []
-    train_entity_loaders, val_entity_loaders, test_entity_loaders = [], [], []
-    for i in range(len(train_mentions)):
-        mentions = train_mentions[i]
-        doc = train_doc[i]
-        entity_token_ids, entity_masks = transform_entities(doc, args.max_len,
-                                                            tokenizer)
-        mention_set = MentionSet(tokenizer, mentions, doc, args.max_len)
-        entity_set = EntitySet(tokenizer, entity_token_ids, entity_masks)
-        train_loaders.append(DataLoader(mention_set, args.mention_bsz,
+    entity_path = "./data/entities_save_candidates"
+    if os.path.isfile(os.path.join(entity_path, 'train_entity_loaders.pt')):
+        train_entity_loaders = torch.load(os.path.join(entity_path, 'train_entity_loaders.pt'))
+        val_entity_loaders = torch.load(os.path.join(entity_path, 'val_entity_loaders.pt'))
+        test_entity_loaders = torch.load(os.path.join(entity_path, 'test_entity_loaders.pt'))
+        train_loaders = torch.load(os.path.join(entity_path, 'train_loaders.pt'))
+        val_loaders = torch.load(os.path.join(entity_path, 'val_loaders.pt'))
+        test_loaders = torch.load(os.path.join(entity_path, 'test_loaders.pt'))
+    else:    
+        train_loaders, val_loaders, test_loaders = [], [], []
+        train_entity_loaders, val_entity_loaders, test_entity_loaders = [], [], []
+        for i in tqdm(range(len(train_mentions)), total = len(train_mentions)):
+            mentions = train_mentions[i]
+            doc = train_doc[i]
+            entity_token_ids, entity_masks = transform_entities(doc, args.max_len,
+                                                                tokenizer)
+            mention_set = MentionSet(tokenizer, mentions, doc, args.max_len)
+            entity_set = EntitySet(tokenizer, entity_token_ids, entity_masks)
+            train_loaders.append(DataLoader(mention_set, args.mention_bsz,
+                                            shuffle=False))
+            entity_loader = DataLoader(entity_set, args.entity_bsz,
+                                    shuffle=False)
+            train_entity_loaders.append(entity_loader)
+        for i in range(len(val_mentions)):
+            mentions = val_mentions[i]
+            doc = val_doc[i]
+            entity_token_ids, entity_masks = transform_entities(doc, args.max_len,
+                                                                tokenizer)
+            mention_set = MentionSet(tokenizer, mentions, doc, args.max_len)
+            entity_set = EntitySet(tokenizer, entity_token_ids, entity_masks)
+            val_loaders.append(DataLoader(mention_set, args.mention_bsz,
                                         shuffle=False))
-        entity_loader = DataLoader(entity_set, args.entity_bsz,
-                                   shuffle=False)
-        train_entity_loaders.append(entity_loader)
-    for i in range(len(val_mentions)):
-        mentions = val_mentions[i]
-        doc = val_doc[i]
-        entity_token_ids, entity_masks = transform_entities(doc, args.max_len,
-                                                            tokenizer)
-        mention_set = MentionSet(tokenizer, mentions, doc, args.max_len)
-        entity_set = EntitySet(tokenizer, entity_token_ids, entity_masks)
-        val_loaders.append(DataLoader(mention_set, args.mention_bsz,
-                                      shuffle=False))
-        entity_loader = DataLoader(entity_set, args.entity_bsz,
-                                   shuffle=False)
-        val_entity_loaders.append(entity_loader)
-    for i in range(len(test_mentions)):
-        mentions = test_mentions[i]
-        doc = test_doc[i]
-        entity_token_ids, entity_masks = transform_entities(doc, args.max_len,
-                                                            tokenizer)
-        mention_set = MentionSet(tokenizer, mentions, doc, args.max_len)
-        entity_set = EntitySet(tokenizer, entity_token_ids, entity_masks)
-        test_loaders.append(DataLoader(mention_set, args.mention_bsz,
-                                       shuffle=False))
-        entity_loader = DataLoader(entity_set, args.entity_bsz,
-                                   shuffle=False)
-        test_entity_loaders.append(entity_loader)
+            entity_loader = DataLoader(entity_set, args.entity_bsz,
+                                    shuffle=False)
+            val_entity_loaders.append(entity_loader)
+        for i in range(len(test_mentions)):
+            mentions = test_mentions[i]
+            doc = test_doc[i]
+            entity_token_ids, entity_masks = transform_entities(doc, args.max_len,
+                                                                tokenizer)
+            mention_set = MentionSet(tokenizer, mentions, doc, args.max_len)
+            entity_set = EntitySet(tokenizer, entity_token_ids, entity_masks)
+            test_loaders.append(DataLoader(mention_set, args.mention_bsz,
+                                        shuffle=False))
+            entity_loader = DataLoader(entity_set, args.entity_bsz,
+                                    shuffle=False)
+            test_entity_loaders.append(entity_loader)
+
+        torch.save(train_entity_loaders, os.path.join(entity_path, 'train_entity_loaders.pt'))
+        torch.save(val_entity_loaders, os.path.join(entity_path, 'val_entity_loaders.pt'))
+        torch.save(val_entity_loaders, os.path.join(entity_path, 'test_entity_loaders.pt'))
+        torch.save(train_loaders, os.path.join(entity_path, 'train_loaders.pt'))
+        torch.save(val_loaders, os.path.join(entity_path, 'val_loaders.pt'))
+        torch.save(test_loaders, os.path.join(entity_path, 'test_loaders.pt'))
+
     print('begin computing candidates indices')
     all_train_cands_embeds = get_all_entity_hiddens(train_entity_loaders,
                                                     model,
@@ -259,7 +298,7 @@ def main(args):
                     test_mentions, 'test')
 
 
-def load_domain_data(data_dir):
+def load_domain_data(data_dir, dataset = 'Zeshel'):
     """
 
     :param data_dir: train_data_dir if args.train else eval_data_dir
@@ -359,6 +398,15 @@ if __name__ == '__main__':
                                  'multi_vector',
                                  'poly'],
                         help='the type of model')
+    parser.add_argument('--case_based', action='store_true',
+                        help='simple optimizer (constant schedule, '
+                             'no weight decay?')
+    parser.add_argument('--type_bert', type=str,
+                        default='base',
+                        choices=['base', 'large'],
+                        help='the type of encoder')
+    parser.add_argument('--save_dir', type = str, default = './models',
+                        help='debugging mode')
     parser.add_argument('--num_mention_vecs', type=int, default=8,
                         help='the number of mention vectors ')
     parser.add_argument('--num_entity_vecs', type=int, default=8,
@@ -372,10 +420,15 @@ if __name__ == '__main__':
     parser.add_argument('--pre_model', default='Bert',
                         choices=['Bert', 'Roberta'],
                         type=str, help='the encoder for train')
-    parser.add_argument('--anncur', action='store_true', help = "load anncur ckpt")
+    parser.add_argument('--ckpt', default ='hard-nce-el',  choices = ['anncur', 'blink', 'cocondenser', 'hard-nce-el'], help = "load anncur ckpt")
+    
+    # parser.add_argument('--anncur', action='store_true', help = "load anncur ckpt")
     
     parser.add_argument('--store_en_hiddens', action='store_true',
                         help='store entity hiddens?')
+    parser.add_argument('--dataset', default='Zeshel',
+                        choices=['Zeshel', 'Wikipedia'],
+                        type=str, help='dataset to test')
     args = parser.parse_args()
     # Set environment variables before all else.
     os.environ['CUDA_VISIBLE_DEVICES'] = args.gpus  # Sets torch.cuda behavior
