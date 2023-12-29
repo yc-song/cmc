@@ -560,8 +560,12 @@ def get_loaders(data, tokenizer, max_len, max_num_candidates, batch_size,
                 use_full_dataset=True, macro_eval=True, args = None, self_negs_again = False, max_context_len = 32):
     eval_batch_size = batch_size
     if args.eval_batch_size is not None: eval_batch_size = args.eval_batch_size
-    (documents, samples_train,
-     samples_val, samples_test) = data
+    if args.dataset == 'zeshel':
+        (documents, samples_train,
+        samples_val, samples_test) = data
+    elif args.dataset == 'wikipedia':
+        (documents, samples_train,
+        samples_val, samples_test, samples_test_2, samples_test_3) = data
     print('get train loaders')
     if args.dataset == 'zeshel':
         if use_full_dataset:
@@ -636,6 +640,11 @@ def get_loaders(data, tokenizer, max_len, max_num_candidates, batch_size,
         else:
             loader_val, val_num_samples = help_loader(samples_val)
             loader_test, test_num_samples = help_loader(samples_test)
+            if args.dataset == 'wikipedia':
+                loader_test_2, test_num_samples_2 = help_loader(samples_test_2)
+                loader_test_3, test_num_samples_3 = help_loader(samples_test_3)
+                return (loader_train, loader_val, loader_test, val_num_samples, test_num_samples,\
+                 loader_test_2, loader_test_3, test_num_samples_2, test_num_samples_3)
     return (loader_train, loader_val, loader_test,
         val_num_samples, test_num_samples)
 
@@ -753,11 +762,11 @@ def load_wikipedia_data(cands_dir):
     documents = load_documents()
 
     def load_mention_candidates_pairs(part):
-        assert part == 'train' or part == 'testa' or part == 'testb'  
+        assert part == 'AIDA-YAGO2_train' or part == 'AIDA-YAGO2_testa' or part == 'AIDA-YAGO2_testb' or part == 'clueweb_questions' or part == 'msnbc_questions'
         
         candidates = {}
         with open(os.path.join(cands_dir,
-                               'AIDA-YAGO2_%s.jsonl' % part)) as f:
+                               f'{part}.jsonl')) as f:
             for i, line in tqdm(enumerate(f)):
                 field = json.loads(line)
                 candidates[i] = field
@@ -765,12 +774,16 @@ def load_wikipedia_data(cands_dir):
     
 
     print('start getting train pairs')
-    samples_train = load_mention_candidates_pairs('train')
-    print('start getting val (testa) and test (testb) pairs')
-    samples_val = load_mention_candidates_pairs('testa')
-    samples_test = load_mention_candidates_pairs('testb')
+    samples_train = load_mention_candidates_pairs('AIDA-YAGO2_train')
+    print('start getting val and test pairs')
+    samples_val = load_mention_candidates_pairs('AIDA-YAGO2_testa')
+    samples_test = load_mention_candidates_pairs('AIDA-YAGO2_testb')
+    samples_test_2 = load_mention_candidates_pairs('clueweb_questions')
+    samples_test_3 = load_mention_candidates_pairs('msnbc_questions')
+
     print('load all done')
-    return documents, samples_train, samples_val, samples_test
+
+    return documents, samples_train, samples_val, samples_test, samples_test_2, samples_test_3
 
 class Logger(BasicLogger):
 
