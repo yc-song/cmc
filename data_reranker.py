@@ -293,7 +293,6 @@ class UnifiedDataset(BasicDataset):
 
         if self.is_training and self.args.distill_training:
             return {"mention_token_ids": mention_token_ids,"mention_masks": mention_masks, "candidate_token_ids": candidates_token_ids, \
-            return {"mention_token_ids": mention_token_ids,"mention_masks": mention_masks, "candidate_token_ids": candidates_token_ids, \
                 "candidate_masks": candidates_masks, "label_idx": label_ids, "teacher_scores":torch.tensor(candidates_scores).clone().detach()}
 
         else:
@@ -303,14 +302,14 @@ class UnifiedDataset(BasicDataset):
 class WikipediaDataset(BasicDataset):
     def __init__(self, documents, samples, tokenizer, max_len,
                  max_num_candidates,
-                 is_training, indicate_mention_boundaries=False, args=None, self_negs_again=False):
+                 is_training, indicate_mention_boundaries=False, args=None, self_negs_again=False, max_context_len = 32):
         super(WikipediaDataset, self).__init__(documents, samples, tokenizer,
                                              max_len, max_num_candidates,
                                              is_training,
                                              indicate_mention_boundaries, args)
-        self.max_len = max_len // 2
-        self.max_len_mention = self.max_len - 2  # cls and sep
-        self.max_len_candidate = self.max_len - 2  # cls and sep
+        self.max_len = max_len
+        self.max_len_mention = max_context_len  # cls and sep
+        self.max_len_candidate = self.max_len - self.max_len_mention # cls and sep
         self.args = args
         self.is_training = is_training
         self.self_negs_again = self_negs_again
@@ -331,7 +330,7 @@ class WikipediaDataset(BasicDataset):
             returned_samples = []
             try:
                 for i in range(len(samples)):
-                    if samples[i]['label'] < self.max_num_candidates:
+                    if 0<= samples[i]['label'] < self.max_num_candidates:
                         mentions.append(i)
                         returned_samples.append(samples[i])
             except: pass
@@ -478,7 +477,7 @@ class WikipediaDataset(BasicDataset):
         candidates = self.samples[1][index]['candidates']
         mention_encoded_dict = self.tokenizer.encode_plus(mention,
                                                           add_special_tokens=False,
-                                                          max_length=self.max_len,
+                                                          max_length=self.max_len_mention,
                                                           pad_to_max_length=True,
                                                           truncation=True)
         mention_token_ids = torch.tensor(mention_encoded_dict['input_ids'])
@@ -488,20 +487,19 @@ class WikipediaDataset(BasicDataset):
 
         candidate_document_ids, label_ids, candidates_scores = self.prepare_candidates(self.samples[1][index], self.args, self.self_negs_again)
         candidates_token_ids = torch.zeros((len(candidate_document_ids),
-                                            self.max_len))
+                                            self.max_len_candidate))
         candidates_masks = torch.zeros((len(candidate_document_ids),
-                                        self.max_len))
+                                        self.max_len_candidate))
         for i, candidate_document_id in enumerate(candidate_document_ids):
             candidate_window, candidate_token = self.get_candidate_prefix(candidate_document_id)
             candidate_dict = self.tokenizer.encode_plus(candidate_window,
                                                         add_special_tokens=True,
-                                                        max_length=self.max_len,
+                                                        max_length=self.max_len_candidate,
                                                         pad_to_max_length=True,
                                                         truncation=True)
             candidates_token_ids[i] = torch.tensor(candidate_dict['input_ids'])
             candidates_masks[i] = torch.tensor(candidate_dict['attention_mask'])
-
-
+        # print(mention_token/_ids, mention_token_ids.shape, candidates_token_ids[0], candidates_token_ids.shape)
 
         if self.is_training and self.args.distill_training:
             return {"mention_token_ids": mention_token_ids,"mention_masks": mention_masks, "candidate_token_ids": candidates_token_ids, \
@@ -559,7 +557,7 @@ class FullDataset(BasicDataset):
 def get_loaders(data, tokenizer, max_len, max_num_candidates, batch_size,
                 num_workers, indicate_mention_boundaries,
                 max_num_cands_val,
-                use_full_dataset=True, macro_eval=True, args = None, self_negs_again = False):
+                use_full_dataset=True, macro_eval=True, args = None, self_negs_again = False, max_context_len = 32):
     eval_batch_size = batch_size
     if args.eval_batch_size is not None: eval_batch_size = args.eval_batch_size
     (documents, samples_train,
@@ -577,7 +575,7 @@ def get_loaders(data, tokenizer, max_len, max_num_candidates, batch_size,
     elif args.dataset == 'wikipedia':
         dataset_train = WikipediaDataset(documents, samples_train, tokenizer,
                                         max_len, max_num_candidates, True,
-                                        indicate_mention_boundaries, args = args, self_negs_again=self_negs_again)
+                                        indicate_mention_boundaries, args = args, self_negs_again=self_negs_again, max_context_len = 32)
     if args.C>64:
         loader_train = DataLoader(dataset_train, batch_size=batch_size,
                                 shuffle=True, num_workers=num_workers)
