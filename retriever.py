@@ -416,10 +416,6 @@ class UnifiedRetriever(nn.Module):
                         0]).sum(1)
             return scores
         else:  # train\
-            if args.energy_model:
-                self.attention_type= "extend_multi_dot"
-                self.num_mention_vecs = 1
-                self.num_entity_vecs = 1
             B, C, L = candidate_token_ids.size() # e.g. 8, 256, 128
             # B x m x d
             #  get  embeds
@@ -485,100 +481,6 @@ class UnifiedRetriever(nn.Module):
         xs = xs.to(self.device) # (batch size, 1, embed_dim)
         ys = ys.squeeze(dim = -2).to(self.device) #(batch_size, cands, embed_dim)
         # Deprecated
-        if self.args.case_based:
-            scores_overall = torch.tensor([]).to(self.device)
-            for i in range(xs.size(0)):
-                xs = torch.cat([xs, nearest_mention], dim = 0)
-                nearest_gold = nearest_gold.expand(-1, args.C_eval, -1)
-                ys = torch.cat([ys, nearest_gold], dim = 0)
-                input = torch.cat([xs, ys], dim = 1)
-                attention_result = self.extend_multi_transformerencoder(input)
-                if dot:
-                    scores = torch.bmm(attention_result[:,0,:].unsqueeze(1), attention_result[:,args.num_mention_vecs:,:].transpose(2,1))
-                    scores = scores.squeeze(-2)
-                else:
-                    scores = self.extend_multi.linearhead(attention_result[:,args.num_mention_vecs:,:])
-                    scores = scores.squeeze(-1)
-                scores_overall = torch.cat([scores_overall, scores[0:1]])
-            return scores_overall
-        # Deprecated
-        elif self.args.attend_to_gold:
-            scores_overall = torch.tensor([]).to(self.device)
-            for i in range(xs.size(0)):
-                nearest_gold = torch.cat((ys[:i, 0:1, :], ys[i+1:, 0:1, :]))
-                nearest_gold = nearest_gold.expand(-1, args.C_eval, -1)
-
-                ys_new = torch.cat([ys[i:i+1,:,:], nearest_gold], dim = 0)
-                xs_new = torch.cat([xs[i:i+1, :, :], xs[:i, :, :], xs[i+1:, :, :]])
-                input = torch.cat([xs_new, ys_new], dim = 1)
-                attention_result = self.transformerencoder(input)
-                
-                if dot:
-                    scores = torch.bmm(attention_result[:,0,:].unsqueeze(1), attention_result[:,args.num_mention_vecs:,:].transpose(2,1))
-                    scores = scores.squeeze(-2)
-                else:
-                    scores = self.linearhead(attention_result[:,args.num_mention_vecs:,:])
-                    scores = scores.squeeze(-1)
-                scores_overall = torch.cat([scores_overall, scores[0:1]])
-
-            return scores_overall
-        # Deprecated
-        elif self.args.order_changed:
-            scores_overall = torch.tensor([]).to(self.device)
-            for i in range(xs.size(0)):
-                xs_new = torch.cat([xs[i:i+1, :, :], xs[:i, :, :], xs[i+1:, :, :]])
-                ys_new = torch.cat([ys[i:i+1, :, :], ys[:i, :, :], ys[i+1:, :, :]])
-                temp = ys_new[0,0,:].clone()
-                ys_new[0,0,:] = ys_new[0,16,:]
-                ys_new[0,16,:] = temp
-                input = torch.cat([xs_new, ys_new], dim = 1)
-                attention_result = self.transformerencoder(input)
-                
-                if dot:
-                    scores = torch.bmm(attention_result[:,0,:].unsqueeze(1), attention_result[:,args.num_mention_vecs:,:].transpose(2,1))
-                    scores = scores.squeeze(-2)
-                else:
-                    scores = self.linearhead(attention_result[:,args.num_mention_vecs:,:])
-                    scores = scores.squeeze(-1)
-                scores_overall = torch.cat([scores_overall, scores[0:1]])                
-
-            return scores_overall  
-         
-        elif self.args.nearest:
-            scores_overall = torch.tensor([]).to(self.device)
-            for i in range(xs.size(0)):
-                # for B times
-                # taking (N, 1, D) + (N, C, D) pair as the input
-                # nearest_mention_token_ids: (N, L)
-                # nearest_mention_token_ids: (C, N, L)
-                # print("-1", nearest_mention_token_ids[i].shape, nearest_mention_masks[i].shape)
-                # print("0", nearest_candidate_token_ids[i].shape, nearest_candidate_masks[i].shape)
-                nearest_mention_embeds, nearest_mention_embeds_masks, \
-                nearest_candidates_embeds = self.encode(nearest_mention_token_ids[i], nearest_mention_masks[i],
-                                            nearest_candidate_token_ids[i],
-                                            nearest_candidate_masks[i])                
-                # print("1", xs[i].shape)
-                # print("2", nearest_mention_embeds.shape)
-                # print("3", ys[i].shape)
-                # print("4", nearest_candidates_embeds.shape)
-
-                xs_new = torch.cat((xs[i], nearest_mention_embeds.squeeze(-2)), dim = 0).unsqueeze(1) # (4, 1, 768)
-                ys_new = torch.cat((ys[i].unsqueeze(-2), nearest_candidates_embeds.squeeze(2)), dim = 1).transpose(1,0) # (64, 4, 768)
-                # print("5", xs_new.shape)
-                # print("6", ys_new.shape)
-                input = torch.cat([xs_new, ys_new], dim = 1)
-                attention_result = self.extend_multi_transformerencoder(input)
-                
-                if dot:
-                    scores = torch.bmm(attention_result[:,0,:].unsqueeze(1), attention_result[:,1:,:].transpose(2,1))
-                    scores = scores.squeeze(-2)
-                else:
-                    scores = self.linearhead(attention_result[:,args.num_mention_vecs:,:])
-                    scores = scores.squeeze(-1)
-                scores_overall = torch.cat([scores_overall, scores[0:1]])                
-
-            return scores_overall      
-        # Dprecated                  
         if self.args.model_top is None and self.args.token_type :
             token_type_xs = torch.zeros(xs.size(0), xs.size(1)).int().to(self.device)
             token_embedding_xs = self.token_type_embeddings(token_type_xs)
@@ -589,6 +491,13 @@ class UnifiedRetriever(nn.Module):
             input = torch.cat([xs, ys], dim = 1) # concatenate mention and entity embeddings
         # Take concatenated tensor as the input for transformer encoder
         attention_result = self.extend_multi_transformerencoder(input)
+        if self.args.skip_connection:
+            if self.args.layernorm:
+                layer_norm = nn.LayerNorm(input.size(-1)).to(self.device)
+                attention_result = layer_norm(0.5*(input + self.extend_multi_transformerencoder(input)))
+            else:
+                attention_result = 0.5*(input + self.extend_multi_transformerencoder(input))
+
         # Get score from dot product
         if dot:
             scores = torch.bmm(attention_result[:,0,:].unsqueeze(1), attention_result[:,self.args.num_mention_vecs:,:].transpose(2,1))
@@ -763,4 +672,9 @@ class IdentityInitializedTransformerEncoderLayer(torch.nn.Module):
         # out1 = self.encoder_layer(src, src_mask, src_key_padding_mask, is_causal) # For Higher Torch Version
         sigmoid_weight = torch.sigmoid(self.weight).to(self.device)
         out = sigmoid_weight*out1 + (1-sigmoid_weight)*src
+
+        if self.args.layernorm:
+            layer_norm = nn.LayerNorm(src.size(-1)).to(self.device)
+            out = layer_norm(sigmoid_weight*out1 + (1-sigmoid_weight)*src)
+        
         return out

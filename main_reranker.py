@@ -749,14 +749,23 @@ def main(args):
                 data = load_zeshel_data(args.data, args.cands_dir, macro_eval_mode, args.debug, nearest = args.nearest)
             elif args.dataset == 'wikipedia':
                 data = load_wikipedia_data(args.cands_dir)
-            loader_train, loader_val, loader_test, \
-            num_val_samples, num_test_samples = get_loaders(data, tokenizer, args.L,
+            loaders = get_loaders(data, tokenizer, args.L,
                                                     args.C, args.B,
                                                     args.num_workers,
                                                     args.inputmark,
                                                     args.C_eval,
                                                     use_full_dataset,
                                                     macro_eval_mode, args = args)
+            loader_train = loaders[0]
+            loader_val = loaders[1] 
+            loader_test = loaders[2]
+            num_val_samples = loaders[3] 
+            num_test_samples = loaders[4]
+            if args.dataset == 'wikipedia':
+                loader_test_2 = loaders[5]
+                loader_test_3 = loaders[6]
+                num_test_samples_2 = loaders[7] 
+                num_test_samples_3 = loaders[8]
             if args.use_val_dataset and args.eval_method == 'macro':
                 macro_eval_mode =  True
         # For self negative mining strategies, getting score distribution from the model
@@ -982,14 +991,23 @@ def main(args):
                 eval_result[1]
                 ))
             wandb.log({"retriever/val_recall": eval_result[0], "retriever/val_accuracy": eval_result[1]})
-        loader_train, loader_val, loader_test, \
-        num_val_samples, num_test_samples = get_loaders(data, tokenizer, args.L,
-                                                        args.C, args.B,
-                                                        args.num_workers,
-                                                        args.inputmark,
-                                                        args.C_eval,
-                                                        use_full_dataset,
-                                                        macro_eval_mode, args = args)
+        loaders = get_loaders(data, tokenizer, args.L,
+                                                args.C, args.B,
+                                                args.num_workers,
+                                                args.inputmark,
+                                                args.C_eval,
+                                                use_full_dataset,
+                                                macro_eval_mode, args = args)
+        loader_train = loaders[0]
+        loader_val = loaders[1] 
+        loader_test = loaders[2]
+        num_val_samples = loaders[3] 
+        num_test_samples = loaders[4]
+        if args.dataset == 'wikipedia':
+            loader_test_2 = loaders[5]
+            loader_test_3 = loaders[6]
+            num_test_samples_2 = loaders[7] 
+            num_test_samples_3 = loaders[8]
         if not args.blink and not args.run_id is None:
             cpt = torch.load(os.path.join(args.save_dir,"pytorch_model.bin")) if device.type == 'cuda' \
                 else torch.load(os.path.join(args.save_dir,"pytorch_model.bin") , map_location=torch.device('cpu'))
@@ -1073,15 +1091,22 @@ def main(args):
             wandb.log(wandb_log)
 
             print('start evaluation on test set')
-            if loader_test is None:
-                _, _, loader_test, \
-                _, num_test_samples = get_loaders(data, tokenizer, args.L,
+            if loader_test is None:                
+                loaders = get_loaders(data, tokenizer, args.L,
                                                                 args.C, args.B,
                                                                 args.num_workers,
                                                                 args.inputmark,
                                                                 args.C_eval,
                                                                 use_full_dataset,
                                                                 macro_eval_mode, args = args)
+                loader_test = loaders[2]
+                num_test_samples = loaders[4]
+                if args.dataset == 'wikipedia':
+                    loader_test_2 = loaders[5]
+                    loader_test_3 = loaders[6]
+                    num_test_samples_2 = loaders[7] 
+                    num_test_samples_3 = loaders[8]
+
             if args.eval_method == 'micro':
                 test_result = micro_eval(model, loader_test, num_test_samples, args, mode = 'test')
             elif args.eval_method == 'macro':
@@ -1144,14 +1169,23 @@ def main(args):
 
         print('start evaluation on test set')
         if loader_test is None:
-            _, _, loader_test, \
-            _, num_test_samples = get_loaders(data, tokenizer, args.L,
+            loaders = get_loaders(data, tokenizer, args.L,
                                                             args.C, args.B,
                                                             args.num_workers,
                                                             args.inputmark,
                                                             args.C_eval,
                                                             use_full_dataset,
                                                             macro_eval_mode, args = args)
+            loader_test = loaders[2]
+            num_test_samples = loaders[4]
+            if args.dataset == 'wikipedia':
+                loader_test_2 = loaders[5]
+                loader_test_3 = loaders[6]
+                num_test_samples_2 = loaders[7] 
+                num_test_samples_3 = loaders[8]
+        
+
+
         if args.eval_method == 'micro':
             test_result = micro_eval(model, loader_test, num_test_samples, args, mode = 'test')
         elif args.eval_method == 'macro':
@@ -1170,7 +1204,41 @@ def main(args):
 
         wandb.log({"test_unnormalized acc": test_result['acc_unorm'], "test_normalized acc": test_result['acc_norm']})
 
+        if args.dataset == 'wikipedia':
 
+            if args.eval_method == 'micro':
+                test_result = micro_eval(model, loader_test_2, num_test_samples, args, mode = 'test')
+            elif args.eval_method == 'macro':
+                test_result = macro_eval(model, loader_test_2, num_test_samples, args, mode = 'test')
+
+            logger.log('\n '
+                    'test (clueweb) acc unormalized {:8.4f} ({}/{})|'
+                    'test (clueweb) acc normalized {:8.4f} ({}/{})'.format(
+            test_result['acc_unorm'],
+            test_result['num_correct'],
+            num_test_samples,
+            test_result['acc_norm'],
+            test_result['num_correct'],
+            test_result['num_total_norm']))
+
+            wandb.log({"test_unnormalized acc (clueweb)": test_result['acc_unorm'], "test_normalized acc (clueweb)": test_result['acc_norm']})
+
+            if args.eval_method == 'micro':
+                test_result = micro_eval(model, loader_test_3, num_test_samples, args, mode = 'test')
+            elif args.eval_method == 'macro':
+                test_result = macro_eval(model, loader_test_3, num_test_samples, args, mode = 'test')
+
+            logger.log('\n'
+                    'test (msnbc) acc unormalized {:8.4f} ({}/{})|'
+                    'test (msnbc) acc normalized {:8.4f} ({}/{})'.format(
+            test_result['acc_unorm'],
+            test_result['num_correct'],
+            num_test_samples,
+            test_result['acc_norm'],
+            test_result['num_correct'],
+            test_result['num_total_norm']))
+
+            wandb.log({"test_unnormalized acc (msnbc)": test_result['acc_unorm'], "test_normalized acc (msnbc)": test_result['acc_norm']})
 
 
         print('start evaluation on >64 candidates')
@@ -1182,14 +1250,21 @@ def main(args):
         for C_eval_elem in C_eval_list:
             print("C_eval", C_eval_elem)
             args.C_eval = C_eval_elem
-            loader_train, loader_val, loader_test, \
-            num_val_samples, num_test_samples = get_loaders(data, tokenizer, args.L,
+            loaders = get_loaders(data, tokenizer, args.L,
                                                         args.C, args.B,
                                                         args.num_workers,
                                                         args.inputmark,
                                                         args.C_eval,
                                                         use_full_dataset,
                                                         macro_eval_mode, args = args)
+            loader_test = loaders[2]
+            num_test_samples = loaders[4]
+            if args.dataset == 'wikipedia':
+                loader_test_2 = loaders[5]
+                loader_test_3 = loaders[6]
+                num_test_samples_2 = loaders[7] 
+                num_test_samples_3 = loaders[8]
+        
             if args.distill:
                 train_result = micro_eval(model, loader_train, num_val_samples, args, mode = "train")
                 print(train_result)
@@ -1243,6 +1318,54 @@ def main(args):
             print(wandb_log)
             wandb.log(wandb_log)
 
+            if args.dataset == 'wikipedia':
+                print('Evaluation over clueweb')
+                if args.eval_method == 'micro':
+                    test_result = micro_eval(model, loader_test_2, num_test_samples, args, mode = 'test')
+                elif args.eval_method == 'macro':
+                    test_result = macro_eval(model, loader_test_2, num_test_samples, args, mode = 'test')
+                print('C_eval: {}'.format(C_eval_elem))
+                print(test_result)
+                print('test acc unormalized  {:8.4f} ({}/{})|'
+                        'test acc normalized  {:8.4f} ({}/{})|'.format(
+                    test_result['acc_unorm'],
+                    test_result['num_correct'],
+                    num_test_samples,
+                    test_result['acc_norm'],
+                    test_result['num_correct'],
+                    test_result['num_total_norm'],
+                    newline=False))
+                wandb_log = {"test (clueweb) (cands {})/unnormalized acc".format(str(C_eval_elem)): test_result['acc_unorm'], \
+                    "test (clueweb) (cands {})/normalized acc".format(str(C_eval_elem)): test_result['acc_norm'],\
+                    "test (clueweb) (cands {})/micro_unnormalized_acc".format(str(C_eval_elem)): sum(test_result['num_correct'])/sum(test_result['num_total_unorm']),\
+                    "test (clueweb) (cands {})/micro_normalized_acc".format(str(C_eval_elem)): sum(test_result['num_correct'])/sum(test_result['num_total_norm']),\
+                    "test (clueweb) (cands {})/mrr".format(str(args.C_eval_elem)): test_result['mrr']}
+                for i in range(len(depth)):
+                    wandb_log["test (clueweb) (cands {})/recall@{}".format(str(C_eval_elem), depth[i])] = test_result['recall'][i]
+                print(wandb_log)
+                wandb.log(wandb_log)
+                if args.eval_method == 'micro':
+                    test_result = micro_eval(model, loader_test_3, num_test_samples, args, mode = 'test')
+                elif args.eval_method == 'macro':
+                    test_result = macro_eval(model, loader_test_3, num_test_samples, args, mode = 'test')
+
+                logger.log('\n'
+                        'test (msnbc) acc unormalized {:8.4f} ({}/{})|'
+                        'test (msnbc) acc normalized {:8.4f} ({}/{})'.format(
+                test_result['acc_unorm'],
+                test_result['num_correct'],
+                num_test_samples,
+                test_result['acc_norm'],
+                test_result['num_correct'],
+                test_result['num_total_norm']))
+
+                wandb_log = {"test (msnbc) (cands {})/unnormalized acc".format(str(C_eval_elem)): test_result['acc_unorm'], \
+                    "test (msnbc) (cands {})/normalized acc".format(str(C_eval_elem)): test_result['acc_norm'],\
+                    "test (msnbc) (cands {})/micro_unnormalized_acc".format(str(C_eval_elem)): sum(test_result['num_correct'])/sum(test_result['num_total_unorm']),\
+                    "test (msnbc) (cands {})/micro_normalized_acc".format(str(C_eval_elem)): sum(test_result['num_correct'])/sum(test_result['num_total_norm']),\
+                    "test (msnbc) (cands {})/mrr".format(str(args.C_eval_elem)): test_result['mrr']}
+                for i in range(len(depth)):
+                    wandb_log["test (msnbc) (cands {})/recall@{}".format(str(C_eval_elem), depth[i])] = test_result['recall'][i]
 
 
 
@@ -1485,6 +1608,10 @@ if __name__ == '__main__':
                         help='the batch size')
     parser.add_argument('--blink', action = 'store_true',
                         help='load blink checkpoint')
+    parser.add_argument('--layernorm', action = 'store_true',
+                        help='layer normalization for skip connection')
+    parser.add_argument('--skip_connection', action = 'store_true',
+                        help='layer normalization for skip connection')
     parser.add_argument('--mlp_layers', type=str, default="1536",
                         help='num of layers for mlp or mlp-with-som model (except for the first and the last layer)')
     parser.add_argument(
@@ -1515,5 +1642,6 @@ if __name__ == '__main__':
     if args.use_val_dataset: 
         assert args.distill_training
     assert not args.dataset == 'wikipedia' or args.eval_method == 'micro' # if dataset == wikipedia, eval_method is required to be micro
+    assert not args.skip_connection or not args.identity_bert
     main(args)
     
