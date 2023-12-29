@@ -94,7 +94,6 @@ def configure_optimizer(args, model, num_train_examples):
         scheduler = get_linear_schedule_with_warmup(
         optimizer, num_warmup_steps=num_warmup_steps,
         num_training_steps=num_train_steps)
-
     return optimizer, scheduler, num_train_steps, num_warmup_steps
 
 
@@ -650,7 +649,10 @@ def main(args):
 
     loader_test = None
     # simpleoptim: disable learning rate schduler
-    trainset_size = len(data[1][0])
+    if args.dataset == 'zeshel':
+        trainset_size = len(data[1][0])
+    elif args.dataset == 'wikipedia':
+        trainset_size = len(data[1])
     if args.use_val_dataset:
         trainset_size += len(data[2][0])
     if args.simpleoptim:
@@ -731,7 +733,7 @@ def main(args):
                                                     args.inputmark,
                                                     args.C_eval,
                                                     use_full_dataset,
-                                                    macro_eval_mode, args = args)
+                                                    macro_eval_mode, args = args, max_context_len = args.max_context_len)
         loader_train = preprocess_data(loader_train, model, args.debug)
         loader_val = preprocess_data(loader_val, model, args.debug)
         loader_test = preprocess_data(loader_test, model, args.debug)
@@ -797,23 +799,22 @@ def main(args):
 
         print('Begin Training')
         # Training loop
-        if not args.use_val_dataset:
-            for batch_idx, batch in tqdm(enumerate(loader_train), total = len(loader_train)):  # Shuffled every epoch
-                if args.debug and batch_idx > 10: break
-                model.train()
-                # Forward pass
-                result = model.forward(**batch, args = args)
-                if type(result) is tuple:
-                    loss = result[0]
-                    scores = result[2]
-                elif type(result) is dict:
-                    loss = result['loss']
-                    scores = result['scores']
-                if args.distill_training or args.regularization:
-                    student_loss = result[3].mean()
-                    teacher_loss = result[4].mean()
-                    student_tr_loss += student_loss.item()
-                    teacher_tr_loss += teacher_loss.item()
+        for batch_idx, batch in tqdm(enumerate(loader_train), total = len(loader_train)):  # Shuffled every epoch
+            if args.debug and batch_idx > 10: break
+            model.train()
+            # Forward pass
+            result = model.forward(**batch, args = args)
+            if type(result) is tuple:
+                loss = result[0]
+                scores = result[2]
+            elif type(result) is dict:
+                loss = result['loss']
+                scores = result['scores']
+            if args.distill_training or args.regularization:
+                student_loss = result[3].mean()
+                teacher_loss = result[4].mean()
+                student_tr_loss += student_loss.item()
+                teacher_tr_loss += teacher_loss.item()
 
             loss = loss.mean()  # Needed in case of dataparallel
             if args.fp16:
@@ -835,30 +836,29 @@ def main(args):
                 optimizer.step()
                 scheduler.step()
                 model.zero_grad()
-                step_num += 1
-
-                # Logging training steps
-                if step_num % args.logging_steps == 0:
-                    avg_loss = (tr_loss - logging_loss) / args.logging_steps
-                    # writer.add_scalar('avg_loss', avg_loss, step_num)
-                    logger.log('Step {:10d}/{:d} | Epoch {:3d} | '
-                            'Batch {:5d}/{:5d} | '
-                            'Average Loss {:8.4f}'.format(
-                        step_num, num_train_steps, epoch,
-                        batch_idx + 1, len(loader_train), avg_loss))
-                    wandb.log({"average loss": avg_loss, \
+            step_num += 1
+            # Logging training steps
+            if step_num % args.logging_steps == 0:
+                avg_loss = (tr_loss - logging_loss) / args.logging_steps
+                # writer.add_scalar('avg_loss', avg_loss, step_num)
+                logger.log('Step {:10d}/{:d} | Epoch {:3d} | '
+                        'Batch {:5d}/{:5d} | '
+                        'Average Loss {:8.4f}'.format(
+                    step_num, num_train_steps, epoch,
+                    batch_idx + 1, len(loader_train), avg_loss))
+                wandb.log({"average loss": avg_loss, \
+                "learning_rate": optimizer.param_groups[0]['lr'], \
+                "epoch": epoch})
+                if args.distill_training or args.regularization:
+                    avg_teacher_loss = (teacher_tr_loss-teacher_logging_loss)/args.logging_steps
+                    avg_student_loss = (student_tr_loss-student_logging_loss)/args.logging_steps
+                    wandb.log({"average teacher loss": avg_teacher_loss, \
+                    "average student loss": avg_student_loss,\
                     "learning_rate": optimizer.param_groups[0]['lr'], \
-                    "epoch": epoch})
-                    if args.distill_training or args.regularization:
-                        avg_teacher_loss = (teacher_tr_loss-teacher_logging_loss)/args.logging_steps
-                        avg_student_loss = (student_tr_loss-student_logging_loss)/args.logging_steps
-                        wandb.log({"average teacher loss": avg_teacher_loss, \
-                        "average student loss": avg_student_loss,\
-                        "learning_rate": optimizer.param_groups[0]['lr'], \
-                        "epoch": epoch})  
-                        student_logging_loss = student_tr_loss
-                        teacher_logging_loss = teacher_tr_loss                      
-                    logging_loss = tr_loss
+                    "epoch": epoch})  
+                    student_logging_loss = student_tr_loss
+                    teacher_logging_loss = teacher_tr_loss                      
+                logging_loss = tr_loss
 
         if args.eval_method == "skip":
             pass
@@ -960,7 +960,7 @@ def main(args):
             data = Data(train_doc, val_doc, test_doc, tokenizer,
             all_train_entity_token_ids, all_train_masks,
             all_val_entity_token_ids, all_val_masks,
-            all_test_entity_token_ids, all_test_masks, args.max_len,
+            all_test_entity_token_ids, all_test_masks, args.max_context_len,
             samples_train, samples_val, samples_test)
             _, val_en_loader, _, _, \
             val_men_loader, _ = data.get_loaders(args.mention_bsz, args.entity_bsz, False)
@@ -1174,7 +1174,11 @@ def main(args):
 
 
         print('start evaluation on >64 candidates')
-        C_eval_list = [8, 16, 32, 128,256,512]
+        if args.dataset == 'zeshel':
+            C_eval_list = [8, 16, 32, 128,256,512]
+        elif args.dataset == 'wikipedia':
+            C_eval_list = [10, 30, 100]
+
         for C_eval_elem in C_eval_list:
             print("C_eval", C_eval_elem)
             args.C_eval = C_eval_elem
@@ -1208,7 +1212,7 @@ def main(args):
                 "valid(cands {})/normalized acc".format(str(C_eval_elem)): val_result['acc_norm'],\
                 "valid(cands {})/micro_unnormalized_acc".format(str(C_eval_elem)): sum(val_result['num_correct'])/sum(val_result['num_total_unorm']),\
                 "valid(cands {})/micro_normalized_acc".format(str(C_eval_elem)): sum(val_result['num_correct'])/sum(val_result['num_total_norm']),\
-                "valid(cands {})/mrr".format(str(args.C_eval_lem)): val_result['mrr']}
+                "valid(cands {})/mrr".format(str(args.C_eval_elem)): val_result['mrr']}
             for i in range(len(depth)):
                 wandb_log["valid(cands {})/recall@{}".format(str(C_eval_elem), depth[i])] = val_result['recall'][i]
             print(wandb_log)
@@ -1471,7 +1475,10 @@ if __name__ == '__main__':
                         help='the batch size')
     parser.add_argument('--num_sampled', type=int, default=1024,
                         help='train set candidates to get distribution from')
-    parser.add_argument('--max_len', type=int, default=128,
+    parser.add_argument('--max_entity_len', type=int, default=128,
+                        help='max length of the mention input '
+                            'and the entity input')
+    parser.add_argument('--max_context_len', type=int, default=128,
                         help='max length of the mention input '
                             'and the entity input')
     parser.add_argument('--final_k', type=int, default=64,
