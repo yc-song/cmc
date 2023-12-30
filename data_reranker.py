@@ -12,6 +12,9 @@ from util import Logger as BasicLogger
 from data_retriever import distribution_sample
 from tqdm import tqdm
 import random
+
+
+
 class BasicDataset(Dataset):
 
     def __init__(self, documents, samples, tokenizer, max_len,
@@ -271,7 +274,6 @@ class UnifiedDataset(BasicDataset):
 
         candidate_document_ids, label_ids, candidates_scores = self.prepare_candidates(mention, candidates, self.args, self.self_negs_again)
 
-        candidate_document_ids, label_ids, candidates_scores = self.prepare_candidates(mention, candidates, self.args, self.self_negs_again)
         candidates_token_ids = torch.zeros((len(candidate_document_ids),
                                             self.max_len))
         candidates_masks = torch.zeros((len(candidate_document_ids),
@@ -509,6 +511,45 @@ class WikipediaDataset(BasicDataset):
             return {"mention_token_ids": mention_token_ids, "mention_masks": mention_masks, "candidate_token_ids": candidates_token_ids, \
                 "candidate_masks": candidates_masks, "label_idx": label_ids}
 
+class WikipediaFullDataset(WikipediaDataset):
+    def __init__(self, documents, samples, tokenizer, max_len,
+                 max_num_candidates,
+                 is_training, indicate_mention_boundaries=False, args = None, self_negs_again = False):
+        super(WikipediaFullDataset, self).__init__(documents, samples, tokenizer,
+                                          max_len, max_num_candidates,
+                                          is_training,
+                                          indicate_mention_boundaries, args = args)
+    def __getitem__(self, index):
+        mention_window = self.samples[1][index]['context'][1:-1]
+        candidates = self.samples[1][index]['candidates']
+        assert self.tokenizer.pad_token_id == 0
+        candidate_document_ids, label_ids, _ = self.prepare_candidates(self.samples[1][index], self.args, self.self_negs_again)
+        encoded_pairs = torch.zeros((len(candidate_document_ids), self.max_len))
+        type_marks = torch.zeros((len(candidate_document_ids), self.max_len))
+        input_lens = torch.zeros(len(candidate_document_ids))
+        candidate_ids = [None]*len(candidate_document_ids)
+        # candidate_ids = np.empty_like(candidate_document_ids)
+
+        for i, candidate_document_id in enumerate(candidate_document_ids):
+            candidate_prefix, _ = self.get_candidate_prefix(candidate_document_id)
+            encoded_dict = self.tokenizer.encode_plus(
+                mention_window, candidate_prefix, return_attention_mask=False,
+                pad_to_max_length=True, max_length=self.max_len,
+                truncation=True)
+
+            encoded_pairs[i] = torch.tensor(encoded_dict['input_ids'])
+            candidate_ids[i] = candidate_document_id
+            type_marks[i] = torch.tensor(encoded_dict['token_type_ids'])
+            input_lens[i] = len(mention_window) + len(candidate_prefix) + 3
+        # print( np.array([mention['mention_id']]), candidate_ids)
+        # return encoded_pairs, type_marks, input_lens, np.array([mention['mention_id']]), candidate_ids
+        return {"encoded_pairs": encoded_pairs, "type_marks": type_marks,\
+        "input_lens": input_lens, "mention_id": mention_window,\
+        "candidates_id": candidate_ids, "label_idx": label_ids}
+
+
+
+
 class FullDataset(BasicDataset):
     def __init__(self, documents, samples, tokenizer, max_len,
                  max_num_candidates,
@@ -530,13 +571,12 @@ class FullDataset(BasicDataset):
         mention_start += 1  # [CLS]
         mention_end += 1  # [CLS]
         assert self.tokenizer.pad_token_id == 0
-        candidate_document_ids, label_ids = self.prepare_candidates(mention, candidates, self.args, self.self_negs_again)
+        candidate_document_ids, label_ids, _ = self.prepare_candidates(mention, candidates, self.args, self.self_negs_again)
         encoded_pairs = torch.zeros((len(candidate_document_ids), self.max_len))
         type_marks = torch.zeros((len(candidate_document_ids), self.max_len))
         input_lens = torch.zeros(len(candidate_document_ids))
         candidate_ids = [None]*len(candidate_document_ids)
         # candidate_ids = np.empty_like(candidate_document_ids)
-
         for i, candidate_document_id in enumerate(candidate_document_ids):
             candidate_prefix, _ = self.get_candidate_prefix(candidate_document_id)
             encoded_dict = self.tokenizer.encode_plus(
@@ -567,19 +607,26 @@ def get_loaders(data, tokenizer, max_len, max_num_candidates, batch_size,
         (documents, samples_train,
         samples_val, samples_test, samples_test_2, samples_test_3) = data
     print('get train loaders')
-    if args.dataset == 'zeshel':
-        if use_full_dataset:
+    if use_full_dataset:
+        if args.dataset == 'zeshel':
+
             dataset_train = FullDataset(documents, samples_train, tokenizer,
                                         max_len, max_num_candidates, True,
                                         indicate_mention_boundaries, args = args, self_negs_again=self_negs_again)
-        else:
-            dataset_train = UnifiedDataset(documents, samples_train, tokenizer,
+        elif args.dataset == 'wikipedia':
+            dataset_train = WikipediaFullDataset(documents, samples_train, tokenizer,
                                         max_len, max_num_candidates, True,
                                         indicate_mention_boundaries, args = args, self_negs_again=self_negs_again)
-    elif args.dataset == 'wikipedia':
-        dataset_train = WikipediaDataset(documents, samples_train, tokenizer,
-                                        max_len, max_num_candidates, True,
-                                        indicate_mention_boundaries, args = args, self_negs_again=self_negs_again, max_context_len = 32)
+
+    else:
+        if args.dataset == 'zeshel':
+            dataset_train = UnifiedDataset(documents, samples_train, tokenizer,
+                                            max_len, max_num_candidates, True,
+                                            indicate_mention_boundaries, args = args, self_negs_again=self_negs_again)
+        elif args.dataset == 'wikipedia':
+            dataset_train = WikipediaDataset(documents, samples_train, tokenizer,
+                                            max_len, max_num_candidates, True,
+                                            indicate_mention_boundaries, args = args, self_negs_again=self_negs_again, max_context_len = 32)
     if args.C>64:
         loader_train = DataLoader(dataset_train, batch_size=batch_size,
                                 shuffle=True, num_workers=num_workers)
@@ -610,7 +657,12 @@ def get_loaders(data, tokenizer, max_len, max_num_candidates, batch_size,
                                         max_len, max_num_cands_val, False,
                                         indicate_mention_boundaries, args)
         elif args.dataset == 'wikipedia':
-            dataset = WikipediaDataset(documents, samples, tokenizer,
+            if use_full_dataset:
+                dataset = WikipediaFullDataset(documents, samples, tokenizer,
+                                    max_len, max_num_cands_val, False,
+                                    indicate_mention_boundaries, args)
+            else:
+                dataset = WikipediaDataset(documents, samples, tokenizer,
                                         max_len, max_num_cands_val, False,
                                         indicate_mention_boundaries, args)
         loader = DataLoader(dataset, batch_size=eval_batch_size,
