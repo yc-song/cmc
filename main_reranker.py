@@ -591,20 +591,39 @@ def main(args):
                 model.load_state_dict(modified_state_dict, strict = False)
                 torch.save({'sd': model.state_dict(),'epoch':0, 'perf':0}, os.path.join(args.save_dir, "pytorch_model.bin"))
         elif args.blink:
-            package = torch.load(args.model) if device.type == 'cuda' \
-            else torch.load(args.model, map_location=torch.device('cpu'))
-            modified_state_dict = OrderedDict()
-            # Change dict keys for loading model parameter
-            position_ids = ["mention_encoder.embeddings.position_ids", "entity_encoder.embeddings.position_ids"]
-            for k, v in package.items():
-                name = None
-                if k.startswith('cand_encoder'):
-                    name = k.replace('cand_encoder.bert_model', 'entity_encoder')
-                elif k.startswith('context_encoder'):
-                    name = k.replace('context_encoder.bert_model', 'mention_encoder')
-                if name is not None:
-                    modified_state_dict[name] = v
-            model.load_state_dict(modified_state_dict, strict = False)
+            if args.type_model == 'full':
+                package = torch.load(args.model) if device.type == 'cuda' \
+                else torch.load(args.model, map_location=torch.device('cpu'))
+                modified_state_dict = OrderedDict()
+                # Change dict keys for loading model parameter
+                modified_state_dict = OrderedDict()
+                # Change dict keys for loading model parameter
+                position_ids = ["encoder.embeddings.position_ids"]
+
+                for k, v in package.items():
+                    name = None
+                    if k.startswith('encoder.additional_linear'):
+                        name = k.replace('encoder.additional_linear', 'score_layer.1')
+                    elif k.startswith('encoder') and not 'position_ids' in k:
+                        name = k.replace('encoder.bert_model', 'encoder')
+                    if name is not None:
+                        modified_state_dict[name] = v
+                model.load_state_dict(modified_state_dict, strict = False)
+            else:
+                package = torch.load(args.model) if device.type == 'cuda' \
+                else torch.load(args.model, map_location=torch.device('cpu'))
+                modified_state_dict = OrderedDict()
+                # Change dict keys for loading model parameter
+                position_ids = ["mention_encoder.embeddings.position_ids", "entity_encoder.embeddings.position_ids"]
+                for k, v in package.items():
+                    name = None
+                    if k.startswith('cand_encoder'):
+                        name = k.replace('cand_encoder.bert_model', 'entity_encoder')
+                    elif k.startswith('context_encoder'):
+                        name = k.replace('context_encoder.bert_model', 'mention_encoder')
+                    if name is not None:
+                        modified_state_dict[name] = v
+                model.load_state_dict(modified_state_dict)
         elif args.cocondenser:
             state_dict = torch.load(args.model) if device.type == 'cuda' \
             else torch.load(args.model, map_location=torch.device('cpu'))
@@ -1207,9 +1226,9 @@ def main(args):
         if args.dataset == 'wikipedia':
 
             if args.eval_method == 'micro':
-                test_result = micro_eval(model, loader_test_2, num_test_samples, args, mode = 'test')
+                test_result = micro_eval(model, loader_test_2, num_test_samples_2, args, mode = 'test')
             elif args.eval_method == 'macro':
-                test_result = macro_eval(model, loader_test_2, num_test_samples, args, mode = 'test')
+                test_result = macro_eval(model, loader_test_2, num_test_samples_2, args, mode = 'test')
 
             logger.log('\n '
                     'test (clueweb) acc unormalized {:8.4f} ({}/{})|'
@@ -1224,9 +1243,9 @@ def main(args):
             wandb.log({"test_unnormalized acc (clueweb)": test_result['acc_unorm'], "test_normalized acc (clueweb)": test_result['acc_norm']})
 
             if args.eval_method == 'micro':
-                test_result = micro_eval(model, loader_test_3, num_test_samples, args, mode = 'test')
+                test_result = micro_eval(model, loader_test_3, num_test_samples_3, args, mode = 'test')
             elif args.eval_method == 'macro':
-                test_result = macro_eval(model, loader_test_3, num_test_samples, args, mode = 'test')
+                test_result = macro_eval(model, loader_test_3, num_test_samples_3, args, mode = 'test')
 
             logger.log('\n'
                     'test (msnbc) acc unormalized {:8.4f} ({}/{})|'
