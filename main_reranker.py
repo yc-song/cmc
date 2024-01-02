@@ -1243,9 +1243,9 @@ def main(args):
 
         print('start evaluation on >64 candidates')
         if args.dataset == 'zeshel':
-            C_eval_list = [8, 16, 32, 128,256,512]
+            C_eval_list = [8, 16, 32, 64, 128,256,512]
         elif args.dataset == 'wikipedia':
-            C_eval_list = [10, 30, 100]
+            C_eval_list = [10, 30, 64, 100]
 
         for C_eval_elem in C_eval_list:
             print("C_eval", C_eval_elem)
@@ -1287,7 +1287,7 @@ def main(args):
                 "valid(cands {})/normalized acc".format(str(C_eval_elem)): val_result['acc_norm'],\
                 "valid(cands {})/micro_unnormalized_acc".format(str(C_eval_elem)): sum(val_result['num_correct'])/sum(val_result['num_total_unorm']),\
                 "valid(cands {})/micro_normalized_acc".format(str(C_eval_elem)): sum(val_result['num_correct'])/sum(val_result['num_total_norm']),\
-                "valid(cands {})/mrr".format(str(args.C_eval_elem)): val_result['mrr']}
+                "valid(cands {})/mrr".format(str(C_eval_elem)): val_result['mrr']}
             for i in range(len(depth)):
                 wandb_log["valid(cands {})/recall@{}".format(str(C_eval_elem), depth[i])] = val_result['recall'][i]
             print(wandb_log)
@@ -1312,7 +1312,7 @@ def main(args):
                 "test(cands {})/normalized acc".format(str(C_eval_elem)): test_result['acc_norm'],\
                 "test(cands {})/micro_unnormalized_acc".format(str(C_eval_elem)): sum(test_result['num_correct'])/sum(test_result['num_total_unorm']),\
                 "test(cands {})/micro_normalized_acc".format(str(C_eval_elem)): sum(test_result['num_correct'])/sum(test_result['num_total_norm']),\
-                "test(cands {})/mrr".format(str(args.C_eval_elem)): test_result['mrr']}
+                "test(cands {})/mrr".format(str(C_eval_elem)): test_result['mrr']}
             for i in range(len(depth)):
                 wandb_log["test(cands {})/recall@{}".format(str(C_eval_elem), depth[i])] = test_result['recall'][i]
             print(wandb_log)
@@ -1339,7 +1339,7 @@ def main(args):
                     "test (clueweb) (cands {})/normalized acc".format(str(C_eval_elem)): test_result['acc_norm'],\
                     "test (clueweb) (cands {})/micro_unnormalized_acc".format(str(C_eval_elem)): sum(test_result['num_correct'])/sum(test_result['num_total_unorm']),\
                     "test (clueweb) (cands {})/micro_normalized_acc".format(str(C_eval_elem)): sum(test_result['num_correct'])/sum(test_result['num_total_norm']),\
-                    "test (clueweb) (cands {})/mrr".format(str(args.C_eval_elem)): test_result['mrr']}
+                    "test (clueweb) (cands {})/mrr".format(str(C_eval_elem)): test_result['mrr']}
                 for i in range(len(depth)):
                     wandb_log["test (clueweb) (cands {})/recall@{}".format(str(C_eval_elem), depth[i])] = test_result['recall'][i]
                 print(wandb_log)
@@ -1363,7 +1363,7 @@ def main(args):
                     "test (msnbc) (cands {})/normalized acc".format(str(C_eval_elem)): test_result['acc_norm'],\
                     "test (msnbc) (cands {})/micro_unnormalized_acc".format(str(C_eval_elem)): sum(test_result['num_correct'])/sum(test_result['num_total_unorm']),\
                     "test (msnbc) (cands {})/micro_normalized_acc".format(str(C_eval_elem)): sum(test_result['num_correct'])/sum(test_result['num_total_norm']),\
-                    "test (msnbc) (cands {})/mrr".format(str(args.C_eval_elem)): test_result['mrr']}
+                    "test (msnbc) (cands {})/mrr".format(str(C_eval_elem)): test_result['mrr']}
                 for i in range(len(depth)):
                     wandb_log["test (msnbc) (cands {})/recall@{}".format(str(C_eval_elem), depth[i])] = test_result['recall'][i]
 
