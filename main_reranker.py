@@ -4,7 +4,7 @@ import os
 import random
 import torch
 import torch.nn as nn
-from data_reranker import get_loaders, load_zeshel_data, load_wikipedia_data, Logger, preprocess_data
+from data_reranker import get_loaders, load_zeshel_data, load_msmarco_data, load_wikipedia_data, Logger, preprocess_data
 from datetime import datetime
 from reranker import FullRanker
 from retriever import UnifiedRetriever
@@ -127,9 +127,6 @@ def micro_eval(model, loader_eval, num_total_unorm, args = None, mode = None):
     if args.distill: cands = []
     with torch.no_grad():
         for step, batch in tqdm(enumerate(loader_eval), total = len(loader_eval)):
-            if args.distill:
-                batch[-2] = np.array(batch[-2]) 
-                batch[-1] = np.array(batch[-1]).T
             if debug and step > 50: break
             # try:
             # batch["args"] = args
@@ -223,7 +220,7 @@ def micro_eval(model, loader_eval, num_total_unorm, args = None, mode = None):
     print(num_total_unorm)
     acc_unorm = num_correct / num_total_unorm * 100
     recall_correct_list = [item / num_total_unorm * 100 for item in recall_correct_list]
-    mrr = mrr_total / num_total * 100
+    mrr = mrr_total / num_total_unorm * 100
     return {'acc_norm': acc_norm, 'acc_unorm': acc_unorm,
             'num_correct': num_correct,
             'num_total_norm': num_total,
@@ -623,7 +620,7 @@ def main(args):
                         name = k.replace('context_encoder.bert_model', 'mention_encoder')
                     if name is not None:
                         modified_state_dict[name] = v
-                model.load_state_dict(modified_state_dict)
+                model.load_state_dict(modified_state_dict, strict = False)
         elif args.cocondenser:
             state_dict = torch.load(args.model) if device.type == 'cuda' \
             else torch.load(args.model, map_location=torch.device('cpu'))
@@ -665,13 +662,16 @@ def main(args):
         data = load_zeshel_data(args.data, args.cands_dir, macro_eval_mode, args.debug, nearest = args.nearest)
     elif args.dataset == 'wikipedia':
         data = load_wikipedia_data(args.cands_dir)
-
+    elif args.dataset == 'msmarco':
+        data = load_msmarco_data(args.cands_dir)
     loader_test = None
     # simpleoptim: disable learning rate schduler
     if args.dataset == 'zeshel':
         trainset_size = len(data[1][0])
     elif args.dataset == 'wikipedia':
         trainset_size = len(data[1])
+    elif args.dataset == 'msmarco':
+        trainset_size = len(data[3])
     if args.use_val_dataset:
         trainset_size += len(data[2][0])
     if args.simpleoptim:
@@ -756,7 +756,8 @@ def main(args):
         loader_train = preprocess_data(loader_train, model, args.debug)
         loader_val = preprocess_data(loader_val, model, args.debug)
         loader_test = preprocess_data(loader_test, model, args.debug)
-
+    if args.dataset=='mamarco':
+        args.epochs *= 11
     for epoch in range(start_epoch, args.epochs + 1):
         if training_finished: break
         logger.log('\nEpoch %d' % epoch)
@@ -768,6 +769,8 @@ def main(args):
                 data = load_zeshel_data(args.data, args.cands_dir, macro_eval_mode, args.debug, nearest = args.nearest)
             elif args.dataset == 'wikipedia':
                 data = load_wikipedia_data(args.cands_dir)
+            elif args.dataset == 'msmarco':
+                data = load_msmarco_data(args.cands_dir, epoch)
             loaders = get_loaders(data, tokenizer, args.L,
                                                     args.C, args.B,
                                                     args.num_workers,
@@ -962,54 +965,54 @@ def main(args):
     if training_finished:
         
         # Retriever Evaluation
-        if args.type_model=="dual" and not args.blink:
-            logger.log('retriever performance test')
-            logger.log('loading datasets')
-            entity_path = "./data/entities"
-            samples_train = torch.load(entity_path+"/samples_train.pt")
-            samples_heldout_train_seen = torch.load(entity_path+"/samples_heldout_train_seen.pt")
-            samples_heldout_train_unseen = torch.load(entity_path+"/samples_heldout_train_unseen.pt")
-            samples_val = torch.load(entity_path+"/samples_val.pt")
-            samples_test = torch.load(entity_path+"/samples_test.pt")
-            train_doc = torch.load(entity_path+"/train_doc.pt")
-            heldout_train_doc = torch.load(entity_path+"/heldout_train_doc.pt")
-            val_doc = torch.load(entity_path+"/val_doc.pt")
-            test_doc = torch.load(entity_path+"/test_doc.pt")
-            logger.log('loading train entities')
-            all_train_entity_token_ids = torch.load(entity_path+"/all_train_entity_token_ids.pt")
-            all_train_masks = torch.load(entity_path+"/all_train_masks.pt")
+        # if args.type_model=="dual" and not args.blink:
+        #     logger.log('retriever performance test')
+        #     logger.log('loading datasets')
+        #     entity_path = "./data/entities"
+        #     samples_train = torch.load(entity_path+"/samples_train.pt")
+        #     samples_heldout_train_seen = torch.load(entity_path+"/samples_heldout_train_seen.pt")
+        #     samples_heldout_train_unseen = torch.load(entity_path+"/samples_heldout_train_unseen.pt")
+        #     samples_val = torch.load(entity_path+"/samples_val.pt")
+        #     samples_test = torch.load(entity_path+"/samples_test.pt")
+        #     train_doc = torch.load(entity_path+"/train_doc.pt")
+        #     heldout_train_doc = torch.load(entity_path+"/heldout_train_doc.pt")
+        #     val_doc = torch.load(entity_path+"/val_doc.pt")
+        #     test_doc = torch.load(entity_path+"/test_doc.pt")
+        #     logger.log('loading train entities')
+        #     all_train_entity_token_ids = torch.load(entity_path+"/all_train_entity_token_ids.pt")
+        #     all_train_masks = torch.load(entity_path+"/all_train_masks.pt")
 
-            logger.log('loading val and test entities')
-            all_val_entity_token_ids = torch.load(entity_path+"/all_val_entity_token_ids.pt")
-            all_val_masks = torch.load(entity_path+"/all_val_masks.pt")
-            all_test_entity_token_ids = torch.load(entity_path+"/all_test_entity_token_ids.pt")
-            all_test_masks = torch.load(entity_path+"/all_test_masks.pt")
+        #     logger.log('loading val and test entities')
+        #     all_val_entity_token_ids = torch.load(entity_path+"/all_val_entity_token_ids.pt")
+        #     all_val_masks = torch.load(entity_path+"/all_val_masks.pt")
+        #     all_test_entity_token_ids = torch.load(entity_path+"/all_test_entity_token_ids.pt")
+        #     all_test_masks = torch.load(entity_path+"/all_test_masks.pt")
 
-            data = Data(train_doc, val_doc, test_doc, tokenizer,
-            all_train_entity_token_ids, all_train_masks,
-            all_val_entity_token_ids, all_val_masks,
-            all_test_entity_token_ids, all_test_masks, args.max_context_len,
-            samples_train, samples_val, samples_test)
-            _, val_en_loader, _, _, \
-            val_men_loader, _ = data.get_loaders(args.mention_bsz, args.entity_bsz, False)
-            model.attention_type = "hard_attention"
-            model.num_mention_vecs = 1
-            model.num_entity_vecs = 1
-            model.evaluate_on = True
-            all_val_cands_embeds = get_all_entity_hiddens(val_en_loader, model,
-                                                args.store_en_hiddens,
-                                                    args.en_hidden_path, debug = args.debug)
-            eval_result = evaluate(val_men_loader, model, all_val_cands_embeds,
-                            args.k, device, len(val_en_loader),
-                            args.store_en_hiddens, args.en_hidden_path)
+        #     data = Data(train_doc, val_doc, test_doc, tokenizer,
+        #     all_train_entity_token_ids, all_train_masks,
+        #     all_val_entity_token_ids, all_val_masks,
+        #     all_test_entity_token_ids, all_test_masks, args.max_context_len,
+        #     samples_train, samples_val, samples_test)
+        #     _, val_en_loader, _, _, \
+        #     val_men_loader, _ = data.get_loaders(args.mention_bsz, args.entity_bsz, False)
+        #     model.attention_type = "hard_attention"
+        #     model.num_mention_vecs = 1
+        #     model.num_entity_vecs = 1
+        #     model.evaluate_on = True
+        #     all_val_cands_embeds = get_all_entity_hiddens(val_en_loader, model,
+        #                                         args.store_en_hiddens,
+        #                                             args.en_hidden_path, debug = args.debug)
+        #     eval_result = evaluate(val_men_loader, model, all_val_cands_embeds,
+        #                     args.k, device, len(val_en_loader),
+        #                     args.store_en_hiddens, args.en_hidden_path)
 
-            logger.log(
-                'validation recall {:8.4f}'
-                '|validation accuracy {:8.4f}'.format(
-                eval_result[0],
-                eval_result[1]
-                ))
-            wandb.log({"retriever/val_recall": eval_result[0], "retriever/val_accuracy": eval_result[1]})
+        #     logger.log(
+        #         'validation recall {:8.4f}'
+        #         '|validation accuracy {:8.4f}'.format(
+        #         eval_result[0],
+        #         eval_result[1]
+        #         ))
+        #     wandb.log({"retriever/val_recall": eval_result[0], "retriever/val_accuracy": eval_result[1]})
         loaders = get_loaders(data, tokenizer, args.L,
                                                 args.C, args.B,
                                                 args.num_workers,
@@ -1020,6 +1023,7 @@ def main(args):
         loader_train = loaders[0]
         loader_val = loaders[1] 
         loader_test = loaders[2]
+        num_train_samples = loaders[-1]
         num_val_samples = loaders[3] 
         num_test_samples = loaders[4]
         if args.dataset == 'wikipedia':
@@ -1185,7 +1189,37 @@ def main(args):
         #     wandb_log["valid(cands {})/recall@{}".format(str(args.C_eval), depth[i])] = val_result['recall'][i]
         # print(wandb_log)
         # wandb.log(wandb_log)
+        if args.save_topk_nce:
+            print('start evaluation on train set')
+            if loader_train is None:
+                loaders = get_loaders(data, tokenizer, args.L,
+                                                                args.C, args.B,
+                                                                args.num_workers,
+                                                                args.inputmark,
+                                                                args.C_eval,
+                                                                use_full_dataset,
+                                                                macro_eval_mode, args = args)
+                loader_train = loaders[0]
+                loader_val = loaders[1]
+                loader_test = loaders[2]
+                num_val_samples = loaders[3]
+                num_test_samples = loaders[4]
+                if args.dataset == 'wikipedia':
+                    loader_test_2 = loaders[5]
+                    loader_test_3 = loaders[6]
+                    num_test_samples_2 = loaders[7] 
+                    num_test_samples_3 = loaders[8]
+            if args.eval_method == 'micro':
+                micro_eval(model, loader_train, num_val_samples, args, mode = 'train')
+            elif args.eval_method == 'macro':
+                macro_eval(model, loader_train, num_val_samples, args, mode = 'train')         
 
+
+            if args.eval_method == 'micro':
+                micro_eval(model, loader_val, num_val_samples, args, mode = 'val')
+            elif args.eval_method == 'macro':
+                macro_eval(model, loader_val, num_val_samples, args, mode = 'val')
+          
         print('start evaluation on test set')
         if loader_test is None:
             loaders = get_loaders(data, tokenizer, args.L,
@@ -1302,11 +1336,18 @@ def main(args):
                 val_result['num_correct'],
                 val_result['num_total_norm'],
                 newline=False))
-            wandb_log = {"valid(cands {})/unnormalized acc".format(str(C_eval_elem)): val_result['acc_unorm'], \
+            if args.dataset == 'zeshel':
+                wandb_log = {"valid(cands {})/unnormalized acc".format(str(C_eval_elem)): val_result['acc_unorm'], \
                 "valid(cands {})/normalized acc".format(str(C_eval_elem)): val_result['acc_norm'],\
                 "valid(cands {})/micro_unnormalized_acc".format(str(C_eval_elem)): sum(val_result['num_correct'])/sum(val_result['num_total_unorm']),\
                 "valid(cands {})/micro_normalized_acc".format(str(C_eval_elem)): sum(val_result['num_correct'])/sum(val_result['num_total_norm']),\
                 "valid(cands {})/mrr".format(str(C_eval_elem)): val_result['mrr']}
+            elif args.dataset == 'wikipedia' or args.dataset == 'msmarco':
+                wandb_log = {"valid(cands {})/unnormalized acc".format(str(C_eval_elem)): val_result['acc_unorm'], \
+                "valid(cands {})/normalized acc".format(str(C_eval_elem)): val_result['acc_norm'],\
+                "valid(cands {})/mrr".format(str(C_eval_elem)): val_result['mrr']}
+            
+
             for i in range(len(depth)):
                 wandb_log["valid(cands {})/recall@{}".format(str(C_eval_elem), depth[i])] = val_result['recall'][i]
             print(wandb_log)
@@ -1571,7 +1612,7 @@ if __name__ == '__main__':
                         help='the type of encoder')
     parser.add_argument('--dataset', type=str,
                         default='zeshel',
-                        choices=['zeshel', 'wikipedia'],
+                        choices=['zeshel', 'wikipedia', 'msmarco'],
                         help='the type of encoder')
     parser.add_argument('--num_mention_vecs', type=int, default=1,
                         help='the number of mention vectors ')

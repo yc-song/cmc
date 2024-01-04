@@ -293,13 +293,15 @@ class UnifiedDataset(BasicDataset):
 
 
 
-        if self.is_training and self.args.distill_training:
+        if self.is_training:
             return {"mention_token_ids": mention_token_ids,"mention_masks": mention_masks, "candidate_token_ids": candidates_token_ids, \
-                "candidate_masks": candidates_masks, "label_idx": label_ids, "teacher_scores":torch.tensor(candidates_scores).clone().detach()}
+                "candidate_masks": candidates_masks, "label_idx": label_ids, "teacher_scores":torch.tensor(candidates_scores).clone().detach(),\
+                }
 
         else:
             return {"mention_token_ids": mention_token_ids, "mention_masks": mention_masks, "candidate_token_ids": candidates_token_ids, \
-                "candidate_masks": candidates_masks, "label_idx": label_ids}
+                "candidate_masks": candidates_masks, "label_idx": label_ids, \
+                "mention_id": mention['mention_id'], "candidate_id": candidate_document_ids}
 
 class WikipediaDataset(BasicDataset):
     def __init__(self, documents, samples, tokenizer, max_len,
@@ -510,6 +512,226 @@ class WikipediaDataset(BasicDataset):
         else:
             return {"mention_token_ids": mention_token_ids, "mention_masks": mention_masks, "candidate_token_ids": candidates_token_ids, \
                 "candidate_masks": candidates_masks, "label_idx": label_ids}
+class MsmarcoDataset(WikipediaDataset):
+    def __init__(self, documents, samples, tokenizer, max_len,
+                 max_num_candidates,
+                 is_training, indicate_mention_boundaries=False, args=None, mode = 'train', max_context_len = 32):
+        super(MsmarcoDataset, self).__init__(documents, samples, tokenizer,
+                                             max_len, max_num_candidates,
+                                             is_training,
+                                             indicate_mention_boundaries, args)
+        self.max_len = max_len
+        self.max_len_mention = max_context_len  # cls and sep
+        self.max_len_candidate = self.max_len - self.max_len_mention # cls and sep
+        self.args = args
+        self.is_training = is_training
+        self.samples = self.cull_samples(samples)
+        self.mode = mode
+
+    # def cull_samples(self, samples):
+    #     self.num_samples_original = len(samples)
+    #     # if self.args.nearest:
+    #     if self.is_training:
+    #         mentions = [i for i in range(len(samples))]
+    #         return mentions, samples
+
+    #     else:
+    #         # print(samples[0][0]['label_document_id'])
+    #         # print(samples[1][0][samples[0][0]['mention_id']]['candidates'])
+    #         mentions= []
+    #         returned_samples = []
+    #         try:
+    #             for i in range(len(samples)):
+    #                 if 0<= samples[i]['label'] < self.max_num_candidates:
+    #                     mentions.append(i)
+    #                     returned_samples.append(samples[i])
+    #         except: pass
+
+    #         return mentions, returned_samples
+    def prepare_candidates(self, candidates, args, self_negs_again = False):
+        # xs = candidates['candidates'][:self.max_num_candidates]
+        def place_elements(lst, elements, indices):
+            for i, x in zip(indices, elements):
+                lst[i] = x
+            return lst
+        xs = candidates['candidates']
+        label_idx = candidates['labels']
+        y = xs[label_idx]
+        scores = candidates['scores']
+        if self.is_training:
+            # At training time we can include target if not already included.
+            if label_idx == '-1':
+                xs = xs[-1:] + xs[:-1]
+                scores = scores[-1:] + scores[:-1]
+                label_idx = 0
+            elif label_idx >= self.max_num_candidates:
+                if len(scores) != 0:
+                    scores = [scores[label_idx]]+scores[:label_idx]+scores[label_idx+1:]
+                else: scores = [0]
+                xs = [y] + [x for x in xs if x != y] 
+                label_idx = 0
+            if not self_negs_again:
+                # At first, training set == entire set
+                if args.type_cands == 'self_negative' or args.type_cands == "self_fixed_negative"\
+                or args.type_cands == "self_mixed_negative":
+                    if not y in xs[:args.num_sampled]:
+                        xs = [y] + [x for x in xs if x != y] 
+                        label_idx = 0
+                    else:
+                        label_idx = xs[:args.num_sampled].index(y)
+                    return xs[:args.num_sampled], label_idx
+                elif args.type_cands == 'fixed_negative':
+                    pass
+                elif args.type_cands == 'random_negative':
+                    xs = xs[:self.max_num_candidates]
+                    scores = scores[:self.max_num_candidates]
+                    xs_with_scores = [(i, j) for i, j in zip(xs, scores)]
+                    random.shuffle(xs_with_scores)
+                    for i, x in enumerate(xs_with_scores):
+                        xs[i] = x[0]
+                        scores[i] = x[1]
+                    label_idx = xs.index(y)
+                elif args.type_cands == 'mixed_negative':
+                    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+                    num_fixed = int(self.max_num_candidates * args.cands_ratio)
+                    num_hards = self.max_num_candidates - num_fixed
+                    label_idx = xs.index(y)
+
+                    xs = [y] + [x for x in xs if x != y]  # Target index always 0
+                    scores = [scores[label_idx]]+scores[:label_idx]+scores[label_idx+1:]
+                    label_idx = 0
+                    xs = np.array(xs)
+                    scores = np.array(scores)
+                    fixed_xs = xs[:num_fixed]
+                    fixed_scores = scores[:num_fixed]
+                    # Random sampling by giving same probs to each candidate
+                    hard_scores = torch.zeros(len(candidates['scores']))[num_fixed:] 
+                    probs = hard_scores.softmax(dim=0)
+                    probs = probs.unsqueeze(0)
+                    hard_cands = torch.tensor([num_fixed]) + distribution_sample(probs, num_hards, device).squeeze(0)
+                    hard_xs = xs[hard_cands.squeeze(0)]
+                    hard_scores = scores[hard_cands.squeeze(0)]
+                    xs = np.concatenate((fixed_xs, hard_xs))
+                    scores = np.concatenate((fixed_scores, hard_scores))
+                if args.type_cands == 'hard_negative': 
+                    # Later, training set is obtained by hard negs mining
+                    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+                    num_hards = len(xs) 
+                    # scores = candidates['scores'].clone().detach()
+                    hard_scores = torch.tensor(candidates['scores'], dtype = float)
+                    probs = hard_scores.softmax(dim=0).unsqueeze(0)
+                    hard_cands = distribution_sample(probs, self.max_num_candidates,
+                                                        device)
+                    xs = np.array(xs)
+                    scores = np.array(scores)
+                    xs = xs[hard_cands.squeeze(0).cpu()]
+                    xs = [y] + [x for x in xs if x != y]  # Target index always 0
+                    scores_xs = scores[hard_cands.squeeze(0).cpu()]
+                    scores = [scores[label_idx]] + [score for score in scores_xs if score != scores[label_idx]]
+                    label_idx = 0
+            else: 
+                if args.type_cands == 'self_fixed_negative':
+                    scores = torch.tensor(candidates['scores'], dtype = float)
+                    topk_indices = torch.topk(scores, self.max_num_candidates)[1]
+                    xs = np.array(xs)[topk_indices.cpu()]
+                    xs = [y] + [x for x in xs if x!= y]
+                    label_idx = 0
+                elif args.type_cands == "self_negative":
+                    # Later, training set is obtained by hard negs mining
+                    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+                    num_hards = len(xs)
+                    # scores = torch.tensor(candidates['self_scores'], dtype = float).clone().detach()
+                    probs = candidates['self_scores'].softmax(dim=0).unsqueeze(0)
+                    hard_cands = distribution_sample(probs, self.max_num_candidates,
+                                                        device)
+                    xs = np.array(xs)
+                    xs = xs[hard_cands.squeeze(0).cpu()]
+                    xs = [y] + [x for x in xs if x != y]  # Target index always 0
+                    label_idx = 0
+
+                elif args.type_cands == 'self_mixed_negative':
+                    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+                    num_fixed = int(self.max_num_candidates * args.cands_ratio)
+                    num_hards = self.max_num_candidates - num_fixed
+                    xs = [y] + [x for x in xs if x != y]  # Target index always 0
+                    xs = np.array(xs)
+                    fixed_xs = xs[:num_fixed]
+                    # Random sampling by giving same probs to each candidate
+                    scores = torch.zeros(len(candidates['scores']))[num_fixed:] 
+                    probs = scores.softmax(dim=0)
+                    probs = probs.unsqueeze(0)
+                    hard_cands = torch.tensor([num_fixed]) + distribution_sample(probs, num_hards, device).squeeze(0)
+                    hard_xs = xs[hard_cands.squeeze(0)]
+                    xs = np.concatenate((fixed_xs, hard_xs))
+                    label_idx = 0
+
+            if args.nearest:
+                xs_nearest = candidates['nearest_candidates']
+                m_nearest = candidates['nearest_mentions']
+                return xs[:self.max_num_candidates], label_idx, xs_nearest[:self.max_num_candidates], m_nearest[:self.max_num_candidates]      
+            return xs[:self.max_num_candidates], label_idx, scores[:self.max_num_candidates]
+        else:
+            assert y in xs
+            return xs[:self.max_num_candidates], label_idx, None
+    def get_candidate_prefix(self, candidate_document_id):
+        # Get "enough" context from space-tokenized text.
+        tokens = self.documents[0][candidate_document_id].split()
+        prefix = tokens[:self.max_len_candidate]
+        prefix = ' '.join(prefix)
+
+        # Get prefix under new tokenization.
+        return self.tokenizer.tokenize(prefix)[:self.max_len_candidate] 
+
+    def get_mention_prefix(self, mention):
+        # Get "enough" context from space-tokenized text.
+        if self.mode == 'train':
+            tokens = self.documents[1][mention].split()
+        elif self.mode == 'val':
+            tokens = self.documents[2][mention].split()
+        prefix = tokens[:self.max_len_mention]
+        prefix = ' '.join(prefix)
+
+        # Get prefix under new tokenization.
+        return self.tokenizer.tokenize(prefix)[:self.max_len_mention]         
+
+    def __getitem__(self, index):
+        mention = self.samples[1][index]['mention_id']
+        
+        candidates = self.samples[1][index]['candidates']
+        mention = self.get_mention_prefix(mention)
+        mention_encoded_dict = self.tokenizer.encode_plus(mention,
+                                                          add_special_tokens=False,
+                                                          max_length=self.max_len_mention,
+                                                          pad_to_max_length=True,
+                                                          truncation=True)
+        mention_token_ids = torch.tensor(mention_encoded_dict['input_ids'])
+
+        mention_masks = torch.tensor(mention_encoded_dict['attention_mask'])
+
+
+        candidate_document_ids, label_ids, candidates_scores = self.prepare_candidates(self.samples[1][index], self.args, self.self_negs_again)
+        candidates_token_ids = torch.zeros((len(candidate_document_ids),
+                                            self.max_len_candidate))
+        candidates_masks = torch.zeros((len(candidate_document_ids),
+                                        self.max_len_candidate))
+        for i, candidate_document_id in enumerate(candidate_document_ids):
+            candidate_window = self.get_candidate_prefix(candidate_document_id)
+            candidate_dict = self.tokenizer.encode_plus(candidate_window,
+                                                        add_special_tokens=True,
+                                                        max_length=self.max_len_candidate,
+                                                        pad_to_max_length=True,
+                                                        truncation=True)
+            candidates_token_ids[i] = torch.tensor(candidate_dict['input_ids'])
+            candidates_masks[i] = torch.tensor(candidate_dict['attention_mask'])
+        # print(mention_token/_ids, mention_token_ids.shape, candidates_token_ids[0], candidates_token_ids.shape)
+
+        if self.is_training and self.args.distill_training:
+            return {"mention_token_ids": mention_token_ids,"mention_masks": mention_masks, "candidate_token_ids": candidates_token_ids, \
+                "candidate_masks": candidates_masks, "label_idx": label_ids, "teacher_scores":torch.tensor(candidates_scores).clone().detach()}
+
+        else:
+            return {"mention_token_ids": mention_token_ids, "mention_masks": mention_masks, "candidate_token_ids": candidates_token_ids, \
+                "candidate_masks": candidates_masks, "label_idx": label_ids}
 
 class WikipediaFullDataset(WikipediaDataset):
     def __init__(self, documents, samples, tokenizer, max_len,
@@ -606,42 +828,53 @@ def get_loaders(data, tokenizer, max_len, max_num_candidates, batch_size,
     elif args.dataset == 'wikipedia':
         (documents, samples_train,
         samples_val, samples_test, samples_test_2, samples_test_3) = data
+    elif args.dataset == 'msmarco':
+        (documents, samples_train, samples_val, samples_test) = data
     print('get train loaders')
-    if use_full_dataset:
-        if args.dataset == 'zeshel':
+    if not args.save_topk_nce:
+        if use_full_dataset:
+            if args.dataset == 'zeshel':
 
-            dataset_train = FullDataset(documents, samples_train, tokenizer,
-                                        max_len, max_num_candidates, True,
-                                        indicate_mention_boundaries, args = args, self_negs_again=self_negs_again)
-        elif args.dataset == 'wikipedia':
-            dataset_train = WikipediaFullDataset(documents, samples_train, tokenizer,
-                                        max_len, max_num_candidates, True,
-                                        indicate_mention_boundaries, args = args, self_negs_again=self_negs_again)
-
-    else:
-        if args.dataset == 'zeshel':
-            dataset_train = UnifiedDataset(documents, samples_train, tokenizer,
+                dataset_train = FullDataset(documents, samples_train, tokenizer,
                                             max_len, max_num_candidates, True,
                                             indicate_mention_boundaries, args = args, self_negs_again=self_negs_again)
-        elif args.dataset == 'wikipedia':
-            dataset_train = WikipediaDataset(documents, samples_train, tokenizer,
+            elif args.dataset == 'wikipedia':
+                dataset_train = WikipediaFullDataset(documents, samples_train, tokenizer,
                                             max_len, max_num_candidates, True,
-                                            indicate_mention_boundaries, args = args, self_negs_again=self_negs_again, max_context_len = 32)
-    if args.C>64:
-        loader_train = DataLoader(dataset_train, batch_size=batch_size,
-                                shuffle=True, num_workers=num_workers)
-    else:
-        if not self_negs_again:
-            if args.type_cands == "self_negative" or args.type_cands == "self_fixed_negative":
-                loader_train = DataLoader(dataset_train, batch_size=eval_batch_size,
-                                    shuffle=True, num_workers=num_workers)            
+                                            indicate_mention_boundaries, args = args, self_negs_again=self_negs_again)
+            elif args.dataset == 'msmarco':
+                dataset_train = MsmarcoDataset(documents, samples_train, tokenizer,
+                                            max_len, max_num_candidates, True,
+                                            indicate_mention_boundaries, args = args, self_negs_again=self_negs_again)
+        else:
+            if args.dataset == 'zeshel':
+                dataset_train = UnifiedDataset(documents, samples_train, tokenizer,
+                                                max_len, max_num_candidates, True,
+                                                indicate_mention_boundaries, args = args, self_negs_again=self_negs_again)
+            elif args.dataset == 'wikipedia':
+                dataset_train = WikipediaDataset(documents, samples_train, tokenizer,
+                                                max_len, max_num_candidates, True,
+                                                indicate_mention_boundaries, args = args, self_negs_again=self_negs_again, max_context_len = 32)
+            elif args.dataset == 'msmarco':
+                dataset_train = MsmarcoDataset(documents, samples_train, tokenizer,
+                                                max_len, max_num_candidates, True,
+                                                indicate_mention_boundaries, args = args, mode = 'train')
+        if args.C>64:
+            loader_train = DataLoader(dataset_train, batch_size=batch_size,
+                                    shuffle=True, num_workers=num_workers)
+        else:
+            if not self_negs_again:
+                if args.type_cands == "self_negative" or args.type_cands == "self_fixed_negative":
+                    loader_train = DataLoader(dataset_train, batch_size=eval_batch_size,
+                                        shuffle=True, num_workers=num_workers)            
+                else:
+                    loader_train = DataLoader(dataset_train, batch_size=batch_size,
+                                        shuffle=True, num_workers=num_workers)
             else:
                 loader_train = DataLoader(dataset_train, batch_size=batch_size,
                                     shuffle=True, num_workers=num_workers)
-        else:
-            loader_train = DataLoader(dataset_train, batch_size=batch_size,
-                                shuffle=True, num_workers=num_workers)
-
+    else:
+        pass
     def help_loader(samples):
         if args.dataset == 'zeshel':
             num_samples = len(samples[0])
@@ -665,6 +898,10 @@ def get_loaders(data, tokenizer, max_len, max_num_candidates, batch_size,
                 dataset = WikipediaDataset(documents, samples, tokenizer,
                                         max_len, max_num_cands_val, False,
                                         indicate_mention_boundaries, args)
+        elif args.dataset == 'msmarco':
+            dataset = MsmarcoDataset(documents, samples, tokenizer,
+                                    max_len, max_num_cands_val, False,
+                                    indicate_mention_boundaries, args, 'val')
         loader = DataLoader(dataset, batch_size=eval_batch_size,
                             shuffle=False,
                             num_workers=num_workers)
@@ -697,6 +934,10 @@ def get_loaders(data, tokenizer, max_len, max_num_candidates, batch_size,
                 loader_test_3, test_num_samples_3 = help_loader(samples_test_3)
                 return (loader_train, loader_val, loader_test, val_num_samples, test_num_samples,\
                  loader_test_2, loader_test_3, test_num_samples_2, test_num_samples_3)
+    if args.save_topk_nce:
+        loader_train, train_num_samples = help_loader(samples_train)
+        return (loader_train, loader_val, loader_test,
+        val_num_samples, test_num_samples, train_num_samples)     
     return (loader_train, loader_val, loader_test,
         val_num_samples, test_num_samples)
 
@@ -836,6 +1077,52 @@ def load_wikipedia_data(cands_dir):
     print('load all done')
 
     return documents, samples_train, samples_val, samples_test, samples_test_2, samples_test_3
+
+def load_msmarco_data(cands_dir, step = 0):
+    """
+
+    :param data_dir: train_data_dir if args.train else eval_data_dir
+    :return: mentions, entities,doc
+    """
+    print('begin loading data (MSMARCO)')
+    def load_documents(file_path):
+        documents = {}
+        path = os.path.join(cands_dir, file_path)
+        with open(os.path.join(path),'r') as f:
+            for i, line in tqdm(enumerate(f)):
+                id, text = line.strip().split('\t')
+                documents[id] = text
+        return documents
+    documents = [None]*3
+    documents[0] = load_documents('collection.tsv')
+    documents[1] = load_documents('queries.train.tsv')
+    documents[2] = load_documents('queries.dev.tsv')
+
+
+    def load_mention_candidates_pairs(part, step=None):
+        assert part == 'train' or part == 'val' or part == 'val_anserini'
+        candidates = {}
+        if part == 'train':
+            file_path = os.path.join(cands_dir, f"candidates_{part}{step:02d}.json")
+        else:
+            file_path = os.path.join(cands_dir, f"candidates_{part}.json")
+        with open(file_path) as f:
+            for i, line in tqdm(enumerate(f)):
+                field = json.loads(line)
+                candidates[i] = field
+        return candidates
+    
+
+    print('start getting train pairs')
+    samples_train = load_mention_candidates_pairs('train', step)
+    print('start getting val and test pairs')
+    samples_val = load_mention_candidates_pairs('val')
+    samples_test = load_mention_candidates_pairs('val_anserini')
+
+    print('load all done')
+
+    return documents, samples_train, samples_val, samples_test
+
 
 class Logger(BasicLogger):
 
