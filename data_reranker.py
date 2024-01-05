@@ -317,6 +317,7 @@ class WikipediaDataset(BasicDataset):
         self.args = args
         self.is_training = is_training
         self.self_negs_again = self_negs_again
+        
         self.tokenizer.add_special_tokens({'additional_special_tokens': ['[unused0]','[unused1]','[unused2]']})
         self.samples = self.cull_samples(samples)
 
@@ -334,7 +335,7 @@ class WikipediaDataset(BasicDataset):
             returned_samples = []
             try:
                 for i in range(len(samples)):
-                    if 0<= samples[i]['label'] < self.max_num_candidates:
+                    if 0<= samples[i]['label'] and 0<= samples[i]['label']< self.max_num_candidates:
                         mentions.append(i)
                         returned_samples.append(samples[i])
             except: pass
@@ -520,34 +521,44 @@ class MsmarcoDataset(WikipediaDataset):
                                              max_len, max_num_candidates,
                                              is_training,
                                              indicate_mention_boundaries, args)
+        self.documents = documents
         self.max_len = max_len
         self.max_len_mention = max_context_len  # cls and sep
         self.max_len_candidate = self.max_len - self.max_len_mention # cls and sep
+        # Following ColBERT
+        # [unused0]: [Q]
+        # [unused1]: [D]
+        # [unused2]: [mask]
+        # query preprocssing: [CLS] [Q] query [mask]
+        # doc preprocssing: [CLS] [D] doc 
+        self.QUERY_TAG = '[unused0]'
+        self.DOC_TAG = '[unused1]'
+        self.MASK_TAG = '[unused2]'
+        self.tokenizer.add_special_tokens({'additional_special_tokens': ['[unused0]','[unused1]','[unused2]']})
+
         self.args = args
         self.is_training = is_training
         self.samples = self.cull_samples(samples)
         self.mode = mode
 
-    # def cull_samples(self, samples):
-    #     self.num_samples_original = len(samples)
-    #     # if self.args.nearest:
-    #     if self.is_training:
-    #         mentions = [i for i in range(len(samples))]
-    #         return mentions, samples
+    def cull_samples(self, samples):
+        self.num_samples_original = len(samples)
+        # if self.args.nearest:
+        if self.is_training:
+            mentions = [i for i in range(len(samples))]
+            return mentions, samples
 
-    #     else:
-    #         # print(samples[0][0]['label_document_id'])
-    #         # print(samples[1][0][samples[0][0]['mention_id']]['candidates'])
-    #         mentions= []
-    #         returned_samples = []
-    #         try:
-    #             for i in range(len(samples)):
-    #                 if 0<= samples[i]['label'] < self.max_num_candidates:
-    #                     mentions.append(i)
-    #                     returned_samples.append(samples[i])
-    #         except: pass
+        else:
+            # print(samples[0][0]['label_document_id'])
+            # print(samples[1][0][samples[0][0]['mention_id']]['candidates'])
+            mentions= []
+            returned_samples = []
+            for i in range(len(samples)):
+                if 0<= samples[i]['labels'][0] and samples[i]['labels'][0]< self.max_num_candidates:
+                    mentions.append(i)
+                    returned_samples.append(samples[i])
 
-    #         return mentions, returned_samples
+            return mentions, returned_samples
     def prepare_candidates(self, candidates, args, self_negs_again = False):
         # xs = candidates['candidates'][:self.max_num_candidates]
         def place_elements(lst, elements, indices):
@@ -555,7 +566,7 @@ class MsmarcoDataset(WikipediaDataset):
                 lst[i] = x
             return lst
         xs = candidates['candidates']
-        label_idx = candidates['labels']
+        label_idx = candidates['labels'][0]
         y = xs[label_idx]
         scores = candidates['scores']
         if self.is_training:
@@ -676,7 +687,7 @@ class MsmarcoDataset(WikipediaDataset):
     def get_candidate_prefix(self, candidate_document_id):
         # Get "enough" context from space-tokenized text.
         tokens = self.documents[0][candidate_document_id].split()
-        prefix = tokens[:self.max_len_candidate]
+        prefix = [self.DOC_TAG]+tokens
         prefix = ' '.join(prefix)
 
         # Get prefix under new tokenization.
@@ -688,7 +699,9 @@ class MsmarcoDataset(WikipediaDataset):
             tokens = self.documents[1][mention].split()
         elif self.mode == 'val':
             tokens = self.documents[2][mention].split()
-        prefix = tokens[:self.max_len_mention]
+        
+        prefix = [self.QUERY_TAG]+tokens+[self.MASK_TAG]*(self.max_len_mention-len(tokens)+3)
+        prefix = prefix[:self.max_len_mention]
         prefix = ' '.join(prefix)
 
         # Get prefix under new tokenization.
@@ -696,11 +709,10 @@ class MsmarcoDataset(WikipediaDataset):
 
     def __getitem__(self, index):
         mention = self.samples[1][index]['mention_id']
-        
         candidates = self.samples[1][index]['candidates']
         mention = self.get_mention_prefix(mention)
         mention_encoded_dict = self.tokenizer.encode_plus(mention,
-                                                          add_special_tokens=False,
+                                                          add_special_tokens=True,
                                                           max_length=self.max_len_mention,
                                                           pad_to_max_length=True,
                                                           truncation=True)
@@ -723,8 +735,7 @@ class MsmarcoDataset(WikipediaDataset):
                                                         truncation=True)
             candidates_token_ids[i] = torch.tensor(candidate_dict['input_ids'])
             candidates_masks[i] = torch.tensor(candidate_dict['attention_mask'])
-        # print(mention_token/_ids, mention_token_ids.shape, candidates_token_ids[0], candidates_token_ids.shape)
-
+        
         if self.is_training and self.args.distill_training:
             return {"mention_token_ids": mention_token_ids,"mention_masks": mention_masks, "candidate_token_ids": candidates_token_ids, \
                 "candidate_masks": candidates_masks, "label_idx": label_ids, "teacher_scores":torch.tensor(candidates_scores).clone().detach()}
@@ -928,6 +939,7 @@ def get_loaders(data, tokenizer, max_len, max_num_candidates, batch_size,
                 test_num_samples.append(num_samples)
         else:
             loader_val, val_num_samples = help_loader(samples_val)
+            print('valid loader length', loader_val.__len__())
             loader_test, test_num_samples = help_loader(samples_test)
             if args.dataset == 'wikipedia':
                 loader_test_2, test_num_samples_2 = help_loader(samples_test_2)
@@ -1091,7 +1103,7 @@ def load_msmarco_data(cands_dir, step = 0):
         with open(os.path.join(path),'r') as f:
             for i, line in tqdm(enumerate(f)):
                 id, text = line.strip().split('\t')
-                documents[id] = text
+                documents[int(id)] = text
         return documents
     documents = [None]*3
     documents[0] = load_documents('collection.tsv')
