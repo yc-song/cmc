@@ -320,7 +320,7 @@ class UnifiedRetriever(nn.Module):
                 beam_ratio = 0.5, args = None, sampling = False, nearest_mention_token_ids = None, nearest_mention_masks = None,\
                 nearest_label_token_ids = None, nearest_label_masks = None, loader_val_cased = None,\
                 nearest_candidate_token_ids = None, nearest_candidate_masks = None,\
-                 mention_id = None, candidate_id = None):
+                 mention_id = None, candidate_id = None, evaluate = False):
         
         ## Input
         # mention_token_ids (torch.tensor): mention token ids by tokenizer
@@ -336,85 +336,30 @@ class UnifiedRetriever(nn.Module):
         # student_loss (torch.tensor): Cross-entropy from student model
         # teacher_loss (torch.tensor): KL-divergence b/w student and teacher model's score distribution
 
-        if self.evaluate_on:  # This option is not used for extend_multi models
-            mention_embeds, mention_embeds_masks = self.encode(
-                mention_token_ids, mention_masks, None, None)[:2]
-            bsz, l_x, mention_dim = mention_embeds.size()
-            num_cands, l_y, cand_dim = self.candidates_embeds.size()
+        if self.evaluate_on or evaluate:  # This option is not used for extend_multi models
+            if not self.candidates_embeds is None:
+                mention_embeds, mention_embeds_masks = self.encode(
+                    mention_token_ids, mention_masks, None, None)[:2]
+                bsz, l_x, mention_dim = mention_embeds.size()
+                num_cands, l_y, cand_dim = self.candidates_embeds.size()
+            else:
+                mention_embeds, mention_embeds_masks, \
+                candidates_embeds = self.encode(mention_token_ids, mention_masks,
+                                            candidate_token_ids,
+                                            candidate_masks)                
             if self.attention_type == 'soft_attention':
                 scores = self.attention(self.candidates_embeds.unsqueeze(0).to(
                     self.device), mention_embeds, mention_embeds,
                     mention_embeds_masks)
-            elif self.attention_type == "extend_multi":
-                scores = None
-                next_round_idxs = None
-                num_stages = int(math.log10(num_cands)/math.log10(4))
-                top_k = 64
-                for stage in range(num_stages):
-                    if stage == 0:
-                        for i in range(int(num_cands/top_k)+1):
-                            tmp_candidates_embed = self.candidates_embeds[top_k*i:min(top_k*(i+1),num_cands), :, :].expand(mention_embeds.size(0), -1, -1, -1)
-                            if i == 0:
-                                scores = self.extend_multi(mention_embeds, tmp_candidates_embed, num_mention_vecs = self.num_mention_vecs)
-                                scores = torch.nn.functional.softmax(scores, dim = 1)
-                                _, next_round_idxs = torch.topk(scores, int(top_k/4))
-                            else:
-                                tmp_scores = self.extend_multi(mention_embeds, tmp_candidates_embed, num_mention_vecs = self.num_mention_vecs)
-                                tmp_scores = torch.nn.functional.softmax(tmp_scores, dim = 1)
-                                scores = torch.cat([scores, tmp_scores], dim = 1)
-                                _, tmp_next_round_idxs = torch.topk(tmp_scores, int(tmp_candidates_embed.size(1)/4))
-                                tmp_next_round_idxs = tmp_next_round_idxs + torch.tensor([top_k*i], device = self.device)
-                                next_round_idxs = torch.cat([next_round_idxs, tmp_next_round_idxs.squeeze(-1)], dim = 1)
-                    else:
-                        num_cands = next_round_idxs.size(1)
-                        if num_cands <= 64: break
-                        tmp_cls_cands = self.candidates_embeds[next_round_idxs.cpu()]
-                        previous_round_idxs = next_round_idxs
-                        for i in range(int(num_cands/top_k)+1):
-                            tmp_candidates_embed = tmp_cls_cands[:,top_k*i:min(top_k*(i+1),num_cands), :]
-                            if i == 0:
-                                tmp_scores = self.extend_multi(mention_embeds, tmp_candidates_embed, num_mention_vecs = self.num_mention_vecs)
-                                tmp_scores = torch.nn.functional.softmax(tmp_scores, dim = 1)
-                                _, tmp_next_round_idxs = torch.topk(tmp_scores, int(tmp_candidates_embed.size(1)/4))
-                                # next_round_idxs = torch.index_select(previous_round_idx, 1, next_round_idxs)
-                                next_round_idxs = torch.gather(previous_round_idxs, 1, tmp_next_round_idxs)
-                                # next_round_idxs = previous_round_idx[tmp_next_round_idxs]
-                            else:
-                                tmp_scores2 = self.extend_multi(mention_embeds, tmp_candidates_embed, num_mention_vecs = self.num_mention_vecs)
-                                tmp_scores2 = torch.nn.functional.softmax(tmp_scores2, dim = 1)
-                                tmp_scores = torch.cat([tmp_scores, tmp_scores2], dim = 1)
-                                _, tmp_next_round_idxs = torch.topk(tmp_scores2, int(tmp_candidates_embed.size(1)/4))
-                                tmp_next_round_idxs = tmp_next_round_idxs + torch.tensor([top_k*i], device = self.device)
-                                tmp_next_round_idxs = torch.gather(previous_round_idxs, 1, tmp_next_round_idxs)
-                                next_round_idxs = torch.cat([next_round_idxs, tmp_next_round_idxs], dim = 1)
-                        if sampling:
-                            for row in range(candidates_embeds["embeds"].size(0)):
-                                scores[row, candidates_embeds["idxs"][row]] *= (round-1)/round
-                                scores[row, candidates_embeds["idxs"][row]] += new_scores[row]/round
-                        else:
-                            for row in range(candidates_embeds["embeds"].size(0)):
-                                scores[row, candidates_embeds["idxs"][row]] += new_scores[row]                                
-
-            elif self.attention_type == "mlp_with_som":
+            elif self.attention_type == 'extend_multi_dot':
+                dot = True
                 mention_embeds, mention_embeds_masks, \
                 candidates_embeds = self.encode(mention_token_ids, mention_masks,
-                                                candidate_token_ids,
-                                                candidate_masks)
-                                                # candidate_token_ids[:,:args.num_training_cands,:],
-                                                # candidate_masks[:,:args.num_training_cands,:])
-                scores = self.mlp_with_som(mention_embeds, candidates_embeds)
-            else:
-                # candidate shape: (entity_bsz, 1, embed_dim)
-                # score shape: (mention_bsz, entity_bsz)
-                scores = (
-                    torch.matmul(mention_embeds.reshape(-1, mention_dim),
-                                 self.candidates_embeds.reshape(-1,
-                                                                cand_dim).t().to(
-                                     self.device)).reshape(bsz, l_x,
-                                                           num_cands,
-                                                           l_y).max(-1)[
-                        0]).sum(1)
-            return scores
+                                            candidate_token_ids,
+                                            candidate_masks)
+                # Take embeddings as input for extend_multi model
+                scores = self.extend_multi(mention_embeds, candidates_embeds, dot, args)
+                return {'scores':scores}
         else:  # train\
             B, C, L = candidate_token_ids.size() # e.g. 8, 256, 128
             # B x m x d
@@ -457,13 +402,17 @@ class UnifiedRetriever(nn.Module):
             if label_idx is None:
                 labels = torch.zeros(B).long().to(self.device)
             else:
-                labels = label_idx.to(self.device)
+                if label_idx.dim() == 2:
+                    labels = label_idx[0].to(self.device)
+                else:   
+                    labels = label_idx.to(self.device)
             if candidate_probs is not None:  # logits adjustment
                 candidate_probs = candidate_probs.to(self.device)
                 scores[:, 1:] -= ((C - 1) * candidate_probs).log()
             if args.distill_training:
                 loss, student_loss, teacher_loss = distillation_loss(scores, teacher_scores, labels, args.alpha, mrr_penalty = args.mrr_penalty)
-                return loss, predicts, scores, student_loss, teacher_loss
+                return {'loss':loss, 'predictions':predicts, 'scores':scores,\
+                'student_loss':student_loss, 'teacher_loss':teacher_loss}
             elif args.energy_model:
                 candidates_embeds = candidates_embeds.squeeze(-2)
                 retriever_scores = torch.bmm(mention_embeds, candidates_embeds.transpose(2,1)).squeeze(1)
@@ -475,7 +424,7 @@ class UnifiedRetriever(nn.Module):
                 return loss, predicts, scores, retriever_loss, reranker_loss, retriever_predicts, retriever_scores
             else:
                 loss = self.loss_fct(scores, labels)
-                return loss, predicts, scores
+                return {'loss':loss, 'predictions':predicts, 'scores':scores}
     def extend_multi(self, xs, ys, dot = False, args = None, num_mention_vecs = 1, nearest_mention = None, nearest_gold = None,\
      nearest_mention_token_ids = None, nearest_mention_masks = None, nearest_candidate_token_ids = None, nearest_candidate_masks = None):
         xs = xs.to(self.device) # (batch size, 1, embed_dim)

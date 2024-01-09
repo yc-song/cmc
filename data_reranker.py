@@ -12,8 +12,14 @@ from util import Logger as BasicLogger
 from data_retriever import distribution_sample
 from tqdm import tqdm
 import random
-
-
+from torch.nn.utils.rnn import pad_sequence
+# def custom_collate_fn(batch):
+#     label_ids = [x['label_idx'] for x in batch]
+#     labels = [torch.tensor(label) for label in label_ids]
+#     labels_padded = pad_sequence(labels, batch_first=True, padding_value=-1)
+#     for i, x in enumerate(batch):
+#         x[i]['label_idx'] = labels_padded[i]
+#     return batch
 
 class BasicDataset(Dataset):
 
@@ -566,8 +572,12 @@ class MsmarcoDataset(WikipediaDataset):
                 lst[i] = x
             return lst
         xs = candidates['candidates']
-        label_idx = candidates['labels'][0]
-        y = xs[label_idx]
+        if self.mode == 'train':
+            label_idx = candidates['labels']
+            y = xs[label_idx]
+        else:
+            label_idx = candidates['labels']
+            y = [xs[i] for i in label_idx]
         scores = candidates['scores']
         if self.is_training:
             # At training time we can include target if not already included.
@@ -682,10 +692,12 @@ class MsmarcoDataset(WikipediaDataset):
                 return xs[:self.max_num_candidates], label_idx, xs_nearest[:self.max_num_candidates], m_nearest[:self.max_num_candidates]      
             return xs[:self.max_num_candidates], label_idx, scores[:self.max_num_candidates]
         else:
-            assert y in xs
+            for elem in y:
+                assert elem in xs
             return xs[:self.max_num_candidates], label_idx, None
     def get_candidate_prefix(self, candidate_document_id):
         # Get "enough" context from space-tokenized text.
+        candidate_document_id = int(candidate_document_id)
         tokens = self.documents[0][candidate_document_id].split()
         prefix = [self.DOC_TAG]+tokens
         prefix = ' '.join(prefix)
@@ -695,6 +707,7 @@ class MsmarcoDataset(WikipediaDataset):
 
     def get_mention_prefix(self, mention):
         # Get "enough" context from space-tokenized text.
+        mention = int(mention)
         if self.mode == 'train':
             tokens = self.documents[1][mention].split()
         elif self.mode == 'val':
@@ -706,7 +719,7 @@ class MsmarcoDataset(WikipediaDataset):
 
         # Get prefix under new tokenization.
         return self.tokenizer.tokenize(prefix)[:self.max_len_mention]         
-
+        
     def __getitem__(self, index):
         mention = self.samples[1][index]['mention_id']
         candidates = self.samples[1][index]['candidates']
@@ -735,14 +748,13 @@ class MsmarcoDataset(WikipediaDataset):
                                                         truncation=True)
             candidates_token_ids[i] = torch.tensor(candidate_dict['input_ids'])
             candidates_masks[i] = torch.tensor(candidate_dict['attention_mask'])
-        
         if self.is_training and self.args.distill_training:
             return {"mention_token_ids": mention_token_ids,"mention_masks": mention_masks, "candidate_token_ids": candidates_token_ids, \
                 "candidate_masks": candidates_masks, "label_idx": label_ids, "teacher_scores":torch.tensor(candidates_scores).clone().detach()}
 
         else:
             return {"mention_token_ids": mention_token_ids, "mention_masks": mention_masks, "candidate_token_ids": candidates_token_ids, \
-                "candidate_masks": candidates_masks, "label_idx": label_ids}
+                "candidate_masks": candidates_masks, "label_idx": torch.tensor(label_ids).clone().detach()}
 
 class WikipediaFullDataset(WikipediaDataset):
     def __init__(self, documents, samples, tokenizer, max_len,
@@ -870,6 +882,7 @@ def get_loaders(data, tokenizer, max_len, max_num_candidates, batch_size,
                 dataset_train = MsmarcoDataset(documents, samples_train, tokenizer,
                                                 max_len, max_num_candidates, True,
                                                 indicate_mention_boundaries, args = args, mode = 'train')
+        
         if args.C>64:
             loader_train = DataLoader(dataset_train, batch_size=batch_size,
                                     shuffle=True, num_workers=num_workers)
@@ -939,7 +952,6 @@ def get_loaders(data, tokenizer, max_len, max_num_candidates, batch_size,
                 test_num_samples.append(num_samples)
         else:
             loader_val, val_num_samples = help_loader(samples_val)
-            print('valid loader length', loader_val.__len__())
             loader_test, test_num_samples = help_loader(samples_test)
             if args.dataset == 'wikipedia':
                 loader_test_2, test_num_samples_2 = help_loader(samples_test_2)
