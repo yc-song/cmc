@@ -20,7 +20,7 @@ from transformers import BertTokenizer, BertModel, AdamW, \
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-
+depth = [2,4,8,16,32,64]
 def set_seeds(args):
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -75,7 +75,9 @@ def evaluate(mention_loader, model, all_candidates_embeds, k, device,
             model.evaluate_on = True
             model.candidates_embeds = all_candidates_embeds
     nb_samples = 0
-    r_k = 0
+
+
+    r_k = [0 for d in depth]
     acc = 0
     with torch.no_grad():
         for i, batch in tqdm(enumerate(mention_loader), total = len(mention_loader)):
@@ -94,16 +96,18 @@ def evaluate(mention_loader, model, all_candidates_embeds, k, device,
                         model.evaluate_on = True
                         model.candidates_embeds = en_embeds
                     score = model(batch[0], batch[1], None,
-                                  None).detach()
+                                  None)['scores'].detach()
                     scores.append(score)
                 scores = torch.cat(scores, dim=1)
             labels = batch[2].to(device)
-            top_k = scores.topk(k, dim=1)[1]
-            preds = top_k[:, 0]
-            r_k += (top_k == labels.to(device)).sum().item()
+            for i in range(len(depth)):
+                top_k = scores.topk(depth[i], dim=1)[1]
+                preds = top_k[:, 0]
+                r_k[i]+=(top_k == labels.to(device)).sum().item()
             nb_samples += scores.size(0)
             acc += (preds == labels.squeeze(1).to(device)).sum().item()
-    r_k /= nb_samples
+    for i in range(len(r_k)):
+        r_k[i] /= nb_samples
     acc /= nb_samples
     if hasattr(model, 'module'):
         model.module.evaluate_on = False
@@ -457,7 +461,7 @@ def main(args):
             if args.debug and step > 10:
                 break
             model.train()
-            loss = model(*batch, args = args)[0]
+            loss = model(*batch, args = args)['loss']
 
             if len(args.gpus) > 1:
                 loss = loss.mean()
@@ -542,7 +546,6 @@ def main(args):
         # torch.cuda.empty_cache()
     # test model on test dataset
 
-
     package = torch.load(os.path.join(args.save_dir, "pytorch_model.bin")) if device.type == 'cuda' \
         else torch.load(os.path.join(args.save_dir, "pytorch_model.bin"), map_location=torch.device('cpu'))
     new_state_dict = package['sd']
@@ -566,23 +569,23 @@ def main(args):
     print("***get_all_entity_hiddens***")
 
 
-    logger.log("evaluate on val set")
+    # logger.log("evaluate on val set")
 
-    all_val_cands_embeds = get_all_entity_hiddens(val_en_loader, model,
-                                                args.store_en_hiddens,
-                                                args.en_hidden_path, debug = args.debug)
-    eval_result = evaluate(val_men_loader, model, all_val_cands_embeds,
-                        args.k, device, len(val_en_loader),
-                        args.store_en_hiddens, args.en_hidden_path)
+    # all_val_cands_embeds = get_all_entity_hiddens(val_en_loader, model,
+    #                                             args.store_en_hiddens,
+    #                                             args.en_hidden_path, debug = args.debug)
+    # eval_result = evaluate(val_men_loader, model, all_val_cands_embeds,
+    #                     args.k, device, len(val_en_loader),
+    #                     args.store_en_hiddens, args.en_hidden_path)
 
-    logger.log('Training finished | train loss {:8.4f} | '
-            'validation recall {:8.4f}'
-            '|validation accuracy {:8.4f}'.format(
-        tr_loss / step_num,
-        eval_result[0],
-        eval_result[1]
-    ))
-    wandb.log({"best_val_recall": eval_result[0], "best_val_accuracy": eval_result[1]})
+    # logger.log('Training finished | train loss {:8.4f} | '
+    #         'validation recall {:8.4f}'
+    #         '|validation accuracy {:8.4f}'.format(
+    #     tr_loss / step_num,
+    #     eval_result[0],
+    #     eval_result[1]
+    # ))
+    # wandb.log({"best_val_recall": eval_result[0], "best_val_accuracy": eval_result[1]})
     print("***test_result***")
     all_test_cands_embeds = get_all_entity_hiddens(test_en_loader, model,
                                                 args.store_en_hiddens,
@@ -590,14 +593,15 @@ def main(args):
     test_result = evaluate(test_men_loader, model, all_test_cands_embeds,
                         args.k, device, len(test_en_loader),
                         args.store_en_hiddens, args.en_hidden_path)
-    logger.log(' test recall@{:d} : {:8.4f}'
-            '| test accuracy : {:8.4f}'.format(args.k, test_result[0],
-                                                test_result[1]))
+    print(test_result)
+    wandb.log({"test_accuracy": test_result[1]})
+    for i in range(len(depth)):
+        wandb.log({f"test_recall@{depth[i]}": test_result[0][i]})
     # if args.eval_method == 'micro':
     #     test_result = micro_eval(model, loader_test, num_test_samples)
     # else:
     #     test_result = macro_eval(model, loader_test, num_test_samples)
-    wandb.log({"test_recall": test_result[0], "test_accuracy": test_result[1]})
+
 
     logger.log('\nDone training | training time {:s} | '
                'test acc unormalized {:8.4f} ({}/{})|'

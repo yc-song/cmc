@@ -359,7 +359,16 @@ class UnifiedRetriever(nn.Module):
                                             candidate_masks)
                 # Take embeddings as input for extend_multi model
                 scores = self.extend_multi(mention_embeds, candidates_embeds, dot, args)
-                return {'scores':scores}
+            else:
+                scores = (
+                    torch.matmul(mention_embeds.reshape(-1, mention_dim),
+                                 self.candidates_embeds.reshape(-1,
+                                                                cand_dim).t().to(
+                                     self.device)).reshape(bsz, l_x,
+                                                           num_cands,
+                                                           l_y).max(-1)[
+                        0]).sum(1)
+            return {'scores':scores}
         else:  # train\
             B, C, L = candidate_token_ids.size() # e.g. 8, 256, 128
             # B x m x d

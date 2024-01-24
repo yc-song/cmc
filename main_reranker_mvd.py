@@ -22,11 +22,6 @@ import json
 import itertools
 import pdb
 import copy
-
-import torchvision.models as models
-from torch.profiler import profile, record_function, ProfilerActivity
-
-
 self_negative_methods=[
     'self_fixed_negative',
     'self_mixed_negative',
@@ -251,7 +246,6 @@ def micro_eval(model, loader_eval, num_total_unorm, args = None, mode = None):
     if args.save_topk_nce:
         json_save_path = os.path.join(args.cands_dir, args.run_id)
         os.makedirs(json_save_path, exist_ok=True)
-        print(os.path.join(json_save_path, f'candidates_{str(mode)}_{str(args.C_eval)}_{str(num_total_unorm)}.json'))
         with open(os.path.join(json_save_path, f'candidates_{str(mode)}_{str(args.C_eval)}_{str(num_total_unorm)}.json'), 'w') as f:
             for item in cands:
                 f.write('%s\n' % json.dumps(item))
@@ -692,8 +686,7 @@ def main(args):
                 count+=1
                 print(os.path.join(args.save_dir,each_file_name))
         
-        model.load_state_dict(cpt['sd'], strict= False)
-
+        model.load_state_dict(cpt['sd'])
       
     # Variables for parallel computing
     dp = torch.cuda.device_count() > 1
@@ -971,11 +964,11 @@ def main(args):
                 val_result['num_total_norm'],
                 newline=False))
             if args.dataset == 'zeshel':
-                wandb_log = {"valid(cands {})/unnormalized acc".format(str(args.C_eval)): val_result['acc_unorm'], \
-                    "valid(cands {})/normalized acc".format(str(args.C_eval)): val_result['acc_norm'],\
-                    "valid(cands {})/micro_unnormalized_acc".format(str(args.C_eval)): sum(val_result['num_correct'])/sum(val_result['num_total_unorm']),\
-                    "valid(cands {})/micro_normalized_acc".format(str(args.C_eval)): sum(val_result['num_correct'])/sum(val_result['num_total_norm']),\
-                    "valid(cands {})/mrr".format(str(args.C_eval)): val_result['mrr']}
+                wandb_log = {"valid_mvd(cands {})/unnormalized acc".format(str(args.C_eval)): val_result['acc_unorm'], \
+                    "valid_mvd(cands {})/normalized acc".format(str(args.C_eval)): val_result['acc_norm'],\
+                    "valid_mvd(cands {})/micro_unnormalized_acc".format(str(args.C_eval)): sum(val_result['num_correct'])/sum(val_result['num_total_unorm']),\
+                    "valid_mvd(cands {})/micro_normalized_acc".format(str(args.C_eval)): sum(val_result['num_correct'])/sum(val_result['num_total_norm']),\
+                    "valid_mvd(cands {})/mrr".format(str(args.C_eval)): val_result['mrr']}
             elif args.dataset == 'wikipedia':
                 wandb_log = {"valid(cands {})/unnormalized acc".format(str(args.C_eval)): val_result['acc_unorm'], \
                     "valid(cands {})/normalized acc".format(str(args.C_eval)): val_result['acc_norm'],\
@@ -984,7 +977,7 @@ def main(args):
                 wandb_log = {"valid(cands {})/mrr".format(str(args.C_eval)): val_result['mrr']}
 
             for i in range(len(depth)):
-                wandb_log["valid(cands {})/recall@{}".format(str(args.C_eval), depth[i])] = val_result['recall'][i]
+                wandb_log["valid_mvd(cands {})/recall@{}".format(str(args.C_eval), depth[i])] = val_result['recall'][i]
             print(wandb_log)
             wandb.log(wandb_log)
         # When accuracy is higher than best performance, save the model as 'pytorch_model.bin'
@@ -1143,7 +1136,7 @@ def main(args):
             args.cands_dir = './data/bm25'
             data = load_zeshel_data(args.data, args.cands_dir, macro_eval_mode, args.debug, nearest = args.nearest)
             _, loader_val, loader_test, \
-            num_val_samples, num_test_samples, _ = get_loaders(data, tokenizer, args.L,
+            num_val_samples, num_test_samples = get_loaders(data, tokenizer, args.L,
                                                             args.C, args.B,
                                                             args.num_workers,
                                                             args.inputmark,
@@ -1385,8 +1378,8 @@ def main(args):
 
         print('start evaluation on >64 candidates')
         if args.dataset == 'zeshel':
-            C_eval_list = [64]
-            # C_eval_list = [512]
+            # C_eval_list = [8, 16, 32, 64, 128]
+            C_eval_list = [512]
         elif args.dataset == 'wikipedia':
             C_eval_list = [10, 30, 64, 100]
         else: C_eval_list = list()
@@ -1427,11 +1420,11 @@ def main(args):
                 newline=False))
             if args.dataset == 'zeshel':
                 if args.eval_method == 'micro':
-                    wandb_log = {"test(cands {})/micro_unnormalized acc".format(str(C_eval_elem)): test_result['acc_unorm'], \
+                    wandb_log = {"test_mvd(cands {})/micro_unnormalized acc".format(str(C_eval_elem)): test_result['acc_unorm'], \
                 "test(cands {})/micro_normalized acc".format(str(C_eval_elem)): test_result['acc_norm'],\
                 "test(cands {})/mrr".format(str(C_eval_elem)): test_result['mrr']}
                 else:
-                    wandb_log = {"test(cands {})/unnormalized acc".format(str(C_eval_elem)): test_result['acc_unorm'], \
+                    wandb_log = {"test_mvd(cands {})/unnormalized acc".format(str(C_eval_elem)): test_result['acc_unorm'], \
                 "test(cands {})/normalized acc".format(str(C_eval_elem)): test_result['acc_norm'],\
                 "test(cands {})/micro_unnormalized_acc".format(str(C_eval_elem)): sum(test_result['num_correct'])/sum(test_result['num_total_unorm']),\
                 "test(cands {})/micro_normalized_acc".format(str(C_eval_elem)): sum(test_result['num_correct'])/sum(test_result['num_total_norm']),\
@@ -1443,7 +1436,7 @@ def main(args):
             elif args.dataset == 'msmarco':
                 wandb_log = {"test(cands {})/mrr".format(str(C_eval_elem)): test_result['mrr']}
             for i in range(len(depth)):
-                wandb_log["test(cands {})/recall@{}".format(str(C_eval_elem), depth[i])] = test_result['recall'][i]
+                wandb_log["test_mvd(cands {})/recall@{}".format(str(C_eval_elem), depth[i])] = test_result['recall'][i]
             print(wandb_log)
             wandb.log(wandb_log)
 
@@ -1470,15 +1463,15 @@ def main(args):
                 newline=False))
             if args.dataset == 'zeshel':
                 if args.eval_method == 'micro':
-                    wandb_log = {"valid(cands {})/micro_unnormalized acc".format(str(C_eval_elem)): val_result['acc_unorm'], \
-                    "valid(cands {})/micro_normalized acc".format(str(C_eval_elem)): val_result['acc_norm'],\
-                    "valid(cands {})/mrr".format(str(C_eval_elem)): val_result['mrr']}
+                    wandb_log = {"valid_mvd(cands {})/micro_unnormalized acc".format(str(C_eval_elem)): val_result['acc_unorm'], \
+                    "valid_mvd(cands {})/micro_normalized acc".format(str(C_eval_elem)): val_result['acc_norm'],\
+                    "valid_mvd(cands {})/mrr".format(str(C_eval_elem)): val_result['mrr']}
                 else:
-                    wandb_log = {"valid(cands {})/unnormalized acc".format(str(C_eval_elem)): val_result['acc_unorm'], \
-                    "valid(cands {})/normalized acc".format(str(C_eval_elem)): val_result['acc_norm'],\
-                    "valid(cands {})/micro_unnormalized_acc".format(str(C_eval_elem)): sum(val_result['num_correct'])/sum(val_result['num_total_unorm']),\
-                    "valid(cands {})/micro_normalized_acc".format(str(C_eval_elem)): sum(val_result['num_correct'])/sum(val_result['num_total_norm']),\
-                    "valid(cands {})/mrr".format(str(C_eval_elem)): val_result['mrr']}
+                    wandb_log = {"valid_mvd(cands {})/unnormalized acc".format(str(C_eval_elem)): val_result['acc_unorm'], \
+                    "valid_mvd(cands {})/normalized acc".format(str(C_eval_elem)): val_result['acc_norm'],\
+                    "valid_mvd(cands {})/micro_unnormalized_acc".format(str(C_eval_elem)): sum(val_result['num_correct'])/sum(val_result['num_total_unorm']),\
+                    "valid_mvd(cands {})/micro_normalized_acc".format(str(C_eval_elem)): sum(val_result['num_correct'])/sum(val_result['num_total_norm']),\
+                    "valid_mvd(cands {})/mrr".format(str(C_eval_elem)): val_result['mrr']}
             elif args.dataset == 'wikipedia':
                 wandb_log = {"valid(cands {})/unnormalized acc".format(str(C_eval_elem)): val_result['acc_unorm'], \
                 "valid(cands {})/normalized acc".format(str(C_eval_elem)): val_result['acc_norm'],\
@@ -1487,7 +1480,7 @@ def main(args):
                 wandb_log = {"valid(cands {})/mrr".format(str(C_eval_elem)): val_result['mrr']}
  
             for i in range(len(depth)):
-                wandb_log["valid(cands {})/recall@{}".format(str(C_eval_elem), depth[i])] = val_result['recall'][i]
+                wandb_log["valid_mvd(cands {})/recall@{}".format(str(C_eval_elem), depth[i])] = val_result['recall'][i]
             print(wandb_log)
             wandb.log(wandb_log)
 
@@ -1818,7 +1811,5 @@ if __name__ == '__main__':
         assert args.distill_training
     assert not args.dataset == 'wikipedia' or args.eval_method == 'micro' # if dataset == wikipedia, eval_method is required to be micro
     assert not args.skip_connection or not args.identity_bert
-    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], profile_memory=True) as prof:
-        main(args)
-    print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=20))
-
+    main(args)
+    

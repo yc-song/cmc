@@ -39,6 +39,20 @@ slurm_output/
 *.manifest
 *.spec
 core.*
+bm25_process.py
+candidates_postprocess.py
+evaluate_reranker_64.py
+evaluate_reranker.py
+flops_computation.py
+json_transform.py
+main_reranker_copy.py
+main_reranker_mvd.py
+prerprocess_data.py
+mrr.py
+retriever_copy.py
+scratch.py
+*.swp
+
 # Installer logs
 pip-log.txt
 pip-delete-this-directory.txt

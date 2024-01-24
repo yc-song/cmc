@@ -200,8 +200,9 @@ class BasicDataset(Dataset):
                     if mc['label_document_id'] in samples[1][mc['mention_id']]['candidates'][:self.max_num_candidates]:
                         mentions.append(mc)
             except:
-                print(mc['label_document_id'])
-                print(samples[1][mc['mention_id']]['candidates'][:self.max_num_candidates])
+                print('0:', mc['mention_id'])
+                print('1:', samples[1])
+                print('2:', samples[1][mc['mention_id']]['candidates'][:self.max_num_candidates])
             # mentions = [mc for mc in samples[0] if mc['label_document_id'] in
                         # samples[1][mc['mention_id']]['candidates'][
                         # :self.max_num_candidates]]
