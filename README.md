@@ -1,5 +1,6 @@
 ## requirements
-conda env create --file environment.yml [1] \\
+conda env create --file environment.yml [1] 
+
 Download the public zeshel data [here](https://github.com/lajanugen/zeshel) [2].
 
 
