@@ -367,8 +367,6 @@ def get_all_entity_hiddens(en_loader, model, store_en_hiddens=False,
     all_en_embeds = []
     with torch.no_grad():
         for i, batch in tqdm(enumerate(en_loader), total = len(en_loader)):
-            if i > 10 and debug: 
-                break
             if hasattr(model, 'module'):
                 en_embeds = (
                     model.module.encode(None, None, None, None, batch[0],
@@ -431,7 +429,7 @@ def get_hard_negative(mention_loader, model,
                             model.evaluate_on = True
                             model.candidates_embeds = en_embeds
                         score = model(batch[0], batch[1], None,
-                                    None).detach()
+                                    None)['scores'].detach()
                         scores.append(score)
                     scores = torch.cat(scores, dim=1)
                 if distribution_sampling:

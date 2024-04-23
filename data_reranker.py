@@ -9,7 +9,7 @@ import numpy as np
 from collections import Counter
 from torch.utils.data import Dataset, DataLoader
 from util import Logger as BasicLogger
-from data_retriever import distribution_sample
+from data_retriever import distribution_sample, MentionSet
 from tqdm import tqdm
 import random
 from torch.nn.utils.rnn import pad_sequence
@@ -20,6 +20,199 @@ from torch.nn.utils.rnn import pad_sequence
 #     for i, x in enumerate(batch):
 #         x[i]['label_idx'] = labels_padded[i]
 #     return batch
+
+
+def transform_entities(doc, len_max, tokenizer):  # get all entities token
+    # ids and token masks
+    def get_entity_window(en_page_id):
+        page_id = en_page_id
+        en_title = doc[page_id]['title']
+        en_text = doc[page_id]['text']
+        max_len = len_max - 2  # cls , sep
+        ENT = '[unused2]'
+        en_title_tokens = tokenizer.tokenize(en_title)
+        en_text_tokens = tokenizer.tokenize(en_text)
+        window = (en_title_tokens + [ENT] + en_text_tokens)[:max_len]
+        return window
+    all_entities = list(doc.keys())
+    all_entity_token_ids = [None]*len(all_entities)
+    all_entity_masks = [None]*len(all_entities)
+    for i, page_id in tqdm(enumerate(all_entities), total = len(all_entities)):
+        entity_window = get_entity_window(page_id)
+        entity_dict = tokenizer.encode_plus(entity_window,
+                                            add_special_tokens=True,
+                                            max_length=len_max,
+                                            pad_to_max_length=True,
+                                            truncation=True)
+        all_entity_token_ids[i] = entity_dict['input_ids']
+        all_entity_masks[i] = entity_dict['attention_mask']
+        # all_entity_token_ids.append(entity_dict['input_ids'])
+        # all_entity_masks.append(entity_dict['attention_mask'])
+    all_entity_token_ids = np.array(all_entity_token_ids)
+    all_entity_masks = np.array(all_entity_masks)
+    return all_entity_token_ids, all_entity_masks, all_entities
+
+def load_data(data_dir):
+    """
+
+    :param data_dir
+    :return: mentions, entities,doc
+    """
+    print('begin loading data')
+    mention_path = os.path.join(data_dir, 'mentions')
+    def load_mentions(part):
+        mentions = []
+        domains = set()
+        with open(os.path.join(mention_path, '%s.json' % part)) as f:
+            for line in f:
+                field = json.loads(line)
+                mentions.append(field)
+                domains.add(field['corpus'])
+            
+        return mentions, domains
+    samples_val, val_domain = load_mentions('val')
+    samples_test, test_domain = load_mentions('test')
+
+    def load_entities(domains):
+        """
+
+        :param domains: list of domains
+        :return: all the entities in the domains
+        """
+        doc = {}
+        doc_path = os.path.join(data_dir, 'documents')
+        for domain in domains:
+            with open(os.path.join(doc_path, domain + '.json')) as f:
+                for line in f:
+                    field = json.loads(line)
+                    page_id = field['document_id']
+                    doc[page_id] = field
+        return doc
+    val_doc = load_entities(val_domain)
+    test_doc = load_entities(test_domain)
+
+    return samples_val, samples_test, \
+            val_doc, test_doc
+
+
+def get_all_entity_hiddens(en_loader, model,
+                           en_hidden_path=None, debug = False):
+    """
+    :param en_loader: entity data loader
+    :param model: current model
+    :param store_en_hiddens: store entity hiddens?
+    :param en_hidden_path: entity hidden states store path
+    :return: 
+    """
+    model.eval()
+    with torch.no_grad():
+        all_en_embeds = {}
+
+        for i, batch in tqdm(enumerate(en_loader), total = len(en_loader)):
+            if hasattr(model, 'module'):
+                en_embeds = (
+                    model.module.encode(None, None, None, None, batch[0],
+                                        batch[1])[
+                        2]).detach().cpu()
+            else:
+                en_embeds = (
+                    model.encode(None, None, None, None, batch[0],
+                                 batch[1])[
+                        2]).detach().cpu()
+            for j, key in enumerate(batch[2]):
+                all_en_embeds[key] = en_embeds[j]
+        file_path = os.path.join(en_hidden_path, 'en_hiddens.pt')
+        torch.save(all_en_embeds, file_path)
+    return None
+
+class EntitySet(Dataset):
+    def __init__(self, tokenizer, all_entity_token_ids, all_entity_masks, all_entity_ids):
+        self.tokenizer = tokenizer
+        self.all_entity_token_ids = all_entity_token_ids
+        self.all_entity_masks = all_entity_masks
+        self.all_entity_ids = all_entity_ids
+    def __len__(self):
+        return len(self.all_entity_token_ids)
+
+    def __getitem__(self, index):
+        """
+
+        :param index: The index of mention
+        :return: mention_token_ids,mention_masks,entity_token_ids,entity_masks : 1 X L
+                entity_hard_token_ids, entity_hard_masks: k X L  (k<=10)
+        """
+        # process entity(for in batch training)
+        entity_token_ids = self.all_entity_token_ids[index]
+        entity_masks = self.all_entity_masks[index]
+        entity_id = self.all_entity_ids[index]
+        entity_token_ids = torch.tensor(entity_token_ids).long()
+        entity_masks = torch.tensor(entity_masks).long()
+        return entity_token_ids, entity_masks, entity_id
+
+class Data:
+    def __init__(self, test_doc, tokenizer,
+                 all_test_en_token_ids,
+                 all_test_en_masks, all_test_ids, max_len, test_mention):
+        self.test_doc = test_doc
+        self.tokenizer = tokenizer
+        self.all_test_en_token_ids = all_test_en_token_ids
+        self.all_test_en_masks = all_test_en_masks
+        self.all_test_ids = all_test_ids
+        self.test_men = test_mention
+        self.max_len = max_len
+
+    def get_loaders(self, mention_bsz, entity_bsz, full = False):
+        test_en_set = EntitySet(self.tokenizer, self.all_test_en_token_ids,
+                                self.all_test_en_masks, self.all_test_ids)
+        test_men_set = MentionSet(self.tokenizer, self.test_men, self.test_doc,
+                                self.max_len)
+        test_en_loader = DataLoader(test_en_set, entity_bsz, shuffle=False)
+        test_men_loader = DataLoader(test_men_set, mention_bsz,
+                                    shuffle=False)
+        return  test_en_loader, test_men_loader
+        # else:
+        #     (documents, samples_train,
+        #     samples_val, samples_test) = data
+        #     print('get train loaders')
+        #     dataset_train = FullDataset(documents, samples_train, tokenizer,
+        #                                     max_len, max_num_candidates, True,
+        #                                     indicate_mention_boundaries)
+        #     loader_train = DataLoader(dataset_train, batch_size=batch_size,
+        #                             shuffle=True, num_workers=num_workers)
+
+        #     def help_loader(samples):
+        #         num_samples = len(samples[0])
+        #         dataset = FullDataset(documents, samples, tokenizer,
+        #                                 max_len, max_num_cands_val, False,
+        #                                 indicate_mention_boundaries)
+        #         loader = DataLoader(dataset, batch_size=batch_size,
+        #                             shuffle=False,
+        #                             num_workers=num_workers)
+        #         return loader, num_samples
+
+        #     if macro_eval:
+        #         loader_val = []
+        #         loader_test = []
+        #         val_num_samples = []
+        #         test_num_samples = []
+        #         for sample in samples_val:
+        #             loader, num_samples = help_loader(sample)
+        #             loader_val.append(loader)
+        #             val_num_samples.append(num_samples)
+        #         for sample in samples_test:
+        #             loader, num_samples = help_loader(sample)
+        #             loader_test.append(loader)
+        #             test_num_samples.append(num_samples)
+        #     else:
+        #         loader_val, val_num_samples = help_loader(samples_val)
+        #         loader_test, test_num_samples = help_loader(samples_test)
+
+        #     return (loader_train, loader_val, loader_test,
+        #             val_num_samples, test_num_samples)
+
+
+
+
 
 class BasicDataset(Dataset):
 
@@ -280,7 +473,6 @@ class UnifiedDataset(BasicDataset):
 
 
         candidate_document_ids, label_ids, candidates_scores = self.prepare_candidates(mention, candidates, self.args, self.self_negs_again)
-
         candidates_token_ids = torch.zeros((len(candidate_document_ids),
                                             self.max_len))
         candidates_masks = torch.zeros((len(candidate_document_ids),
@@ -845,6 +1037,7 @@ def get_loaders(data, tokenizer, max_len, max_num_candidates, batch_size,
                 max_num_cands_val,
                 use_full_dataset=True, macro_eval=True, args = None, self_negs_again = False, max_context_len = 32):
     eval_batch_size = batch_size
+    loader_train = None
     if args.eval_batch_size is not None: eval_batch_size = args.eval_batch_size
     if args.dataset == 'zeshel':
         (documents, samples_train,
@@ -1001,7 +1194,7 @@ def load_zeshel_data(data_dir, cands_dir, macro_eval=True, debug = False, scores
         mentions = []
         with open(os.path.join(men_path, '%s.json' % part)) as f:
             for i, line in enumerate(f):
-                if debug and i > 100: break
+                # if debug and i > 100: break
                 field = json.loads(line)
                 if in_domain:
                     if field['corpus'] == domain:

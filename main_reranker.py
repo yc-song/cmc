@@ -4,13 +4,13 @@ import os
 import random
 import torch
 import torch.nn as nn
-from data_reranker import get_loaders, load_zeshel_data, load_msmarco_data, load_wikipedia_data, Logger, preprocess_data
+from data_reranker import get_loaders, transform_entities, load_data, load_zeshel_data, load_msmarco_data, load_wikipedia_data, Logger, preprocess_data
 from datetime import datetime
 from reranker import FullRanker
 from retriever import UnifiedRetriever
 from main_retriever import evaluate
+from data_reranker import get_all_entity_hiddens, Data
 from scipy.stats import rankdata
-from data_retriever import get_all_entity_hiddens, Data
 from transformers import BertTokenizer, BertModel, \
     AdamW, get_linear_schedule_with_warmup, get_constant_schedule
 from tqdm import tqdm
@@ -22,17 +22,16 @@ import json
 import itertools
 import pdb
 import copy
-
-import torchvision.models as models
-from torch.profiler import profile, record_function, ProfilerActivity
-
+import cProfile
+import pstats
+# profiler = cProfile.Profile()
 
 self_negative_methods=[
     'self_fixed_negative',
     'self_mixed_negative',
     'self_negative'
 ]
-depth = [2,4,8,16,32,50,64,200]
+depth = [2,4,8,10,16,30,32,50,64,100,200]
 def set_seed(args):
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -156,8 +155,15 @@ def msmarco_eval(model, loader_eval, num_total_unorm, args = None, mode = None):
             'mrr': mrr}
 
 
-def micro_eval(model, loader_eval, num_total_unorm, args = None, mode = None):
+def micro_eval(model, loader_eval, num_total_unorm, args = None, mode = None, en_hidden_path = None):
     if args.store_reranker_score: assert mode is not None
+    if en_hidden_path is not None:
+        with torch.no_grad():
+            model.evaluate_on = True
+            all_en_embeds = []
+            file_path = os.path.join(en_hidden_path, 'en_hiddens.pt')
+            all_en_embeds = torch.load(file_path)
+            model.candidates_embeds = all_en_embeds
 
     model.eval()
     debug = args.debug
@@ -175,18 +181,22 @@ def micro_eval(model, loader_eval, num_total_unorm, args = None, mode = None):
     if args.distill: cands = []
     with torch.no_grad():
         for step, batch in tqdm(enumerate(loader_eval), total = len(loader_eval)):
-            if debug and step > 50: break
+            # if debug and step > 50: break
             # try:
             # batch["args"] = args
+            # profiler.enable()
             result = model.forward(**batch, args = args)
+            # profiler.disable()
+            # stats = pstats.Stats(profiler).sort_stats('cumulative')
+            # stats.print_stats()
             label_ids = batch["label_idx"]
             if type(result) is dict:
                 preds = result['predictions']
-                loss_total += result['loss'].sum()
+                # loss_total += result['loss'].sum()
                 scores = result['scores']
             else:
                 preds = result[1]
-                loss_total += result[0].sum()
+                # loss_total += result[0].sum()
                 scores = result[2]
             if args.store_reranker_score:
                 for i in range(scores.size(0)):
@@ -262,7 +272,7 @@ def micro_eval(model, loader_eval, num_total_unorm, args = None, mode = None):
         with open(os.path.join(args.cands_dir, 'candidates_%s_w_reranker_score.json' % mode), 'w') as f:
             for item in cands:
                 f.write('%s\n' % json.dumps(item))
-    loss_total /= len(loader_eval)
+    # loss_total /= len(loader_eval)
     model.train()
     acc_norm = num_correct / num_total * 100
     if args.debug: num_total_unorm = num_total
@@ -279,7 +289,7 @@ def micro_eval(model, loader_eval, num_total_unorm, args = None, mode = None):
             'mrr': mrr}
 
 
-def macro_eval(model, val_loaders, num_total_unorm, args = None, mode = 'train'):
+def macro_eval(model, val_loaders, num_total_unorm, args = None, mode = 'train', en_hidden_path = None):
     model.eval()
     assert len(val_loaders) == len(num_total_unorm)
     acc_norm = 0
@@ -301,7 +311,7 @@ def macro_eval(model, val_loaders, num_total_unorm, args = None, mode = 'train')
     for i in tqdm(range(len(val_loaders))):
         val_loader = val_loaders[i]
         num_unorm = num_total_unorm[i]
-        micro_results = micro_eval(model, val_loader, num_unorm, args = args, mode = mode)
+        micro_results = micro_eval(model, val_loader, num_unorm, args = args, mode = mode, en_hidden_path = en_hidden_path)
         print(micro_results)
         acc_norm += micro_results['acc_norm']
         acc_unorm += micro_results['acc_unorm']
@@ -582,6 +592,14 @@ def main(args):
             attention_type = 'mlp'
             num_mention_vecs = 1
             num_entity_vecs = 1
+        elif args.type_model == 'deformer':
+            num_mention_vecs = 1
+            num_entity_vecs = 1
+            attention_type = 'deformer'
+        elif args.type_model == 'mixencoder':
+            num_mention_vecs = 1
+            num_entity_vecs = 1
+            attention_type = 'mixencoder'
         else:
             num_mention_vecs = args.num_mention_vecs
             num_entity_vecs = args.num_entity_vecs
@@ -642,8 +660,6 @@ def main(args):
                 else torch.load(args.model, map_location=torch.device('cpu'))
                 modified_state_dict = OrderedDict()
                 # Change dict keys for loading model parameter
-                modified_state_dict = OrderedDict()
-                # Change dict keys for loading model parameter
                 position_ids = ["encoder.embeddings.position_ids"]
 
                 for k, v in package.items():
@@ -655,6 +671,20 @@ def main(args):
                     if name is not None:
                         modified_state_dict[name] = v
                 model.load_state_dict(modified_state_dict, strict = False)
+            elif args.type_model == 'mixencoder':
+                # package = torch.load(args.model) if device.type == 'cuda' \
+                # else torch.load(args.model, map_location=torch.device('cpu'))
+                package = torch.load(args.model, map_location=torch.device('cpu'))
+
+                modified_state_dict = OrderedDict()
+                # Change dict keys for loading model parameter
+                for k, v in package.items():
+                    name = None
+                    if k.startswith('cand_encoder'):
+                        name = k.replace('cand_encoder.bert_model.', '')
+                    if name is not None:
+                        modified_state_dict[name] = v
+                model.mixencoder.bert_model.load_state_dict(modified_state_dict, strict = False)
             else:
                 package = torch.load(args.model) if device.type == 'cuda' \
                 else torch.load(args.model, map_location=torch.device('cpu'))
@@ -875,6 +905,42 @@ def main(args):
         if args.test_at_first:
             if args.dataset == 'msmarco':
                 val_result = msmarco_eval(model, loader_val, num_val_samples, args)
+            elif args.tfidf:
+                args.cands_dir_previous = args.cands_dir
+                args.cands_dir = './data/bm25'
+                data = load_zeshel_data(args.data, args.cands_dir, macro_eval_mode, args.debug, nearest = args.nearest)
+                _, loader_val, loader_test, \
+                num_val_samples, num_test_samples = get_loaders(data, tokenizer, args.L,
+                                                                args.C, args.B,
+                                                                args.num_workers,
+                                                                args.inputmark,
+                                                                args.C_eval,
+                                                                use_full_dataset,
+                                                                macro_eval_mode, args = args)
+
+
+                print('start evaluation on test set')
+
+                if args.eval_method == 'micro':
+                    test_result = micro_eval(model, loader_test, num_test_samples, args, mode = 'test')
+                elif args.eval_method == 'macro':
+                    test_result = macro_eval(model, loader_test, num_test_samples, args, mode = 'test')
+
+                logger.log('\nDone training | training time {:s} | '
+                        'test acc unormalized {:8.4f} ({}/{})|'
+                        'test acc normalized {:8.4f} ({}/{})'.format(str(
+                datetime.now() - start_time),
+                test_result['acc_unorm'],
+                test_result['num_correct'],
+                num_test_samples,
+                test_result['acc_norm'],
+                test_result['num_correct'],
+                test_result['num_total_norm']))
+
+                wandb.log({"BM25_test_unnormalized acc": test_result['acc_unorm'], "BM25_test_normalized acc": test_result['acc_norm']})
+                raise('BM25 evaluation finished')
+
+  
             else:
                 if args.eval_method == 'micro':
                     val_result = micro_eval(model, loader_val, num_val_samples, args)
@@ -1133,7 +1199,7 @@ def main(args):
                         if 'extend_multi.' in k:
                             k = k.replace('extend_multi.', 'extend_multi_')
                         modified_state_dict[k] = v
-                    model.load_state_dict(modified_state_dict)
+                    model.load_state_dict(modified_state_dict, strict = False)
         if args.store_reranker_score:
             micro_eval(model, loader_train, num_val_samples, args, mode = 'train')
 
@@ -1143,7 +1209,7 @@ def main(args):
             args.cands_dir = './data/bm25'
             data = load_zeshel_data(args.data, args.cands_dir, macro_eval_mode, args.debug, nearest = args.nearest)
             _, loader_val, loader_test, \
-            num_val_samples, num_test_samples, _ = get_loaders(data, tokenizer, args.L,
+            num_val_samples, num_test_samples = get_loaders(data, tokenizer, args.L,
                                                             args.C, args.B,
                                                             args.num_workers,
                                                             args.inputmark,
@@ -1184,28 +1250,11 @@ def main(args):
             # wandb.log(wandb_log)
 
             print('start evaluation on test set')
-            if loader_test is None:                
-                loaders = get_loaders(data, tokenizer, args.L,
-                                                                args.C, args.B,
-                                                                args.num_workers,
-                                                                args.inputmark,
-                                                                args.C_eval,
-                                                                use_full_dataset,
-                                                                macro_eval_mode, args = args)
-                loader_test = loaders[2]
-                num_test_samples = loaders[4]
-                if args.dataset == 'wikipedia':
-                    loader_test_2 = loaders[5]
-                    loader_test_3 = loaders[6]
-                    num_test_samples_2 = loaders[7] 
-                    num_test_samples_3 = loaders[8]
-            if args.dataset == 'msmarco':
-                test_result = msmarco_eval(model, loader_test, num_test_samples, args, mode = 'test')
-            else:
-                if args.eval_method == 'micro':
-                    test_result = micro_eval(model, loader_test, num_test_samples, args, mode = 'test')
-                elif args.eval_method == 'macro':
-                    test_result = macro_eval(model, loader_test, num_test_samples, args, mode = 'test')
+            if args.eval_method == 'micro':
+                test_result = micro_eval(model, loader_test, num_test_samples, args, mode = 'test')
+            elif args.eval_method == 'macro':
+                test_result = macro_eval(model, loader_test, num_test_samples, args, mode = 'test')
+
 
             logger.log('\nDone training | training time {:s} | '
                     'test acc unormalized {:8.4f} ({}/{})|'
@@ -1388,8 +1437,53 @@ def main(args):
             C_eval_list = [64]
             # C_eval_list = [512]
         elif args.dataset == 'wikipedia':
-            C_eval_list = [10, 30, 64, 100]
+            C_eval_list = [64]
         else: C_eval_list = list()
+        en_hidden_path = None
+        if args.too_large:
+            entity_path = "./data/entities_reranker"
+            if not os.path.exists(entity_path):
+                os.makedirs(entity_path)
+            en_hidden_path ='./data/{}/{}/'.format(args.type_model, run.id)
+            if not os.path.exists(en_hidden_path):
+                os.makedirs(en_hidden_path)
+            try: 
+                logger.log('loading samples')
+                samples_test = torch.load(entity_path+"/samples_test.pt")
+                test_doc = torch.load(entity_path+"/test_doc.pt")
+
+            except:
+                samples_val, samples_test, val_doc, test_doc = load_data(args.data_dir)
+                logger.log('failed loading samples')
+                torch.save(samples_test, entity_path+"/samples_test.pt")
+                torch.save(test_doc, entity_path+"/test_doc.pt")
+
+            try: 
+                logger.log('loading test entities')
+                all_test_entity_token_ids = torch.load(entity_path+"/all_test_entity_token_ids.pt")
+                all_test_masks = torch.load(entity_path+"/all_test_masks.pt")
+                all_test_ids = torch.load(entity_path+"/all_test_ids.pt")
+
+            except:
+                logger.log('failed to load test entities')
+                all_test_entity_token_ids, all_test_masks, all_test_ids = transform_entities(test_doc,
+                                                                                args.max_context_len,
+                                                                                tokenizer)
+                logger.log("Saving val and test entities to file ")
+                torch.save(all_test_entity_token_ids, entity_path+"/all_test_entity_token_ids.pt")
+                torch.save(all_test_masks, entity_path+"/all_test_masks.pt")
+                torch.save(all_test_ids, entity_path+"/all_test_ids.pt")
+
+
+            data_entities = Data( test_doc, tokenizer,
+            all_test_entity_token_ids, all_test_masks, all_test_ids, args.max_context_len, samples_test)
+            test_en_loader, test_men_loader = data_entities.get_loaders(args.mention_bsz,
+                                                            args.entity_bsz, False)
+            try: 
+                all_test_cands_embeds = torch.load(en_hidden_path+"en_hiddens.pt")
+            except:
+                all_test_cands_embeds = get_all_entity_hiddens(test_en_loader, model,
+                                                en_hidden_path)        
         for C_eval_elem in C_eval_list:
             print("C_eval", C_eval_elem)
             args.C_eval = C_eval_elem
@@ -1413,7 +1507,7 @@ def main(args):
             if args.eval_method == 'micro':
                 test_result = micro_eval(model, loader_test, num_test_samples, args, mode = 'test')
             elif args.eval_method == 'macro':
-                test_result = macro_eval(model, loader_test, num_test_samples, args, mode = 'test')
+                test_result = macro_eval(model, loader_test, num_test_samples, args, mode = 'test', en_hidden_path = en_hidden_path)
             print('C_eval: {}'.format(C_eval_elem))
             print(test_result)
             print('test acc unormalized  {:8.4f} ({}/{})|'
@@ -1436,7 +1530,7 @@ def main(args):
                 "test(cands {})/micro_unnormalized_acc".format(str(C_eval_elem)): sum(test_result['num_correct'])/sum(test_result['num_total_unorm']),\
                 "test(cands {})/micro_normalized_acc".format(str(C_eval_elem)): sum(test_result['num_correct'])/sum(test_result['num_total_norm']),\
                 "test(cands {})/mrr".format(str(C_eval_elem)): test_result['mrr']}
-            elif args.dataset == 'wikipeida':
+            elif args.dataset == 'wikipedia':
                 wandb_log = {"test(cands {})/unnormalized acc".format(str(C_eval_elem)): test_result['acc_unorm'], \
                 "test(cands {})/normalized acc".format(str(C_eval_elem)): test_result['acc_norm'],\
                 "test(cands {})/mrr".format(str(C_eval_elem)): test_result['mrr']}
@@ -1447,58 +1541,58 @@ def main(args):
             print(wandb_log)
             wandb.log(wandb_log)
 
-            if args.distill:
-                train_result = micro_eval(model, loader_train, num_val_samples, args, mode = "train")
-                print(train_result)
-            if args.dataset == 'msmarco':
-                val_result = msmarco_eval(model, loader_val, num_val_samples, args, mode = 'valid')
-            else:
-                if args.eval_method == 'micro':
-                    val_result = micro_eval(model, loader_val, num_val_samples, args, mode = 'valid')
-                elif args.eval_method == 'macro':
-                    val_result = macro_eval(model, loader_val, num_val_samples, args, mode = 'valid')
-            print('C_eval: {}'.format(C_eval_elem))
-            print(val_result)
-            print('val acc unormalized  {:8.4f} ({}/{})|'
-                    'val acc normalized  {:8.4f} ({}/{})|'.format(
-                val_result['acc_unorm'],
-                val_result['num_correct'],
-                num_val_samples,
-                val_result['acc_norm'],
-                val_result['num_correct'],
-                val_result['num_total_norm'],
-                newline=False))
-            if args.dataset == 'zeshel':
-                if args.eval_method == 'micro':
-                    wandb_log = {"valid(cands {})/micro_unnormalized acc".format(str(C_eval_elem)): val_result['acc_unorm'], \
-                    "valid(cands {})/micro_normalized acc".format(str(C_eval_elem)): val_result['acc_norm'],\
-                    "valid(cands {})/mrr".format(str(C_eval_elem)): val_result['mrr']}
-                else:
-                    wandb_log = {"valid(cands {})/unnormalized acc".format(str(C_eval_elem)): val_result['acc_unorm'], \
-                    "valid(cands {})/normalized acc".format(str(C_eval_elem)): val_result['acc_norm'],\
-                    "valid(cands {})/micro_unnormalized_acc".format(str(C_eval_elem)): sum(val_result['num_correct'])/sum(val_result['num_total_unorm']),\
-                    "valid(cands {})/micro_normalized_acc".format(str(C_eval_elem)): sum(val_result['num_correct'])/sum(val_result['num_total_norm']),\
-                    "valid(cands {})/mrr".format(str(C_eval_elem)): val_result['mrr']}
-            elif args.dataset == 'wikipedia':
-                wandb_log = {"valid(cands {})/unnormalized acc".format(str(C_eval_elem)): val_result['acc_unorm'], \
-                "valid(cands {})/normalized acc".format(str(C_eval_elem)): val_result['acc_norm'],\
-                "valid(cands {})/mrr".format(str(C_eval_elem)): val_result['mrr']}
-            elif args.dataset == 'msmarco':
-                wandb_log = {"valid(cands {})/mrr".format(str(C_eval_elem)): val_result['mrr']}
+            # if args.distill:
+            #     train_result = micro_eval(model, loader_train, num_val_samples, args, mode = "train")
+            #     print(train_result)
+            # if args.dataset == 'msmarco':
+            #     val_result = msmarco_eval(model, loader_val, num_val_samples, args, mode = 'valid')
+            # else:
+            #     if args.eval_method == 'micro':
+            #         val_result = micro_eval(model, loader_val, num_val_samples, args, mode = 'valid')
+            #     elif args.eval_method == 'macro':
+            #         val_result = macro_eval(model, loader_val, num_val_samples, args, mode = 'valid')
+            # print('C_eval: {}'.format(C_eval_elem))
+            # print(val_result)
+            # print('val acc unormalized  {:8.4f} ({}/{})|'
+            #         'val acc normalized  {:8.4f} ({}/{})|'.format(
+            #     val_result['acc_unorm'],
+            #     val_result['num_correct'],
+            #     num_val_samples,
+            #     val_result['acc_norm'],
+            #     val_result['num_correct'],
+            #     val_result['num_total_norm'],
+            #     newline=False))
+            # if args.dataset == 'zeshel':
+            #     if args.eval_method == 'micro':
+            #         wandb_log = {"valid(cands {})/micro_unnormalized acc".format(str(C_eval_elem)): val_result['acc_unorm'], \
+            #         "valid(cands {})/micro_normalized acc".format(str(C_eval_elem)): val_result['acc_norm'],\
+            #         "valid(cands {})/mrr".format(str(C_eval_elem)): val_result['mrr']}
+            #     else:
+            #         wandb_log = {"valid(cands {})/unnormalized acc".format(str(C_eval_elem)): val_result['acc_unorm'], \
+            #         "valid(cands {})/normalized acc".format(str(C_eval_elem)): val_result['acc_norm'],\
+            #         "valid(cands {})/micro_unnormalized_acc".format(str(C_eval_elem)): sum(val_result['num_correct'])/sum(val_result['num_total_unorm']),\
+            #         "valid(cands {})/micro_normalized_acc".format(str(C_eval_elem)): sum(val_result['num_correct'])/sum(val_result['num_total_norm']),\
+            #         "valid(cands {})/mrr".format(str(C_eval_elem)): val_result['mrr']}
+            # elif args.dataset == 'wikipedia':
+            #     wandb_log = {"valid(cands {})/unnormalized acc".format(str(C_eval_elem)): val_result['acc_unorm'], \
+            #     "valid(cands {})/normalized acc".format(str(C_eval_elem)): val_result['acc_norm'],\
+            #     "valid(cands {})/mrr".format(str(C_eval_elem)): val_result['mrr']}
+            # elif args.dataset == 'msmarco':
+            #     wandb_log = {"valid(cands {})/mrr".format(str(C_eval_elem)): val_result['mrr']}
  
-            for i in range(len(depth)):
-                wandb_log["valid(cands {})/recall@{}".format(str(C_eval_elem), depth[i])] = val_result['recall'][i]
-            print(wandb_log)
-            wandb.log(wandb_log)
+            # for i in range(len(depth)):
+            #     wandb_log["valid(cands {})/recall@{}".format(str(C_eval_elem), depth[i])] = val_result['recall'][i]
+            # print(wandb_log)
+            # wandb.log(wandb_log)
 
 
 
             if args.dataset == 'wikipedia':
                 print('Evaluation over clueweb')
                 if args.eval_method == 'micro':
-                    test_result = micro_eval(model, loader_test_2, num_test_samples, args, mode = 'test')
+                    test_result = micro_eval(model, loader_test_2, num_test_samples_2, args, mode = 'test')
                 elif args.eval_method == 'macro':
-                    test_result = macro_eval(model, loader_test_2, num_test_samples, args, mode = 'test')
+                    test_result = macro_eval(model, loader_test_2, num_test_samples_2, args, mode = 'test')
                 print('C_eval: {}'.format(C_eval_elem))
                 print(test_result)
                 print('test acc unormalized  {:8.4f} ({}/{})|'
@@ -1512,17 +1606,15 @@ def main(args):
                     newline=False))
                 wandb_log = {"test (clueweb) (cands {})/unnormalized acc".format(str(C_eval_elem)): test_result['acc_unorm'], \
                     "test (clueweb) (cands {})/normalized acc".format(str(C_eval_elem)): test_result['acc_norm'],\
-                    "test (clueweb) (cands {})/micro_unnormalized_acc".format(str(C_eval_elem)): sum(test_result['num_correct'])/sum(test_result['num_total_unorm']),\
-                    "test (clueweb) (cands {})/micro_normalized_acc".format(str(C_eval_elem)): sum(test_result['num_correct'])/sum(test_result['num_total_norm']),\
                     "test (clueweb) (cands {})/mrr".format(str(C_eval_elem)): test_result['mrr']}
                 for i in range(len(depth)):
                     wandb_log["test (clueweb) (cands {})/recall@{}".format(str(C_eval_elem), depth[i])] = test_result['recall'][i]
                 print(wandb_log)
                 wandb.log(wandb_log)
                 if args.eval_method == 'micro':
-                    test_result = micro_eval(model, loader_test_3, num_test_samples, args, mode = 'test')
+                    test_result = micro_eval(model, loader_test_3, num_test_samples_3, args, mode = 'test')
                 elif args.eval_method == 'macro':
-                    test_result = macro_eval(model, loader_test_3, num_test_samples, args, mode = 'test')
+                    test_result = macro_eval(model, loader_test_3, num_test_samples_3, args, mode = 'test')
 
                 logger.log('\n'
                         'test (msnbc) acc unormalized {:8.4f} ({}/{})|'
@@ -1536,12 +1628,11 @@ def main(args):
 
                 wandb_log = {"test (msnbc) (cands {})/unnormalized acc".format(str(C_eval_elem)): test_result['acc_unorm'], \
                     "test (msnbc) (cands {})/normalized acc".format(str(C_eval_elem)): test_result['acc_norm'],\
-                    "test (msnbc) (cands {})/micro_unnormalized_acc".format(str(C_eval_elem)): sum(test_result['num_correct'])/sum(test_result['num_total_unorm']),\
-                    "test (msnbc) (cands {})/micro_normalized_acc".format(str(C_eval_elem)): sum(test_result['num_correct'])/sum(test_result['num_total_norm']),\
                     "test (msnbc) (cands {})/mrr".format(str(C_eval_elem)): test_result['mrr']}
                 for i in range(len(depth)):
                     wandb_log["test (msnbc) (cands {})/recall@{}".format(str(C_eval_elem), depth[i])] = test_result['recall'][i]
-
+                print(wandb_log)
+                wandb.log(wandb_log)
 
 
         if args.type_model != "full":
@@ -1583,7 +1674,8 @@ def main(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-
+    parser.add_argument('--data_dir', type=str,
+                        help='the  data directory')
     parser.add_argument('--model', type=str,default='./models/reranker',
                         help='model path')
     parser.add_argument('--model_top', type=str,
@@ -1676,7 +1768,9 @@ if __name__ == '__main__':
                                  'full',
                                  'extend_multi',
                                  'extend_multi_dot',
-                                 'mlp_with_som'],
+                                 'mlp_with_som',
+                                 'deformer',
+                                 'mixencoder'],
                         help='the type of model')
     parser.add_argument('--debug', action = 'store_true',
                         help='debugging mode')
@@ -1818,7 +1912,7 @@ if __name__ == '__main__':
         assert args.distill_training
     assert not args.dataset == 'wikipedia' or args.eval_method == 'micro' # if dataset == wikipedia, eval_method is required to be micro
     assert not args.skip_connection or not args.identity_bert
-    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], profile_memory=True) as prof:
-        main(args)
-    print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=20))
+    # with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], profile_memory=True) as prof:
+    main(args)
+    # print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=20))
 

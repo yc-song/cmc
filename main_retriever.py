@@ -33,16 +33,16 @@ def configure_optimizer(args, model, num_train_examples):
     optimizer_grouped_parameters = [
         {'params': [p for n, p in model.named_parameters()
                     if not any(nd in n for nd in no_decay)],
-         'weight_decay': args.weight_decay},
+        'weight_decay': args.weight_decay},
         {'params': [p for n, p in model.named_parameters()
                     if any(nd in n for nd in no_decay)],
-         'weight_decay': 0.0}
+        'weight_decay': 0.0}
     ]
     optimizer = AdamW(optimizer_grouped_parameters, lr=args.lr,
-                      eps=args.adam_epsilon)
+                    eps=args.adam_epsilon)
 
     num_train_steps = int(num_train_examples / args.B /
-                          args.gradient_accumulation_steps * args.epochs)
+                        args.gradient_accumulation_steps * args.epochs)
     num_warmup_steps = int(num_train_steps * args.warmup_proportion)
 
     scheduler = get_linear_schedule_with_warmup(
@@ -55,7 +55,7 @@ def configure_optimizer(args, model, num_train_examples):
 def configure_optimizer_simple(args, model, num_train_examples):
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     num_train_steps = int(num_train_examples / args.B /
-                          args.gradient_accumulation_steps * args.epochs)
+                        args.gradient_accumulation_steps * args.epochs)
     num_warmup_steps = 0
 
     scheduler = get_constant_schedule(optimizer)
@@ -64,8 +64,8 @@ def configure_optimizer_simple(args, model, num_train_examples):
 
 
 def evaluate(mention_loader, model, all_candidates_embeds, k, device,
-             len_en_loader,
-             too_large=False, en_hidden_path=None):
+            len_en_loader,
+            too_large=False, en_hidden_path=None, load_hiddens = False):
     model.eval()
     if not too_large:
         if hasattr(model, 'module'):
@@ -80,14 +80,33 @@ def evaluate(mention_loader, model, all_candidates_embeds, k, device,
     r_k = [0 for d in depth]
     acc = 0
     with torch.no_grad():
+        if load_hiddens:
+            all_en_embeds = []
+            for j in tqdm(range(len_en_loader), total = len_en_loader):
+                file_path = os.path.join(en_hidden_path,
+                                            'en_hiddens_%s.pt' % j)
+                en_embeds = torch.load(file_path)
+                all_en_embeds.append(en_embeds)
+            all_en_embeds = torch.cat(all_en_embeds, dim = 0)
         for i, batch in tqdm(enumerate(mention_loader), total = len(mention_loader)):
-            if not too_large:
+            if load_hiddens:
+                
+                if hasattr(model, 'module'):
+                    model.module.evaluate_on = True
+                    model.module.candidates_embeds = all_en_embeds
+                else:
+                    model.evaluate_on = True
+                    model.candidates_embeds = all_en_embeds
+                scores = model(batch[0], batch[1], None,
+                                None)['scores'].detach()
+            elif not too_large:
                 scores = model(batch[0], batch[1], None, None)
+                
             else:
                 scores = []
                 for j in tqdm(range(len_en_loader), total = len_en_loader):
                     file_path = os.path.join(en_hidden_path,
-                                             'en_hiddens_%s.pt' % j)
+                                            'en_hiddens_%s.pt' % j)
                     en_embeds = torch.load(file_path)
                     if hasattr(model, 'module'):
                         model.module.evaluate_on = True
@@ -96,7 +115,7 @@ def evaluate(mention_loader, model, all_candidates_embeds, k, device,
                         model.evaluate_on = True
                         model.candidates_embeds = en_embeds
                     score = model(batch[0], batch[1], None,
-                                  None)['scores'].detach()
+                                None)['scores'].detach()
                     scores.append(score)
                 scores = torch.cat(scores, dim=1)
             labels = batch[2].to(device)
@@ -133,6 +152,9 @@ def main(args):
     # configure logger
     args.save_dir = '{}/{}/{}/'.format(args.save_dir, args.type_model, run.id)
     args.en_hidden_path = './data/{}/{}/'.format(args.type_model, run.id)
+    if args.anncur:
+        args.save_dir = '{}/{}/{}/'.format(args.save_dir, args.type_model, 'anncur')
+        args.en_hidden_path = './data/{}/{}/'.format(args.type_model, 'anncur')
     if not os.path.exists(args.save_dir):
         os.makedirs(args.save_dir)
     if not os.path.exists(args.en_hidden_path):
@@ -197,6 +219,8 @@ def main(args):
         attention_type = 'extend_multi'
     elif args.type_model == 'extend_multi_dot':
         attention_type = 'extend_multi_dot'
+        num_mention_vecs = args.num_mention_vecs
+        num_entity_vecs = 1
     else:
         attention_type = 'hard_attention'
     if args.type_model == 'dual':
@@ -218,7 +242,11 @@ def main(args):
                             args.mention_use_codes, args.entity_use_codes,
                             attention_type, None, False, num_heads = args.num_heads, num_layers = args.num_layers, args = args)
     if args.resume_training:
-        cpt = torch.load(args.save_dir+"pytorch_model.bin") if device.type == 'cuda' \
+        if args.anncur:
+            cpt = torch.load(args.save_dir+"dual_encoder_zeshel.ckpt") if device.type == 'cuda' \
+                else torch.load(args.save_dir+"dual_encoder_zeshel.ckpt", map_location=torch.device('cpu'))
+        else:
+            cpt = torch.load(args.save_dir+"pytorch_model.bin") if device.type == 'cuda' \
             else torch.load(args.save_dir+"pytorch_model.bin", map_location=torch.device('cpu'))
         model.load_state_dict(cpt['sd'])
     dp = torch.cuda.device_count() > 1
@@ -235,7 +263,7 @@ def main(args):
             elif k.startswith('model.label_encoder'):
                 name = k.replace('model.label_encoder.bert_model', 'entity_encoder')
             modified_state_dict[name] = v
-        model.load_state_dict(modified_state_dict)
+        model.load_state_dict(modified_state_dict, strict = False)
     elif args.blink:
         package = torch.load(args.model) if device.type == 'cuda' \
         else torch.load(args.model, map_location=torch.device('cpu'))
@@ -287,7 +315,7 @@ def main(args):
             retriever_model = nn.DataParallel(retriever_model)
     if dp:
         logger.log('Data parallel across {:d} GPUs {:s}'
-                   ''.format(len(args.gpus.split(',')), args.gpus))
+                ''.format(len(args.gpus.split(',')), args.gpus))
         model = nn.DataParallel(model)
     
     model.to(device)
@@ -350,7 +378,7 @@ def main(args):
                 samples_train, samples_val, samples_test)
     train_en_loader, val_en_loader, test_en_loader, train_men_loader, \
     val_men_loader, test_men_loader = data.get_loaders(args.mention_bsz,
-                                                       args.entity_bsz, False)
+                                                    args.entity_bsz, False)
     model.train()
 
     # configure optimizer
@@ -370,7 +398,7 @@ def main(args):
     logger.log('# epochs: {:d}'.format(args.epochs))
     logger.log(' batch size: {:d}'.format(args.B))
     logger.log(' gradient accumulation steps {:d}'
-               ''.format(args.gradient_accumulation_steps))
+            ''.format(args.gradient_accumulation_steps))
     logger.log(
         ' effective training batch size with accumulation: {:d}'
         ''.format(args.B * args.gradient_accumulation_steps))
@@ -390,6 +418,17 @@ def main(args):
     if args.resume_training:
         start_epoch = cpt['epoch'] + 1
     print("epochs")
+    epoch = 0
+    torch.save({'opt': args,
+                        'sd': model.module.state_dict() if dp else model.state_dict(),
+                        'perf': best_val_perf, 'epoch': epoch,
+                        'opt_sd': optimizer.state_dict(),
+                        'scheduler_sd': scheduler.state_dict(),
+                        'tr_loss': tr_loss, 'step_num': step_num,
+                        'logging_loss': logging_loss},
+                    os.path.join(args.save_dir, "pytorch_model.bin"))
+
+
     for epoch in tqdm(range(start_epoch, args.epochs + 1)):
         logger.log('\nEpoch {:d}'.format(epoch))
         if args.type_cands == 'hard_adjusted_negative':
@@ -437,24 +476,24 @@ def main(args):
                                             adjust_logits, args.smoothing_value, debug = args.debug)
 
         train_set = ZeshelDataset(tokenizer, samples_train, train_doc,
-                                  args.max_len,
-                                  candidates, device, num_rands,
-                                  args.type_cands,
-                                  all_train_entity_token_ids,
-                                  all_train_masks, args)
+                                args.max_len,
+                                candidates, device, num_rands,
+                                args.type_cands,
+                                all_train_entity_token_ids,
+                                all_train_masks, args)
         
         train_loader = DataLoader(train_set, args.B, shuffle=True,
-                                  drop_last=False)
+                                drop_last=False)
         if args.retriever_path:
             retriever_train_set = ZeshelDataset(tokenizer, samples_train, train_doc,
-                                  args.max_len,
-                                  candidates, device, num_rands,
-                                  args.type_cands,
-                                  all_train_entity_token_ids,
-                                  all_train_masks, args, True)
+                                args.max_len,
+                                candidates, device, num_rands,
+                                args.type_cands,
+                                all_train_entity_token_ids,
+                                all_train_masks, args, True)
         
             retriever_train_loader = DataLoader(train_set, args.B, shuffle=True,
-                                  drop_last=False)
+                                drop_last=False)
         logger.log("Start Training")
 
         for step, batch in tqdm(enumerate(train_loader), total = len(train_loader)):
@@ -479,11 +518,11 @@ def main(args):
                 if step_num % args.logging_steps == 0:
                     avg_loss = (tr_loss - logging_loss) / args.logging_steps
                     logger.log('Step {:10d}/{:d} | Epoch {:3d} | '
-                               'Batch {:5d}/{:5d} | '
-                               'Average Loss {:8.4f}'
-                               ''.format(step_num, num_train_steps,
-                                         epoch, step + 1,
-                                         len(train_loader), avg_loss))
+                            'Batch {:5d}/{:5d} | '
+                            'Average Loss {:8.4f}'
+                            ''.format(step_num, num_train_steps,
+                                        epoch, step + 1,
+                                        len(train_loader), avg_loss))
                     logging_loss = tr_loss
                     wandb.log({"loss": avg_loss, "epoch": epoch})
         if args.energy_model:
@@ -499,9 +538,9 @@ def main(args):
                             args.k, device, len(val_en_loader),
                             args.store_en_hiddens, args.en_hidden_path)
     
-        logger.log('Done with epoch {:3d} | '
-                'validation recall {:8.4f}'
-                '|validation accuracy {:8.4f}'.format(
+        logger.log('Done with epoch {} | '
+                'validation recall {}'
+                '|validation accuracy {}'.format(
             epoch,
             eval_result[0],
             eval_result[1]
@@ -537,7 +576,7 @@ def main(args):
                         'scheduler_sd': scheduler.state_dict(),
                         'tr_loss': tr_loss, 'step_num': step_num,
                         'logging_loss': logging_loss},
-                       os.path.join(args.save_dir, "pytorch_model.bin"))
+                    os.path.join(args.save_dir, "pytorch_model.bin"))
 
 
         # update dataset and dataloader
@@ -545,24 +584,26 @@ def main(args):
 
         # torch.cuda.empty_cache()
     # test model on test dataset
-
-    package = torch.load(os.path.join(args.save_dir, "pytorch_model.bin")) if device.type == 'cuda' \
-        else torch.load(os.path.join(args.save_dir, "pytorch_model.bin"), map_location=torch.device('cpu'))
-    new_state_dict = package['sd']
-    # encoder=MLPEncoder(args.max_len)
-    if args.pre_model == 'Bert':
-        encoder = BertModel.from_pretrained('bert-base-uncased')
-    elif args.pre_model == 'Roberta':
-        encoder = RobertaModel.from_pretrained('roberta-base')
+    if args.anncur:
+        pass
     else:
-        raise ValueError('wrong encoder type')
-    model = UnifiedRetriever(encoder, device, num_mention_vecs, num_entity_vecs,
-                             args.mention_use_codes, args.entity_use_codes,
-                             attention_type, args=args)
-    model.load_state_dict(new_state_dict)
+        package = torch.load(os.path.join(args.save_dir, "pytorch_model.bin")) if device.type == 'cuda' \
+            else torch.load(os.path.join(args.save_dir, "pytorch_model.bin"), map_location=torch.device('cpu'))
+        new_state_dict = package['sd']
+        # encoder=MLPEncoder(args.max_len)
+        if args.pre_model == 'Bert':
+            encoder = BertModel.from_pretrained('bert-base-uncased')
+        elif args.pre_model == 'Roberta':
+            encoder = RobertaModel.from_pretrained('roberta-base')
+        else:
+            raise ValueError('wrong encoder type')
+        model = UnifiedRetriever(encoder, device, num_mention_vecs, num_entity_vecs,
+                                args.mention_use_codes, args.entity_use_codes,
+                                attention_type, args=args)
+        model.load_state_dict(new_state_dict)
     if dp:
         logger.log('Data parallel across {:d} GPUs {:s}'
-                   ''.format(len(args.gpus.split(',')), args.gpus))
+                ''.format(len(args.gpus.split(',')), args.gpus))
         model = nn.DataParallel(model)
     model.to(device)
     model.eval()
@@ -587,12 +628,14 @@ def main(args):
     # ))
     # wandb.log({"best_val_recall": eval_result[0], "best_val_accuracy": eval_result[1]})
     print("***test_result***")
-    all_test_cands_embeds = get_all_entity_hiddens(test_en_loader, model,
+    if not args.load_en_hiddens:
+        all_test_cands_embeds = get_all_entity_hiddens(test_en_loader, model,
                                                 args.store_en_hiddens,
                                                 args.en_hidden_path)
+    else: all_test_cands_embeds = None
     test_result = evaluate(test_men_loader, model, all_test_cands_embeds,
                         args.k, device, len(test_en_loader),
-                        args.store_en_hiddens, args.en_hidden_path)
+                        args.store_en_hiddens, args.en_hidden_path, args.load_en_hiddens)
     print(test_result)
     wandb.log({"test_accuracy": test_result[1]})
     for i in range(len(depth)):
@@ -603,179 +646,275 @@ def main(args):
     #     test_result = macro_eval(model, loader_test, num_test_samples)
 
 
-    logger.log('\nDone training | training time {:s} | '
-               'test acc unormalized {:8.4f} ({}/{})|'
-               'test acc normalized {:8.4f} ({}/{})'.format(str(
-        datetime.now() - start_time),
-        test_result['acc_unorm'],
-        test_result['num_correct'],
-        num_test_samples,
-        test_result['acc_norm'],
-        test_result['num_correct'],
-        test_result['num_total_norm']))
+    # logger.log('\nDone training | training time {:s} | '
+    #            'test acc unormalized {:8.4f} ({}/{})|'
+    #            'test acc normalized {:8.4f} ({}/{})'.format(str(
+    #     datetime.now() - start_time),
+    #     test_result['acc_unorm'],
+    #     test_result['num_correct'],
+    #     num_test_samples,
+    #     test_result['acc_norm'],
+    #     test_result['num_correct'],
+    #     test_result['num_total_norm']))
 #    test_train_result = evaluate(train_loader, model,args)
 #   logger.log('test train acc {:f}'.format(test_train_result))
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model', type=str,
-                        help='model path')
-    parser.add_argument('--resume_training', action='store_true',
-                        help='resume training from checkpoint?')
-    parser.add_argument('--run_id', type = str,
-                        help='run id when resuming the run')
-    parser.add_argument('--retriever_path', type = str,
-                        help='retriever path for full and extend_multi')
-    parser.add_argument('--retriever_type', type = str,
-                        help='retriever path for full and extend_multi')
-    parser.add_argument('--max_len', type=int, default=128,
-                        help='max length of the mention input '
-                             'and the entity input')
-    parser.add_argument('--num_hards', type=int, default=10,
-                        help='the number of the nearest neighbors we use to '
-                             'construct hard negatives')
-    parser.add_argument('--type_cands', type=str,
-                        default='mixed_negative',
-                        choices=['mixed_negative',
-                                 'hard_negative',
-                                 'hard_adjusted_negative'],
-                        help='the type of negative we use during training')
     parser.add_argument('--data_dir', type=str,
                         help='the  data directory')
+    parser.add_argument('--num_cands', default=128, type=int,
+                        help='the total number of candidates')
+    parser.add_argument('--pre_model', default='Bert',
+                        choices=['Bert', 'Roberta'],
+                        type=str, help='the encoder for train')
+    parser.add_argument('--max_len', type=int, default=128,
+                        help='max length of the mention input '
+                            'and the entity input')
+    parser.add_argument('--retriever_path', type = str,
+                        help='retriever path for full and extend_multi')
+    parser.add_argument('--model', type=str,default='./models/reranker',
+                        help='model path')
+    parser.add_argument('--model_top', type=str,
+                        help='when loading top model path')
+    parser.add_argument('--data', type=str,default='./data',
+                        help='data path (zeshel data directory)')
+    parser.add_argument('--cands_dir', type=str, default = './data/cands_anncur_top1024',
+                        help='candidates directory')
     parser.add_argument('--L', type=int, default=256,
                         help='max length of joint input [%(default)d]')
-    parser.add_argument('--save_dir', type = str, default = './models',
-                        help='debugging mode')
     parser.add_argument('--C', type=int, default=64,
                         help='max number of candidates [%(default)d]')
     parser.add_argument('--C_eval', type=int, default=64,
                         help='max number of candidates [%(default)d] when eval')
-    parser.add_argument('--cands_dir', type=str,
-                        help='candidates directory')
-    parser.add_argument('--debug', action = 'store_true',
-                        help='debugging mode')
-    parser.add_argument('--eval_method', default='macro', type=str,
-                        choices=['macro', 'micro'],
-                        help='the evaluate method')
-    parser.add_argument('--inputmark', action='store_true',
-                        help='use mention mark at input?')
-    parser.add_argument('--B', type=int, default=128,
-                        help='the batch size')
+    parser.add_argument('--B', type=int, default=4,
+                        help='batch size [%(default)d]')
+    parser.add_argument('--freeze_bert', action = 'store_true',
+                        help='freeze encoder BERT')
+    parser.add_argument('--identity_bert', action = 'store_true',
+                        help='assign same query and key matrix')
+    parser.add_argument('--eval_batch_size', type=int, default=8,
+                        help='evaluation batch size [%(default)d]')
+
+    parser.add_argument('--alpha', type=float, default=0.5,
+                        help='coefficient for multi-loss')
     parser.add_argument('--lr', type=float, default=2e-5,
-                        help='the learning rate')
-    parser.add_argument('--bert_lr', type=float, default=1e-5,
-                        help='the batch size')
-    parser.add_argument('--epochs', type=int, default=3,
-                        help='the number of training epochs')
-    parser.add_argument('--k', type=int, default=64,
-                        help='recall@k when evaluate')
-    parser.add_argument('--too_large', action = 'store_true',
-                    help='too large to evaluate on batch')
+                        help='initial learning rate [%(default)g]')
     parser.add_argument('--warmup_proportion', type=float, default=0.1,
                         help='proportion of training steps to perform linear '
-                             'learning rate warmup for [%(default)g]')
+                            'learning rate warmup for [%(default)g]')
     parser.add_argument('--weight_decay', type=float, default=0.01,
                         help='weight decay [%(default)g]')
     parser.add_argument('--adam_epsilon', type=float, default=1e-6,
                         help='epsilon for Adam optimizer [%(default)g]')
-    parser.add_argument('--gradient_accumulation_steps', type=int, default=1,
+    parser.add_argument('--gradient_accumulation_steps', type=int, default=4,
                         help='num gradient accumulation steps [%(default)d]')
-    parser.add_argument('--seed', type=int, default=42,
-                        help='random seed [%(default)d]')
-    parser.add_argument('--num_workers', type=int, default=0,
-                        help='num workers [%(default)d]')
-    parser.add_argument('--distill', action='store_true',
-                        help='getting score distribution for distillation purpose')
-    parser.add_argument('--distill_training', action='store_true',
-                        help='training smaller model from crossencoder scores')
-    parser.add_argument('--simpleoptim', action='store_true',
-                        help='simple optimizer (constant schedule, '
-                             'no weight decay?')
-    parser.add_argument('--clip', type=float, default=1,
-                        help='gradient clipping [%(default)g]')
+    parser.add_argument('--epochs', type=int, default=3,
+                        help='max number of epochs [%(default)d]')
     parser.add_argument('--logging_steps', type=int, default=1000,
                         help='num logging steps [%(default)d]')
-    parser.add_argument('--gpus', default='0,1', type=str,
-                        help='GPUs separated by comma [%(default)s]')
-    parser.add_argument('--eval_criterion', type=str, default='recall',
-                        choices=['recall', 'accuracy'],
-                        help='the criterion for selecting model')
-    parser.add_argument('--pre_model', default='Bert',
-                        choices=['Bert', 'Roberta'],
-                        type=str, help='the encoder for train')
-    parser.add_argument('--cands_ratio', default=1.0, type=float,
-                        help='the ratio between random candidates and hard '
-                             'candidates')
-    parser.add_argument('--num_cands', default=128, type=int,
-                        help='the total number of candidates')
-    parser.add_argument('--smoothing_value', default=1, type=float,
-                        help=' smoothing factor when sampling negatives '
-                             'according to model distribution')
-    parser.add_argument('--eval_batch_size', type=int, default=512,
-                        help='the batch size')
-    parser.add_argument('--mention_bsz', type=int, default=512,
-                        help='the batch size')
-    parser.add_argument('--anncur', action='store_true', help = "load anncur ckpt")
-    parser.add_argument('--identity_bert', action = 'store_true',
-                        help='assign same query and key matrix')
-    parser.add_argument('--fixed_initial_weight', action='store_true',
-                        help='fixed weight for identity weight')
-    parser.add_argument('--entity_bsz', type=int, default=512,
-                        help='the batch size')
+    parser.add_argument('--clip', type=float, default=1,
+                        help='gradient clipping [%(default)g]')
+    parser.add_argument('--init', type=float, default=0,
+                        help='init (default if 0) [%(default)g]')
     parser.add_argument('--exclude_golds', action='store_true',
                         help='exclude golds when sampling?')
+    parser.add_argument('--seed', type=int, default=42,
+                        help='random seed [%(default)d]')
+    parser.add_argument('--num_workers', type=int, default=2,
+                        help='num workers [%(default)d]')
+    parser.add_argument('--k', type=int, default=64,
+                        help='recall@k when evaluate')
+    parser.add_argument('--gpus', type=str, default='0,1',
+                        help='GPUs separated by comma [%(default)s]')
+    parser.add_argument('--simpleoptim', action='store_true',
+                        help='simple optimizer (constant schedule, '
+                            'no weight decay?')
+    parser.add_argument('--case_based', action='store_true',
+                        help='simple optimizer (constant schedule, '
+                            'no weight decay?')
+    parser.add_argument('--gold_first', action='store_true',
+                        help='simple optimizer (constant schedule, '
+                            'no weight decay?')
+    parser.add_argument('--test_at_first', action='store_true',
+                        help='simple optimizer (constant schedule, '
+                            'no weight decay?')
+    parser.add_argument('--order_changed', action='store_true',
+                        help='simple optimizer (constant schedule, '
+                            'no weight decay?')
+    parser.add_argument('--attend_to_gold', action='store_true',
+                        help='simple optimizer (constant schedule, '
+                            'no weight decay?')
+    parser.add_argument('--attend_to_itself', action='store_true',
+                        help='simple optimizer (constant schedule, '
+                            'no weight decay?')
+    parser.add_argument('--batch_first', action='store_false',
+                        help='simple optimizer (constant schedule, '
+                            'no weight decay?')
+    parser.add_argument('--nearest', action='store_true',
+                        help='vertical interaction w/ nearest neighbors')
+    parser.add_argument('--use_val_dataset', action='store_true',
+                        help='vertical interaction w/ nearest neighbors')
+    parser.add_argument('--eval_method', default='macro', type=str,
+                        choices=['macro', 'micro', 'skip'],
+                        help='the evaluate method')
     parser.add_argument('--type_model', type=str,
-                        default='dual',
+                        default='full',
                         choices=['dual',
-                                 'sum_max',
-                                 'multi_vector',
-                                 'poly',
-                                 'extend_multi',
-                                 'extend_multi_dot',
-                                 'full'],
+                                'sum_max',
+                                'multi_vector',
+                                'poly',
+                                'full',
+                                'extend_multi',
+                                'extend_multi_dot',
+                                'mlp_with_som'],
                         help='the type of model')
+    parser.add_argument('--debug', action = 'store_true',
+                        help='debugging mode')
+    parser.add_argument('--store_reranker_score', action = 'store_true',
+                        help='debugging mode')
+    parser.add_argument('--save_dir', type = str, default = './models',
+                        help='debugging mode')
+    parser.add_argument('--save_topk_nce', action = 'store_true',
+                        help='save the result of reranking')
+    parser.add_argument('--training_one_epoch', action = 'store_true',
+                        help='stop the training after one epoch')
+    parser.add_argument('--type_cands', type=str,
+                        default='fixed_negative',
+                        choices=['fixed_negative',
+                                'mixed_negative',
+                                'hard_negative',
+                                'self_negative',
+                                'random_negative',
+                                'self_fixed_negative',
+                                'self_mixed_negative'],
+                        help='fixed: top k, hard: distributionally sampled k')
+    parser.add_argument('--mention_bsz', type=int, default=512,
+                        help='the batch size')
+
+    parser.add_argument('--run_id', type = str,
+                        help='run id when resuming the run')
+    parser.add_argument('--training_finished', action = 'store_true',
+                        help='# of candidates')
+    parser.add_argument('--num_recall_cands', default=1024, type=int,
+                        help='# of candidates')
+    parser.add_argument('--train_one_epoch', action = 'store_true',
+                        help='training only one epoch')
+    parser.add_argument('--cands_ratio', default=0.5, type=float,
+                        help='ratio of sampled negatives')
+    parser.add_argument('--num_heads', type=int, default=16,
+                        help='the number of multi-head attention in extend_multi ')
+    parser.add_argument('--mrr_penalty', action = 'store_true',
+                        help='the number of multi-head attention in extend_multi ')
+    parser.add_argument('--num_layers', type=int, default=4,
+                        help='the number of atten                ion layers in extend_multi ')
+    parser.add_argument('--resume_training', action='store_true',
+                        help='resume training from checkpoint?')
+    parser.add_argument('--val_alpha', type=float, default=0.5,
+                        help='coefficient for val data loss')
     parser.add_argument('--type_bert', type=str,
                         default='base',
                         choices=['base', 'large'],
                         help='the type of encoder')
-    parser.add_argument('--token_type', action='store_false', help = "no token type id when specified")
-    parser.add_argument('--energy_model', action='store_true',
-                        help='regularize by bi-encoder objective')
-    parser.add_argument('--model_top', type=str,
-                        help='when loading top model path')
-    parser.add_argument('--attend_to_gold', action='store_true',
-                        help='simple optimizer (constant schedule, '
-                             'no weight decay?')
-    parser.add_argument('--cocondenser', action='store_true', help = "load cocondenser ckpt")
-
-    parser.add_argument('--blink', action = 'store_true',
-                        help='load blink checkpoint')
-    parser.add_argument('--num_heads', type=int, default=2,
-                        help='the number of multi-head attention in extend_multi ')
-    parser.add_argument('--num_layers', type=int, default=2,
-                        help='the number of atten                ion layers in extend_multi ')
-    parser.add_argument('--num_mention_vecs', type=int, default=8,
-                        help='the number of mention vectors  ')
+    parser.add_argument('--dataset', type=str,
+                        default='zeshel',
+                        choices=['zeshel', 'wikipedia', 'msmarco'],
+                        help='the type of encoder')
+    parser.add_argument('--num_mention_vecs', type=int, default=1,
+                        help='the number of mention vectors ')
     parser.add_argument('--num_entity_vecs', type=int, default=8,
                         help='the number of entity vectors  ')
     parser.add_argument('--mention_use_codes', action='store_true',
                         help='use codes for mention embeddings?')
     parser.add_argument('--entity_use_codes', action='store_true',
                         help='use codes for entity embeddings?')
-    parser.add_argument('--en_hidden_path', type=str,
-                        help='all entity hidden states path')
+    parser.add_argument('--inputmark', action='store_true',
+                        help='use mention mark at input?')
     parser.add_argument('--store_en_hiddens', action='store_true',
                         help='store entity hiddens?')
-    parser.add_argument('--batch_first', action='store_false',
-                        help='simple optimizer (constant schedule, '
-                             'no weight decay?')
-    parser.add_argument('--case_based', action='store_true',
-                        help='simple optimizer (constant schedule, '
-                             'no weight decay?')
-    parser.add_argument('--gold_first', action='store_true',
-                        help='simple optimizer (constant schedule, '
-                             'no weight decay?')
+    parser.add_argument('--load_en_hiddens', action='store_true',
+                        help='store entity hiddens?')
+    parser.add_argument('--en_hidden_path', type=str, default = None,
+                        help='all entity hidden states path')
+    parser.add_argument('--beam_ratio', type=float, default=0.25,
+                        help='all entity hidden states path')
+    parser.add_argument('--too_large', action='store_true',
+                        help='all entity hidden states path')
+    parser.add_argument('--entity_bsz', type=int, default=64,
+                        help='the batch size')
+    parser.add_argument('--lambda_scheduler', action='store_true',
+                        help='the batch size')
+    parser.add_argument('--fixed_initial_weight', action='store_true',
+                        help='fixed weight for identity weight')
+    parser.add_argument('--recall_eval', action='store_true',
+                        help='the batch size')
+    parser.add_argument('--val_random_shuffle', action = 'store_true',
+                        help='training only one epoch')
+    parser.add_argument('--distill', action='store_true',
+                        help='getting score distribution for distillation purpose')
+    parser.add_argument('--BCELoss', action='store_true',
+                        help='getting score distribution for distillation purpose')
+    parser.add_argument('--distill_training', action='store_true',
+                        help='training smaller model from crossencoder scores')
+    parser.add_argument('--energy_model', action='store_true',
+                        help='regularize by bi-encoder objective')
+    parser.add_argument('--regularization', action='store_true',
+                        help='regularize by bi-encoder score distribution')
+    parser.add_argument('--bert_lr', type=float, default=1e-5,
+                        help='the batch size')
+    parser.add_argument('--weight_lr', type=float, default=1e-2,
+                        help='the batch size')
+    parser.add_argument('--num_sampled', type=int, default=1024,
+                        help='train set candidates to get distribution from')
+    parser.add_argument('--max_entity_len', type=int, default=128,
+                        help='max length of the mention input '
+                            'and the entity input')
+    parser.add_argument('--max_context_len', type=int, default=128,
+                        help='max length of the mention input '
+                            'and the entity input')
+    parser.add_argument('--final_k', type=int, default=64,
+                        help='the batch size')
+    parser.add_argument('--blink', action = 'store_true',
+                        help='load blink checkpoint')
+    parser.add_argument('--layernorm', action = 'store_true',
+                        help='layer normalization for skip connection')
+    parser.add_argument('--skip_connection', action = 'store_true',
+                        help='layer normalization for skip connection')
+    parser.add_argument('--mlp_layers', type=str, default="1536",
+                        help='num of layers for mlp or mlp-with-som model (except for the first and the last layer)')
+    parser.add_argument('--smoothing_value', default=1, type=float,
+                        help=' smoothing factor when sampling negatives '
+                            'according to model distribution')
+    parser.add_argument(
+        "--fp16",
+        action="store_true",
+        help="Whether to use 16-bit (mixed) precision (through NVIDIA apex) "
+            "instead of 32-bit",
+    )
+    parser.add_argument(
+        "--fp16_opt_level",
+        type=str,
+        default="O1",
+        help="For fp16: Apex AMP optimization level selected in ['O0', 'O1', "
+            "'O2', and 'O3']."
+            "See details at https://nvidia.github.io/apex/amp.html",
+    )
+    parser.add_argument('--anncur', action='store_true', help = "load anncur ckpt")
+    parser.add_argument('--cocondenser', action='store_true', help = "load cocondenser ckpt")
+    parser.add_argument('--tfidf', action='store_true', help = "load cocondenser ckpt")
+
+    parser.add_argument('--token_type', action='store_false', help = "no token type id when specified")
+
+    args = parser.parse_args()
+
+    # Set environment variables before all else.
+    os.environ['CUDA_VISIBLE_DEVICES'] = args.gpus  # Sets torch.cuda behavior
+    if args.nearest: assert args.batch_first == False and args.type_cands == "fixed_negative"
+    if args.use_val_dataset: 
+        assert args.distill_training
+    assert not args.dataset == 'wikipedia' or args.eval_method == 'micro' # if dataset == wikipedia, eval_method is required to be micro
+    assert not args.skip_connection or not args.identity_bert
     args = parser.parse_args()
     # Set environment variables before all else.
     os.environ['CUDA_VISIBLE_DEVICES'] = args.gpus  # Sets torch.cuda behavior

@@ -44,6 +44,8 @@ def load_model(model_path, device, eval_mode=False, dp=False, type_model='full')
         elif args.type_model == 'multi_vector':
             num_mention_vecs = 1
             num_entity_vecs = args.num_entity_vecs
+        elif args.type_model == 'deformer':
+            attention_type = 'deformer'
         else:
             num_mention_vecs = args.num_mention_vecs
             num_entity_vecs = args.num_entity_vecs
@@ -80,8 +82,11 @@ def main(args):
         else:
             if args.type_model == 'poly':
                 attention_type = 'soft_attention'
+            elif args.type_model == 'deformer':
+                attention_type = 'deformer'
             else:
                 attention_type = 'hard_attention'
+
             if args.type_model == 'dual':
                 num_mention_vecs = 1
                 num_entity_vecs = 1
@@ -99,15 +104,21 @@ def main(args):
             else:
                 num_mention_vecs = args.num_mention_vecs
                 num_entity_vecs = args.num_entity_vecs
+            num_cands = 64
+            if args.type_model == 'deformer':
+                cands_embeds = torch.rand(num_cands, 128, 768)
+            else: 
+                cands_embeds = torch.rand(1, num_cands, 768)
             model = UnifiedRetriever(encoder, device, num_mention_vecs,
                                 num_entity_vecs,
                                 args.mention_use_codes, args.entity_use_codes,
-                                attention_type, None, False, args, num_heads = args.num_heads, num_layers = args.num_layers)
+                                attention_type,cands_embeds, False, args, num_heads = args.num_heads, num_layers = args.num_layers)
+            model.evaluate_on = True
         if args.type_model != "full":
-            batch = {"mention_token_ids": torch.randint(1,3, (4, 128)),\
-            "mention_masks": torch.randint(1,3, (4, 128)),\
-            "candidate_token_ids": torch.randint(1,3, (4, 64, 128)),\
-            "candidate_masks": torch.randint(1,3, (4, 64, 128)),\
+            batch = {"mention_token_ids": torch.randint(1,3, (1, 128)),\
+            "mention_masks": torch.randint(1,3, (1, 128)),\
+            "candidate_token_ids": torch.randint(1,3, (1, num_cands, 128)),\
+            "candidate_masks": torch.randint(1,3, (1,  num_cands, 128)),\
             "args": args}
         else:
             batch = {
@@ -117,6 +128,7 @@ def main(args):
                 "args": args}
 
         model = model.to(device)
+        # model(**batch)
         flops, macs, params = get_model_profile(model=model, # model
                                     kwargs=batch, # list of positional arguments to the model.
                                     ignore_modules=None) # the list of modules to ignore in the profiling
@@ -204,7 +216,8 @@ if __name__ == '__main__':
                                  'full',
                                  'extend_multi',
                                  'extend_multi_dot',
-                                 'mlp_with_som'],
+                                 'mlp_with_som',
+                                 'deformer'],
                         help='the type of model')
     parser.add_argument('--debug', action = 'store_true',
                         help='debugging mode')

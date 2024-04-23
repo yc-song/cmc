@@ -200,7 +200,7 @@ def main(args):
         model.load_state_dict(modified_state_dict, strict = False)
     else:
         new_state_dict = package['sd']
-        model.load_state_dict(new_state_dict)
+        model.load_state_dict(new_state_dict, strict = False)
 
     dp = torch.cuda.device_count() > 1
     if dp:
@@ -220,42 +220,31 @@ def main(args):
     else:    
         train_loaders, val_loaders, test_loaders = [], [], []
         train_entity_loaders, val_entity_loaders, test_entity_loaders = [], [], []
-        for i in tqdm(range(len(train_mentions)), total = len(train_mentions)):
-            mentions = train_mentions[i]
-            doc = train_doc[i]
-            entity_token_ids, entity_masks = transform_entities(doc, args.max_len,
-                                                                tokenizer)
-            mention_set = MentionSet(tokenizer, mentions, doc, args.max_len)
-            entity_set = EntitySet(tokenizer, entity_token_ids, entity_masks)
-            train_loaders.append(DataLoader(mention_set, args.mention_bsz,
-                                            shuffle=False))
-            entity_loader = DataLoader(entity_set, args.entity_bsz,
-                                    shuffle=False)
-            train_entity_loaders.append(entity_loader)
-        for i in range(len(val_mentions)):
-            mentions = val_mentions[i]
-            doc = val_doc[i]
-            entity_token_ids, entity_masks = transform_entities(doc, args.max_len,
-                                                                tokenizer)
-            mention_set = MentionSet(tokenizer, mentions, doc, args.max_len)
-            entity_set = EntitySet(tokenizer, entity_token_ids, entity_masks)
-            val_loaders.append(DataLoader(mention_set, args.mention_bsz,
+        mentions = train_mentions
+        doc = train_doc
+        entity_token_ids, entity_masks = transform_entities(doc, args.max_len,
+                                                            tokenizer)
+        mention_set = MentionSet(tokenizer, mentions, doc, args.max_len)
+        entity_set = EntitySet(tokenizer, entity_token_ids, entity_masks)
+        train_loaders.append(DataLoader(mention_set, args.mention_bsz,
                                         shuffle=False))
-            entity_loader = DataLoader(entity_set, args.entity_bsz,
-                                    shuffle=False)
-            val_entity_loaders.append(entity_loader)
-        for i in range(len(test_mentions)):
-            mentions = test_mentions[i]
-            doc = test_doc[i]
-            entity_token_ids, entity_masks = transform_entities(doc, args.max_len,
-                                                                tokenizer)
-            mention_set = MentionSet(tokenizer, mentions, doc, args.max_len)
-            entity_set = EntitySet(tokenizer, entity_token_ids, entity_masks)
-            test_loaders.append(DataLoader(mention_set, args.mention_bsz,
-                                        shuffle=False))
-            entity_loader = DataLoader(entity_set, args.entity_bsz,
-                                    shuffle=False)
-            test_entity_loaders.append(entity_loader)
+        entity_loader = DataLoader(entity_set, args.entity_bsz,
+                                shuffle=False)
+        train_entity_loaders.append(entity_loader)
+
+        mentions = val_mentions
+        doc = val_doc
+        mention_set = MentionSet(tokenizer, mentions, doc, args.max_len)
+        val_loaders.append(DataLoader(mention_set, args.mention_bsz,
+                                    shuffle=False))
+        val_entity_loaders.append(entity_loader)
+
+        mentions = test_mentions
+        doc = test_doc
+        mention_set = MentionSet(tokenizer, mentions, doc, args.max_len)
+        test_loaders.append(DataLoader(mention_set, args.mention_bsz,
+                                    shuffle=False))
+        test_entity_loaders.append(entity_loader)
 
         torch.save(train_entity_loaders, os.path.join(entity_path, 'train_entity_loaders.pt'))
         torch.save(val_entity_loaders, os.path.join(entity_path, 'val_entity_loaders.pt'))
@@ -313,74 +302,63 @@ def main(args):
                     test_mentions, 'test')
 
 
-def load_domain_data(data_dir, dataset = 'Zeshel'):
+def load_domain_data(data_dir, dataset = 'Wikipedia'):
     """
 
     :param data_dir: train_data_dir if args.train else eval_data_dir
     :return: mentions, entities,doc
     """
     print('begin loading data')
-    men_path = os.path.join(data_dir, 'mentions')
+    men_path = data_dir
 
     def get_domains(part):
         domains = set()
-        with open(os.path.join(men_path, '%s.json' % part)) as f:
+        with open(os.path.join(men_path, 'AIDA-YAGO2_%s.jsonl' % part)) as f:
             for line in f:
                 field = json.loads(line)
                 domains.add(field['corpus'])
         return list(domains)
 
-    def load_domain_mentions(domain, part):
+    def load_domain_mentions(part):
         domain_mentions = []
-        with open(os.path.join(men_path, '%s.json' % part)) as f:
+        with open(os.path.join(men_path, 'AIDA-YAGO2_%s.jsonl' % part)) as f:
             for line in f:
                 field = json.loads(line)
-                if field['corpus'] == domain:
-                    domain_mentions.append(field)
+                domain_mentions.append(field)
         return domain_mentions
 
-    def load_domain_entities(data_dir, domain):
+    def load_domain_entities(data_dir):
         """
 
         :param domains: list of domains
         :return: all the entities in the domains
         """
         doc = {}
-        doc_path = os.path.join(data_dir, 'documents')
-        with open(os.path.join(doc_path, domain + '.json')) as f:
+        doc_path = data_dir
+        with open(os.path.join(doc_path, 'entities.json')) as f:
             for line in f:
                 field = json.loads(line)
-                page_id = field['document_id']
+                page_id = field['id']
                 doc[page_id] = field
         return doc
 
-    train_domains = get_domains('train')
-    val_domains = get_domains('val')
-    test_domains = get_domains('test')
     train_mentions = []
     val_mentions = []
     test_mentions = []
-    train_doc = []
-    val_doc = []
-    test_doc = []
-    for train_domain in train_domains:
-        domain_mentions = load_domain_mentions(train_domain, 'train')
-        domain_entities = load_domain_entities(data_dir, train_domain)
-        train_mentions.append(domain_mentions)
-        train_doc.append(domain_entities)
-    for val_domain in val_domains:
-        domain_mentions = load_domain_mentions(val_domain, 'val')
-        domain_entities = load_domain_entities(data_dir, val_domain)
-        val_mentions.append(domain_mentions)
-        val_doc.append(domain_entities)
-    for test_domain in test_domains:
-        domain_mentions = load_domain_mentions(test_domain, 'test')
-        domain_entities = load_domain_entities(data_dir, test_domain)
-        test_mentions.append(domain_mentions)
-        test_doc.append(domain_entities)
+    doc = []
+    domain_mentions = load_domain_mentions('train')
+    domain_entities = load_domain_entities(data_dir)
+    train_mentions.append(domain_mentions)
+    doc.append(domain_entities)
+    domain_mentions = load_domain_mentions('testa')
+    domain_entities = load_domain_entities(data_dir)
+    val_mentions.append(domain_mentions)
+    domain_mentions = load_domain_mentions('testb')
+    domain_entities = load_domain_entities(data_dir)
+    test_mentions.append(domain_mentions)
 
-    return train_mentions, val_mentions, test_mentions, train_doc, val_doc, \
-           test_doc
+    return train_mentions, val_mentions, test_mentions, doc, doc, \
+           doc
 
 
 if __name__ == '__main__':

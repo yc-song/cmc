@@ -1,9 +1,12 @@
 import json
-mode = 'val'
+mode = 'test'
 cand_all = []
 cand_retrieved = []
 
-with open(f'./data/cands_anncur_top1024/5iew1xhb/candidates_{mode}.json', 'r') as f1:
+file_path = ./data/cands_top1024
+run_id= wygmy4iq
+
+with open(f'{file_path}/{run_id}/candidates_{mode}.json', 'r') as f1:
     for i, line in enumerate(f1):
         line = eval(line)
         cand_retrieved.append(line['mention_id'])

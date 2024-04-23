@@ -6,10 +6,17 @@ from torch.nn import CrossEntropyLoss, BCELoss
 import torch.nn.functional as F
 import math
 from torch.utils.data import DataLoader
+from transformers.models.bert.out_vector_modeling_bert import MyBertModel, DecoderLayerChunk
 from torch.multiprocessing import Pool
 import wandb
 from scipy.stats import rankdata
 import numpy as np
+from mix_function import MeanLayer, MyLSTMBlock, ContextLayer, get_rep_by_avg, dot_attention, clean_input_ids, clean_input_embeddings
+from time import time
+import cProfile
+import pstats
+import faiss
+profiler = cProfile.Profile()
 NEAR_INF = 1e20
 
 
@@ -36,7 +43,9 @@ class PolyAttention(nn.Module):
             mask_ys: B x key_len (mask)
             values: B x value_len x dim (values); if None, default to ys
         """
+        # (2, 512, 768) * (2, 768, 128) = (2, 512, 128)
         l1 = torch.matmul(xs, ys.transpose(-1, -2))
+
         if self.attn == 'sqrt':
             d_k = ys.size(-1)
             l1 = l1 / math.sqrt(d_k)
@@ -167,8 +176,12 @@ class UnifiedRetriever(nn.Module):
         self.mention_use_codes = mention_use_codes
         self.entity_use_codes = entity_use_codes
         self.attention_type = attention_type
-        self.mention_encoder = encoder
-        self.entity_encoder = copy.deepcopy(encoder)
+        if args.type_model == "mixencoder":
+            self.mention_encoder = None
+            self.entity_encoder = None
+        else:
+            self.mention_encoder = encoder
+            self.entity_encoder = copy.deepcopy(encoder)
         self.device = device
         self.loss_fct = CrossEntropyLoss()
 
@@ -218,6 +231,10 @@ class UnifiedRetriever(nn.Module):
             self.extend_multi_transformerencoder = torch.nn.TransformerEncoder(self.extend_multi_transformerencoderlayer, self.num_layers).to(self.device)
             self.extend_multi_linearhead = torch.nn.Linear(self.embed_dim, 1).to(self.device)
             self.extend_multi_token_type_embeddings = nn.Embedding(2, self.embed_dim).to(self.device)
+        if args.type_model == "deformer":
+            self.deformer = DeformerModel(encoder, args)
+        if args.type_model == "mixencoder":
+            self.mixencoder = MixEncoderModel(args)
         if self.args.case_based: 
             assert self.args.batch_first == False
             assert not self.args.attend_to_gold
@@ -321,7 +338,6 @@ class UnifiedRetriever(nn.Module):
                 nearest_label_token_ids = None, nearest_label_masks = None, loader_val_cased = None,\
                 nearest_candidate_token_ids = None, nearest_candidate_masks = None,\
                  mention_id = None, candidate_id = None, evaluate = False):
-        
         ## Input
         # mention_token_ids (torch.tensor): mention token ids by tokenizer
         # mention_masks (torch.tensor): 0 for meaningless tokens
@@ -335,32 +351,74 @@ class UnifiedRetriever(nn.Module):
         # scores (torch.tensor): score distribution for given instance
         # student_loss (torch.tensor): Cross-entropy from student model
         # teacher_loss (torch.tensor): KL-divergence b/w student and teacher model's score distribution
+        def create_faiss_index(entity_embeddings):
+            # Assuming entity_embeddings is a 2D numpy array (num_entities x embedding_dim)
+            entity_embeddings = entity_embeddings.squeeze(1)
+            dimension = entity_embeddings.shape[-1]
+            faiss_index = faiss.IndexFlatIP(dimension)  # Using L2 distance for similarity
+            faiss_index.add(entity_embeddings)  # Adding the embeddings to the index
+            faiss.write_index(faiss_index, './data/dual/faiss_index.index')
+            return faiss_index
 
+        def search_faiss_index(faiss_index, query_embeddings, k):
+            # query_embeddings is a 2D numpy array (num_queries x embedding_dim)
+            # k is the number of nearest neighbors to retrieve
+            distances, indices = faiss_index.search(query_embeddings.cpu(), k)
+            return distances, indices
         if self.evaluate_on or evaluate:  # This option is not used for extend_multi models
             if not self.candidates_embeds is None:
                 mention_embeds, mention_embeds_masks = self.encode(
                     mention_token_ids, mention_masks, None, None)[:2]
                 bsz, l_x, mention_dim = mention_embeds.size()
-                num_cands, l_y, cand_dim = self.candidates_embeds.size()
-            else:
+                if type(self.candidates_embeds) is not dict:
+                    num_cands, l_y, cand_dim = self.candidates_embeds.size()
+                if self.args.type_model == 'dual':
+                    faiss_index = create_faiss_index(self.candidates_embeds.cpu())
+
+            else: 
+
                 mention_embeds, mention_embeds_masks, \
                 candidates_embeds = self.encode(mention_token_ids, mention_masks,
                                             candidate_token_ids,
                                             candidate_masks)                
+            if self.args.type_model == 'dual':
+                for m in mention_embeds:
+                    scores, indices = search_faiss_index(faiss_index, m.reshape(1,-1), self.args.num_cands)
+                return {'scores':scores, 'indices': indices}
             if self.attention_type == 'soft_attention':
                 scores = self.attention(self.candidates_embeds.unsqueeze(0).to(
                     self.device), mention_embeds, mention_embeds,
                     mention_embeds_masks)
             elif self.attention_type == 'extend_multi_dot':
                 dot = True
-                mention_embeds, mention_embeds_masks, \
-                candidates_embeds = self.encode(mention_token_ids, mention_masks,
-                                            candidate_token_ids,
-                                            candidate_masks)
-                # Take embeddings as input for extend_multi model
-                scores = self.extend_multi(mention_embeds, candidates_embeds, dot, args)
+                if candidate_id is not None:
+
+                    candidate_id = [list(t) for t in zip(*candidate_id)]
+                    candidates_embeds = torch.stack([torch.stack([self.candidates_embeds[item] for item in sublist]) for sublist in candidate_id])
+                    # candidates_embeds = self.candidates_embeds[candidate_id]
+                    # Take embeddings as input for extend_multi model
+                    scores = self.extend_multi(mention_embeds, candidates_embeds, dot, args)
+
+                else:
+                    scores = self.extend_multi(mention_embeds, self.candidates_embeds, dot, args)
+            elif self.attention_type == 'deformer':
+                mention_dict = {"input_ids":mention_token_ids.to(self.device), "attention_mask":mention_masks.to(self.device)}
+                num_cands = candidate_token_ids.shape[1]
+                candidates_embeds_masks = candidate_masks.reshape(-1, candidate_masks.shape[-1])
+                
+                mention_embeds, mention_embeds_masks= self.deformer.encode_lower(mention_dict)
+                joint_embeddings = self.deformer.encode_higher(mention_embeds, self.candidates_embeds, mention_embeds_masks, candidates_embeds_masks)
+                pooler = joint_embeddings[:,0,:]                
+                scores = self.deformer.classifier(pooler).squeeze(-1)
+                scores = scores.reshape(mention_token_ids.shape[0], num_cands)
             else:
-                scores = (
+                if self.args.model == 'dual':
+                    faiss_index = create_faiss_index(self.candidates_embeds.cpu())
+                    for m in mention_embeds:
+                        scores, indices = search_faiss_index(faiss_index, m.reshape(1,-1), self.args.num_cands)
+                    return {'scores':scores, 'indices': indices}
+                else:
+                    scores = (
                     torch.matmul(mention_embeds.reshape(-1, mention_dim),
                                  self.candidates_embeds.reshape(-1,
                                                                 cand_dim).t().to(
@@ -368,12 +426,15 @@ class UnifiedRetriever(nn.Module):
                                                            num_cands,
                                                            l_y).max(-1)[
                         0]).sum(1)
-            return {'scores':scores}
+            predicts = scores.argmax(1)
+            
+            return {'scores':scores, 'predictions': predicts}
         else:  # train\
             B, C, L = candidate_token_ids.size() # e.g. 8, 256, 128
             # B x m x d
             #  get  embeds
             # print(candidates_embeds.shape) # (1, 65, 128, 768)
+
             if self.attention_type == 'extend_multi' or self.attention_type == 'extend_multi_dot':
                 if self.attention_type == 'extend_multi_dot':
                     dot = True
@@ -388,13 +449,36 @@ class UnifiedRetriever(nn.Module):
                                             candidate_masks)
                 # Take embeddings as input for extend_multi model
                 scores = self.extend_multi(mention_embeds, candidates_embeds, dot, args)
-
             elif self.attention_type == 'mlp_with_som':
-                    mention_embeds, mention_embeds_masks, \
-                    candidates_embeds = self.encode(mention_token_ids, mention_masks,
-                                                candidate_token_ids,
-                                                candidate_masks)
-                    scores = self.mlp_with_som(mention_embeds, candidates_embeds)
+                mention_embeds, mention_embeds_masks, \
+                candidates_embeds = self.encode(mention_token_ids, mention_masks,
+                                            candidate_token_ids,
+                                            candidate_masks)
+                scores = self.mlp_with_som(mention_embeds, candidates_embeds)
+            elif self.attention_type == 'deformer':
+                mention_dict = {"input_ids":mention_token_ids.to(self.device), "attention_mask":mention_masks.to(self.device)}
+                num_cands = candidate_token_ids.shape[1]
+                candidate_token_ids = candidate_token_ids.int().reshape(-1, candidate_token_ids.shape[-1])
+                candidate_masks = candidate_masks.reshape(-1, candidate_masks.shape[-1])
+                entity_dict = {"input_ids":candidate_token_ids.to(self.device), "attention_mask":candidate_masks.to(self.device)}
+                
+                mention_embeds, mention_embeds_masks= self.deformer.encode_lower(mention_dict)
+                candidates_embeds, candidates_embeds_masks= self.deformer.encode_lower(entity_dict)
+                joint_embeddings = self.deformer.encode_higher(mention_embeds, candidates_embeds, mention_embeds_masks, candidates_embeds_masks)
+                pooler = joint_embeddings[:,0,:]                
+                scores = self.deformer.classifier(pooler).squeeze(-1)
+                scores = scores.reshape(mention_token_ids.shape[0], num_cands)
+            elif self.attention_type == 'mixencoder':
+                candidate_token_ids = candidate_token_ids.int().to(self.device)
+                candidate_masks = candidate_masks.int().to(self.device)
+                candidate_token_type_ids = torch.zeros_like(candidate_masks).int().to(self.device)
+                mention_token_type_ids = torch.zeros_like(mention_masks).int().to(self.device)
+                candidate_embeddings = self.mixencoder.prepare_candidates(candidate_token_ids, candidate_token_type_ids, candidate_masks)  
+                candidate_embeddings = candidate_embeddings.reshape(mention_token_ids.shape[0], -1, candidate_embeddings.shape[-2],  candidate_embeddings.shape[-1])
+                # torch.Size([2, 512]) torch.Size([2, 10, 1, 768])
+
+                scores = self.mixencoder.do_queries_match(input_ids = mention_token_ids.int().to(self.device), token_type_ids = mention_token_type_ids.int().to(self.device), attention_mask = mention_masks.int().to(self.device), \
+                candidate_context_embeddings = candidate_embeddings)
             else:
                 mention_embeds, mention_embeds_masks, \
                 candidates_embeds = self.encode(mention_token_ids, mention_masks,
@@ -449,13 +533,12 @@ class UnifiedRetriever(nn.Module):
             input = torch.cat([xs, ys], dim = 1) # concatenate mention and entity embeddings
         # Take concatenated tensor as the input for transformer encoder
         attention_result = self.extend_multi_transformerencoder(input)
-        if self.args.skip_connection:
-            if self.args.layernorm:
-                layer_norm = nn.LayerNorm(input.size(-1)).to(self.device)
-                attention_result = layer_norm(0.5*(input + self.extend_multi_transformerencoder(input)))
-            else:
-                attention_result = 0.5*(input + self.extend_multi_transformerencoder(input))
-
+        # if self.args.skip_connection:
+        #     if self.args.layernorm:
+        #         layer_norm = nn.LayerNorm(input.size(-1)).to(self.device)
+        #         attention_result = layer_norm(0.5*(input + self.extend_multi_transformerencoder(input)))
+        #     else:
+        #         attention_result = 0.5*(input + self.extend_multi_transformerencoder(input))
         # Get score from dot product
         if dot:
             scores = torch.bmm(attention_result[:,0,:].unsqueeze(1), attention_result[:,self.args.num_mention_vecs:,:].transpose(2,1))
@@ -464,7 +547,7 @@ class UnifiedRetriever(nn.Module):
         else:
             scores = self.linearhead(attention_result[:,self.args.num_mention_vecs:,:])
             scores = scores.squeeze(-1)
-        
+
         return scores
     def forward_chunk(self, xs, ys, dot = False, args = None):
         xs = xs.to(self.device) # (batch size, 1, embed_dim)
@@ -636,3 +719,330 @@ class IdentityInitializedTransformerEncoderLayer(torch.nn.Module):
             out = layer_norm(sigmoid_weight*out1 + (1-sigmoid_weight)*src)
         
         return out
+
+class DeformerModel(torch.nn.Module):
+    # encode a text using lower layers
+    # Only us self.lm_q!!
+    def __init__(self, encoder, args):
+        super(DeformerModel, self).__init__()
+        self.args = args
+        self.device = torch.device(
+            "cuda" if torch.cuda.is_available() else "cpu"
+        )  
+        self.num_layers = 4
+        if args.type_bert=='base':
+            self.embed_dim = 768
+        else: 
+            self.embed_dim = 1024
+        self.lm_q = encoder.to(self.device)
+        self.lower_encoder = self.lm_q.encoder.layer[:-self.num_layers]
+        self.higher_encoder = self.lm_q.encoder.layer[-self.num_layers:]
+        self.classifier = torch.nn.Linear(self.embed_dim, 1)
+    def encode_lower(self, psg, num_vecs = 1): # passage를 받아서 representation을 만듦
+        if psg is None:
+            return None
+        psg_out = self.lm_q(**psg, return_dict=True, output_hidden_states = True)
+        p_hidden = psg_out.hidden_states[-self.num_layers]
+        return p_hidden,psg['attention_mask']
+
+    def encode_higher(self, a_embeddings, b_embeddings, a_attention_mask, b_attention_mask, train_flag=True, is_hard_msmarco=False):
+        device = a_embeddings.device
+
+        a_max_seq_len = a_attention_mask.shape[1]
+        query_num = a_attention_mask.shape[0]
+
+        candidate_num = int(b_embeddings.shape[0] / a_embeddings.shape[0])
+
+        # repeat A
+        # print(a_embeddings.shape, b_embeddings.shape, a_attention_mask.shape, b_attention_mask.shape)
+        # raise()
+
+        a_embeddings = a_embeddings.unsqueeze(1)
+        a_embeddings = a_embeddings.repeat(1, candidate_num, 1, 1).reshape(query_num*candidate_num, a_max_seq_len,
+                                                                           a_embeddings.shape[-1])
+        a_attention_mask = a_attention_mask.unsqueeze(1)
+        a_attention_mask = a_attention_mask.repeat(1, candidate_num, 1).reshape(query_num*candidate_num, a_max_seq_len)
+
+
+        final_attention_mask = torch.cat((a_attention_mask, b_attention_mask.to(device)), dim=-1)
+        final_hidden_states = torch.cat((a_embeddings, b_embeddings.to(device)), dim=1)
+
+        # process attention mask
+        input_shape = final_attention_mask.size()
+        final_attention_mask = self.lm_q.get_extended_attention_mask(final_attention_mask, input_shape, device)
+
+        for layer_module in self.higher_encoder:
+            layer_outputs = layer_module(
+                final_hidden_states,
+                final_attention_mask
+            )
+            final_hidden_states = layer_outputs[0]
+        return final_hidden_states
+
+    # def forward(self, query: Dict[str, Tensor] = None, passage: Dict[str, Tensor] = None, train_flag = True):
+
+    #     q_reps, q_attention_mask = self.encode_lower(query)
+    #     p_reps, p_attention_mask = self.encode_lower(passage)
+    #     joint_embeddings = self.encode_higher(a_embeddings=q_reps,
+    #                                            b_embeddings=p_reps,
+    #                                            a_attention_mask=q_attention_mask,
+    #                                            b_attention_mask=p_attention_mask)
+
+    #     # encoding a
+    #     # a_lower_encoded_embeddings, _ = self.lower_encoding(input_ids=a_input_ids,
+    #                                                         # attention_mask=a_attention_mask,
+    #                                                         # token_type_ids=a_token_type_ids)
+
+    #     # # encoding b
+    #     # candidate_seq_len = b_input_ids.shape[-1]
+
+    #     # b_input_ids = b_input_ids.reshape(-1, candidate_seq_len)
+    #     # b_token_type_ids = b_token_type_ids.reshape(-1, candidate_seq_len)
+    #     # b_attention_mask = b_attention_mask.reshape(-1, candidate_seq_len)
+
+    #     # b_token_type_ids = b_token_type_ids + 1
+
+    #     # b_input_ids, b_attention_mask, b_token_type_ids = clean_input_ids(b_input_ids, b_attention_mask,
+    #     #                                                                   b_token_type_ids)
+
+    #     # b_lower_encoded_embeddings, _ = self.lower_encoding(input_ids=b_input_ids,
+    #     #                                                     attention_mask=b_attention_mask,
+    #     #                                                     token_type_ids=b_token_type_ids)
+    #     # #print("a_input_ids:", a_input_ids.shape)
+    #     # #print("b_input_ids:", b_input_ids.shape)
+    #     # # encoding together
+    #     # joint_embeddings = self.joint_encoding(a_embeddings=a_lower_encoded_embeddings,
+    #                                         #    b_embeddings=b_lower_encoded_embeddings,
+    #                                         #    a_attention_mask=a_attention_mask,
+    #                                         #    b_attention_mask=b_attention_mask,
+    #                                         #    train_flag=train_flag, is_hard_msmarco=is_hard_msmarco)
+    #     pooler = joint_embeddings[:,0,:]
+    #     logits = self.classifier(pooler).squeeze(-1)
+
+    #     #print("logits:", logits.shape)
+    #     # if train_flag:
+    #     logits = logits.reshape(q_reps.shape[0], -1)
+    #     # if is_hard_msmarco:
+    #     #     # for each query in batch, gold is the first candidate
+    #     #     batch_size, candidate_num_per_query = logits.size()
+
+    #     #     # Create a mask
+    #     #     # Initialize the mask with zeros
+    #     #     mask = torch.zeros(batch_size, candidate_num_per_query)
+
+    #     #     # Set the first element of each row in the mask to 1
+    #     #     mask[:, 0] = 1
+
+    #     #     # Ensure mask is on the same device as score
+    #     #     mask = mask.to(logits.device)
+    #     # else:
+    #     mask = torch.eye(logits.size(0)).to(logits.device)
+    #     loss = torch.nn.functional.log_softmax(logits, dim=-1) * mask
+    #     loss = (-loss.sum(dim=1)).mean()
+    #     return EncoderOutput( 
+    #         loss = loss,
+    #         scores = logits,
+    #         q_reps = q_reps,
+    #         p_reps = p_reps
+    #     )
+    #     # else:
+    #     #     logits = logits.reshape(a_input_ids.shape[0], -1)
+    #     #     #print("reshaped logits:", logits.shape)
+    #     #     return logits
+
+class MixEncoderModel(nn.Module):
+    TRANSFORMER_CLS = MyBertModel
+
+    def __init__(self, args, encoder = None):
+        super(MixEncoderModel, self).__init__()
+        self.args = args
+        self.num_labels = 1
+        self.context_num = 1
+        if self.args.type_bert == 'base':
+            self.sentence_embedding_len = 768
+            self.this_bert_config = BertConfig.from_pretrained('Luyu/co-condenser-marco')
+            self.bert_model = MyBertModel.from_pretrained('Luyu/co-condenser-marco')
+        elif self.args.type_bert == 'large':
+            self.sentence_embedding_len = 1024
+            self.this_bert_config = BertConfig.from_pretrained('bert-large-uncased')
+            self.bert_model = MyBertModel.from_pretrained('bert-large-uncased')
+        self.bert_model.resize_token_embeddings(30522)
+
+        # used to compressing candidate to generate context vectors
+        self.composition_layer = ContextLayer(self.this_bert_config.hidden_size, 1)
+
+        # create models for decoder
+        self.num_attention_heads = self.this_bert_config.num_attention_heads
+        self.attention_head_size = int(self.this_bert_config.hidden_size / self.this_bert_config.num_attention_heads)
+        self.all_head_size = self.num_attention_heads * self.attention_head_size
+
+        self.decoder = nn.ModuleDict({
+            # used by candidate context embeddings to enrich themselves
+            'candidate_query': nn.ModuleList([nn.Linear(self.this_bert_config.hidden_size, self.all_head_size) for _ in
+                                              range(self.this_bert_config.num_hidden_layers)]),
+            'candidate_key': nn.ModuleList([nn.Linear(self.this_bert_config.hidden_size, self.all_head_size) for _ in
+                                            range(self.this_bert_config.num_hidden_layers)]),
+            'candidate_value': nn.ModuleList([nn.Linear(self.this_bert_config.hidden_size, self.all_head_size) for _ in
+                                              range(self.this_bert_config.num_hidden_layers)]),
+            # used to project representations into same space
+            'layer_chunks': nn.ModuleList(
+                [DecoderLayerChunk(self.this_bert_config) for _ in range(self.this_bert_config.num_hidden_layers)]),
+            # used to compress candidate context embeddings into a vector
+            'candidate_composition_layer': MeanLayer(),
+            # used to generate query to compress Text_A thus get its representation
+            'compress_query': nn.ModuleList([nn.Linear(self.this_bert_config.hidden_size, self.all_head_size) for _ in
+                                             range(self.this_bert_config.num_hidden_layers)]),
+            # used to update hidden states with self-att output as input
+            'LSTM': MyLSTMBlock(self.this_bert_config.hidden_size),
+        })
+
+        # control which layer use decoder
+        self.enrich_flag = [False] * self.this_bert_config.num_hidden_layers
+        # self.enrich_flag[0] = True
+        self.enrich_flag[-1] = True
+        print("*" * 50)
+        print(f"Enrich Layer: {self.enrich_flag}")
+        print("*" * 50)
+
+        self.init_decoder_params()
+
+        # remove no use component
+        for index, flag in enumerate(self.enrich_flag):
+            if not flag:
+                for key in ['layer_chunks', 'candidate_query', 'compress_query', 'candidate_key', 'candidate_value']:
+                    self.decoder[key][index] = None
+
+    # use parameters (layer chunk, q, q_1, k, v) of a pre-trained encoder to initialize the decoder
+    def init_decoder_params(self):
+        #  read parameters for layer chunks from encoder
+        for index in range(self.this_bert_config.num_hidden_layers):
+            this_static = self.decoder['layer_chunks'][index].state_dict()
+            pretrained_static = self.bert_model.encoder.layer[index].state_dict()
+
+            updating_layer_static = {}
+            for k in this_static.keys():
+                new_k = k.replace('attention.', 'attention.output.', 1)
+                updating_layer_static[k] = pretrained_static[new_k]
+
+            this_static.update(updating_layer_static)
+            self.decoder['layer_chunks'][index].load_state_dict(this_static)
+
+        #  read parameters for query from encoder
+        pretrained_static = self.bert_model.state_dict()
+        query_static = self.decoder['candidate_query'].state_dict()
+
+        updating_query_static = {}
+        for k in query_static.keys():
+            full_key = 'encoder.layer.' + k.split(".")[0] + '.attention.self.query.' + k.split(".")[1]
+            updating_query_static[k] = pretrained_static[full_key]
+
+        query_static.update(updating_query_static)
+        self.decoder['candidate_query'].load_state_dict(query_static)
+
+        #  read parameters for compress_query from encoder
+        compress_query_static = self.decoder['compress_query'].state_dict()
+
+        updating_query_static = {}
+        for k in compress_query_static.keys():
+            full_key = 'encoder.layer.' + k.split(".")[0] + '.attention.self.query.' + k.split(".")[1]
+            updating_query_static[k] = pretrained_static[full_key]
+
+        compress_query_static.update(updating_query_static)
+        self.decoder['compress_query'].load_state_dict(compress_query_static)
+
+        #  read parameters for key from encoder
+        key_static = self.decoder['candidate_key'].state_dict()
+
+        updating_key_static = {}
+        for k in key_static.keys():
+            full_key = 'encoder.layer.' + k.split(".")[0] + '.attention.self.key.' + k.split(".")[1]
+            updating_key_static[k] = pretrained_static[full_key]
+
+        key_static.update(updating_key_static)
+        self.decoder['candidate_key'].load_state_dict(key_static)
+
+        #  read parameters for value from encoder
+        value_static = self.decoder['candidate_value'].state_dict()
+
+        updating_value_static = {}
+        for k in value_static.keys():
+            full_key = 'encoder.layer.' + k.split(".")[0] + '.attention.self.value.' + k.split(".")[1]
+            updating_value_static[k] = pretrained_static[full_key]
+
+        value_static.update(updating_value_static)
+        self.decoder['candidate_value'].load_state_dict(value_static)
+
+    def prepare_candidates(self, input_ids, token_type_ids, attention_mask):
+        """ Pre-compute representations. Return shape: (-1, context_num, context_dim) """
+
+        # reshape and encode candidates, (all_candidate_num, dim)
+        candidate_seq_len = input_ids.shape[-1]
+        input_ids = input_ids.reshape(-1, candidate_seq_len)
+        token_type_ids = token_type_ids.reshape(-1, candidate_seq_len)
+        attention_mask = attention_mask.reshape(-1, candidate_seq_len)
+
+        input_ids, attention_mask, token_type_ids = clean_input_ids(input_ids, attention_mask, token_type_ids)
+
+        out = self.bert_model(input_ids=input_ids, token_type_ids=token_type_ids, attention_mask=attention_mask,
+                              enrich_candidate_by_question=[False]*self.this_bert_config.num_hidden_layers)
+        last_hidden_state = out['last_hidden_state']
+
+        # get (all_candidate_num, context_num, dim)
+        candidate_embeddings = self.composition_layer(last_hidden_state, attention_mask=attention_mask)
+
+        return candidate_embeddings
+
+    def do_queries_match(self, input_ids, token_type_ids, attention_mask, candidate_context_embeddings, **kwargs):
+        """ use pre-compute candidate to get scores."""
+        # used to control ablation
+        no_aggregator = kwargs.get('no_aggregator', False)
+        no_enricher = kwargs.get('no_enricher', False)
+
+        # (query_num (batch_size), candidate_num, context_num, embedding_len)
+        candidate_num = candidate_context_embeddings.shape[1]
+        # reshape to (query_num, candidate_context_num, embedding_len)
+        this_candidate_context_embeddings = candidate_context_embeddings.reshape(candidate_context_embeddings.shape[0],
+                                                                                 -1,
+                                                                                 candidate_context_embeddings.shape[-1])
+
+        lstm_initial_state = torch.zeros(this_candidate_context_embeddings.shape[0], candidate_num, this_candidate_context_embeddings.shape[-1],
+                                         device=this_candidate_context_embeddings.device)
+
+        # (query_num, candidate_context_num + candidate_num, dim)
+        this_candidate_input_embeddings = torch.cat((this_candidate_context_embeddings, lstm_initial_state), dim=1)
+
+        input_ids, attention_mask, token_type_ids = clean_input_ids(input_ids, attention_mask, token_type_ids)
+
+        a_out = self.bert_model(input_ids=input_ids, token_type_ids=token_type_ids, attention_mask=attention_mask,
+                                enrich_candidate_by_question=self.enrich_flag, candidate_embeddings=this_candidate_input_embeddings,
+                                decoder=self.decoder, candidate_num=candidate_num)
+
+        a_last_hidden_state, decoder_output = a_out['last_hidden_state'], a_out['decoder_output']
+
+        # get final representations
+        # control ablation
+        if no_enricher:
+            candidate_embeddings = self.decoder['candidate_composition_layer'](
+                candidate_context_embeddings).squeeze(-2)
+        else:
+            # (query_num, candidate_num, context_num, dim)
+            new_candidate_context_embeddings = decoder_output[:, :-candidate_num, :].reshape(decoder_output.shape[0],
+                                                                                             candidate_num,
+                                                                                             self.context_num,
+                                                                                             decoder_output.shape[-1])
+
+            # (query_num, candidate_num, dim)
+            candidate_embeddings = self.decoder['candidate_composition_layer'](new_candidate_context_embeddings).squeeze(-2)
+
+        if no_aggregator:
+            # (query_num, 1, dim)
+            query_embeddings = a_last_hidden_state[:, 0, :].unsqueeze(1)
+            dot_product = torch.matmul(query_embeddings, candidate_embeddings.permute(0, 2, 1)).squeeze(-2)
+        else:
+            # (query_num, candidate_num, dim)
+            query_embeddings = decoder_output[:, -candidate_num:, :]
+            # (query_num, candidate_num)
+            dot_product = torch.mul(query_embeddings, candidate_embeddings).sum(-1)
+
+        return dot_product
+        
